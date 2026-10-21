@@ -1,0 +1,3 @@
+# Compatibility pin for YAML parsing and existing local tooling.
+# pyproject.toml is authoritative for Jeff runtime dependencies.
+PyYAML==6.0.3

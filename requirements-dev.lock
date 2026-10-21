@@ -1,0 +1,27 @@
+# Resolved development-environment snapshot: CPython 3.12.11, macOS arm64.
+# Includes the shared PyYAML pin via requirements.txt; excludes pip and the local package.
+# Install from the repository root with:
+#   python -m pip install -r requirements-dev.lock -e '.[dev]'
+# Not a hash-verified or cross-platform lock; isolated build tools are not locked.
+-r requirements.txt
+annotated-doc==0.0.5
+annotated-types==0.8.0
+iniconfig==2.3.1
+librt==0.16.0
+markdown-it-py==4.2.0
+mdurl==0.1.2
+mypy==1.20.2
+mypy_extensions==1.1.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.7.0
+pydantic==2.14.1
+pydantic_core==2.50.1
+Pygments==2.21.0
+pytest==9.1.1
+rich==15.0.0
+ruff==0.17.1
+shellingham==1.5.4
+typer==0.27.3
+typing-inspection==0.4.4
+typing_extensions==4.16.0

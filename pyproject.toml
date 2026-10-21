@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77,<83"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jeff"
+version = "0.1.0"
+description = "A local, human-supervised developer assistant (early implementation)."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "typer==0.27.3",
+    "pydantic==2.14.1",
+    "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.17.1",
+    "mypy==1.20.2",
+]
+
+[project.scripts]
+jeff = "jeff.bootstrap.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["jeff*"]
+namespaces = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-config --strict-markers"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests", "scripts"]

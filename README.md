@@ -2,7 +2,7 @@
 
 A local developer assistant for macOS and Linux: one text and hold-to-talk voice control surface for your projects, coding sessions, and development tools.
 
-> **Status: planning / pre-implementation.** This repository currently contains the product design, implementation plan, and project documentation. There is no installable Jeff package, working CLI, daemon, desktop app, or application test suite yet. All implementation milestones are not started.
+> **Status: M01 in progress.** Editable packaging, project registration/configuration inspection, two read-only Git questions, and reproducible demo repositories are implemented with tests/import-boundary checks. The daemon and later product behavior remain unimplemented. No milestone has been accepted.
 
 ## What Jeff is being built to do
 
@@ -36,22 +36,105 @@ The planned implementation is one Python package with a local asyncio daemon, SQ
 | Interfaces | CLI, desktop, voice interaction, and MCP server clients of the application API |
 | Bootstrap | Dependency wiring and lifecycle composition |
 
-Inner layers do not import outer layers. Clients do not bypass policy to execute commands or access storage directly. Python 3.12+, Typer, Pydantic, PySide6, pytest, Ruff, and mypy are planned defaults; dependency versions and platform behavior still need validation.
+Inner layers do not import outer layers. Clients do not execute commands or access storage directly. The current foundation uses Python 3.12+, Typer, Pydantic, PyYAML, pytest, Ruff, and mypy; direct versions are pinned. PySide6 and the daemon/runtime stack remain planned, and broader platform validation is still required.
 
 ## Getting started
 
-There is nothing to install or run yet. The `docs/` directory is kept locally and excluded from Git, so documentation links below are available only in a checkout with those local files; they will not resolve in a fresh clone. Start with:
+From the Jeff source repository root, using Python 3.12+ and an installed system Git:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.lock -e '.[dev]'
+.venv/bin/jeff --help
+.venv/bin/python -m jeff --help
+```
+
+Skip venv creation if you already have the intended `.venv`. Both help entry points exit successfully without project I/O. No arguments displays usage with exit code 2; unimplemented commands such as `start` and `run` are rejected.
+
+### Generate the demo repositories
+
+From the Jeff source root after installation:
+
+```bash
+.venv/bin/python scripts/create_demo_projects.py
+source .venv/bin/activate
+cd examples/sandbox-project
+jeff init --json
+jeff config --json
+jeff status --json
+jeff ask "what branch am I on?"
+jeff ask "what changed?" --json
+```
+
+Generation creates independent ignored `sandbox-project` and `second-project` Git repositories on `main`, each with a deterministic baseline commit, a recognition receipt, and untracked `demo-notes.txt`. It does not initialize Jeff, start services, or touch the parent index/history. Repeated generation preserves all existing work/settings; unrelated or unsafe targets are refused. There is no automatic reset/delete/repair. Use a new `--output-dir` location for a fresh copy instead of discarding work.
+
+The sandbox contains a loopback-first HTTP service (`python service.py --port 0`), a **deliberately failing** pytest fixture (**1 pass, 1 fail, exit 1**), and a Compose definition. No new Python dependencies, secrets, image pulls, or running containers are required to generate it. Loopback service and expected-failure checks passed locally; Compose syntax passed, but Docker lifecycle is not verified. See [examples](examples/README.md) and [script safety/commands](scripts/README.md) for details and explicit single-file restoration guidance.
+
+### Register and inspect a project
+
+Activate the venv from the Jeff source root with `source .venv/bin/activate`, then change to the Git repository you intend to register. Run:
+
+```bash
+jeff init --json
+jeff config --json
+jeff status --json
+```
+
+Init creates a stable project ID and canonical root in private `jeff.local.yaml`, and appends `/jeff.local.yaml` and `/.jeff/` ignore rules without discarding existing rules. Running from a subdirectory targets the same repository. Repeated init preserves identity, configuration contents, and unrelated settings.
+
+Config and status are read-only and expose **identity fields only**, not arbitrary settings, branch information, daemon status, or process health. Unregistered repositories return an actionable error; inspection never initializes them implicitly.
+
+Success exits 0 with `{ok: true, data, error: null}`. Data includes `project_id`, `root`, `config_path`, `registered`, and `created`. Recognized command failures exit 1 with `{ok: false, data: null, error: {code, message}}`. Without `--json`, errors go to stderr. CLI syntax/unknown-command errors use Typer's usage output and exit 2.
+
+Initialization rejects malformed/unsupported configuration, unsafe links/special files, tracked private configuration, and mismatched stored roots. Moved-project rebind is not implemented; Jeff will not silently replace the ID. Config creation is atomic and refuses overwrite, but ignore/config changes are **not a cross-file transaction**: a failed config write can leave added ignore rules, which the error reports. Static checks and these safe storage operations are not an OS execution sandbox.
+
+### Ask a read-only Git question
+
+Inside an initialized target repository:
+
+```bash
+jeff ask "what branch am I on?"
+jeff ask "what changed?" --json
+```
+
+Both questions accept `--json`, case/whitespace normalization, and an optional final question mark. Matching is deterministic with no model calls. Unsupported questions return `unsupported_intent` without echoing the input or invoking Git. Unregistered projects return an error; questions never initialize them.
+
+Branch answers report the observed name/commit, detached HEAD, or an unborn branch. Change answers report visible staged/unstaged/untracked, renamed, and conflicted metadata—never file contents or raw diffs. Results identify the registered project/root and UTC observation time. Queries do not stage, commit, fetch, or update the index.
+
+**Filtered scope:** protected paths are excluded before Git status and checked again before rendering. This includes environment-family paths (even `.env.example`), private Jeff state, credential/secret names/directories, and common key-file patterns. `.env.example` remains Git-trackable; this metadata policy does not change ignore rules. Submodule contents are excluded. Changes return `complete: false`, `visible_clean`, and explicit exclusion flags; “no visible changes” is not a claim of a fully clean repository. `filtered_records` counts only additional parsed records withheld, not all paths excluded before the query. Path-name rules are conservative heuristics, not content-based secret detection.
+
+Filenames and branch names use reversible JSON string-body escaping (`metadata_encoding: json_escaped`), including controls, backslashes, non-ASCII, and invalid UTF-8 filename bytes. Canonical roots remain normal JSON strings; terminal rendering escapes them too. Jeff does not open source files; Git internally computes metadata for included paths.
+
+Each Git invocation has a five-second timeout and a 1 MiB combined stdout/stderr cap; changes are capped at 10,000 records. Limit/time/failure errors return no partial success. Git transports/lazy fetching and hooks/fsmonitor are disabled, and no credentials are forwarded. Repositories with clean/process filter configuration return `git_filters_unsupported` for change questions: executing those commands is unsafe, while disabling them could misreport changes. Branch queries disable the discovered filters. This is not a general OS sandbox or a fully atomic repository snapshot.
+
+Validated locally on macOS 27.0.1 arm64 with CPython 3.12.11. Linux, other Python versions, a fresh-machine installation, and non-editable release artifacts have not been verified.
+
+The `docs/` directory is kept locally and excluded from Git, so documentation links below are available only in a checkout with those local files; they will not resolve in a fresh clone. Start with:
 
 1. [Documentation index](docs/README.md) — where to find each source of truth.
 2. [Product design](docs/jeff-design.md) — required behavior and boundaries.
 3. [Implementation plan](docs/jeff-implementation-plan.md) — M01–M17 and acceptance scenarios.
 4. [Progress tracker](docs/jeff-progress.md) — actual status, evidence, and next step.
 
-The next implementation slice is **M01: install Jeff and ask a real project question**. Commands shown in the implementation plan describe the future CLI contract; they are not currently runnable Jeff instructions. Installation and development commands will be added here when packaging and tests exist and have been verified.
+Within **M01: install Jeff and ask a real project question**, help, `init`, `config`, registration-only `status`, and the two `ask` questions now work locally. Demo generation and local fixture checks are also implemented. Technical probes, CI, and required platform acceptance remain pending. Other implementation-plan commands remain future contracts.
+
+## Development checks
+
+```bash
+.venv/bin/python -m pytest tests/unit tests/architecture tests/integration tests/acceptance -q
+.venv/bin/python -m ruff check src tests scripts
+.venv/bin/python -m ruff format --check src tests scripts
+.venv/bin/python -m mypy src tests scripts
+.venv/bin/python -m pip check
+```
+
+`pyproject.toml` owns runtime/dev requirements and tool settings. Direct dependencies are pinned to the locally tested versions. PyYAML 6.0.3 parses bounded private project configuration through the filesystem adapter. `requirements.txt` retains the same pin for compatibility with existing local tooling. `requirements-dev.lock` snapshots resolved dependencies for this macOS/Python environment; it is not hash-verified, does not lock isolated build tools, and has not been validated cross-platform.
+
+Pydantic validates the public application result contracts. Static AST architecture checks enforce tier imports and selected client restrictions, including negative test cases. They do not sandbox execution or detect dynamic imports.
 
 ## Configuration and secrets
 
-The design reserves ignored `jeff.local.yaml` for private project configuration and `.jeff/` for project runtime files. Credentials must use supported credential-store or explicitly selected environment-variable references, not committed values.
+`jeff.local.yaml` stores `schema_version: 1` and a `project` mapping with generated UUID `id` and canonical absolute `root`. Init creates the file with mode 0600 and never rewrites existing valid settings. `.jeff/` is reserved and ignored for future runtime files; this slice does not create it. Configuration reads are limited to 64 KiB; unsupported YAML tags, anchors/aliases, excessive nesting, and invalid identities are rejected. Credentials must use supported credential-store or explicitly selected environment-variable references, not committed values.
 
 `.env` and `.env.*` are ignored, **except `.env.example`**, which is an empty, committed starting point for a future placeholder-only configuration template. No environment-variable contract exists yet; environment loading is not implemented. Never put real credentials in an example file.
 
