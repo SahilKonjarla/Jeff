@@ -1,0 +1,55 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python caches, test results, and local tooling caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+
+# Secrets: keep the documented, placeholder-only example trackable
+.env
+.env.*
+!.env.example
+
+# Jeff private project configuration and runtime state
+/jeff.local.yaml
+/.jeff/
+
+# Generated standalone demo repositories
+/examples/sandbox-project/
+/examples/second-project/
+
+# Local documentation
+/docs/
+
+# Local agent toolkit, configuration, skills, and work artifacts
+/.gitmodules
+/agent-toolkit/
+/.agents/
+/.agent-config/
+/.agent-work/
+/agent-project.yaml
+/AGENTS.md
+/CLAUDE.md
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
