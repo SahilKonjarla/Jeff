@@ -2,7 +2,7 @@
 
 A local developer assistant for macOS and Linux: one text and hold-to-talk voice control surface for your projects, coding sessions, and development tools.
 
-> **Status: M01 macOS implementation verified; manual acceptance pending.** Packaging, project registration/configuration inspection, two read-only Git questions, and reproducible demos work locally. Clean-environment tests and bounded technical probes passed. Linux verification is deferred; hosted CI is user-owned. The daemon and later product behavior remain unimplemented.
+> **Status: M01 macOS automated and manual checks passed; formal handoff pending.** Packaging, project registration/configuration inspection, two read-only Git questions, and reproducible demos work locally. Clean-environment tests and bounded technical probes passed, and the supplied test-branch transcript matched the manual checklist. Linux validation is deferred; no hosted CI run is claimed. Daemon and later product behavior remain unimplemented.
 
 ## What Jeff is being built to do
 
@@ -40,7 +40,7 @@ Inner layers do not import outer layers. Clients do not execute commands or acce
 
 ## Getting started
 
-After cloning or opening this repository, run the following from the **Jeff source root** in a macOS/Linux bash or zsh terminal. You need Python **3.12+** and a working system Git (`git --version`). Current CLI validation is limited to macOS with Python 3.12.11; Linux/fresh-machine verification is still pending.
+After cloning or opening this repository, run the following from the **Jeff source root** in a macOS/Linux bash or zsh terminal. You need Python **3.12+** and a working system Git (`git --version`; on macOS, `/usr/bin/git --version` avoids an incompatible non-system Git). Current CLI validation is limited to macOS with Python 3.12.11; Linux/fresh-machine verification is still pending.
 
 ### 1. Create and activate the virtual environment
 
@@ -171,13 +171,15 @@ The `docs/` directory is kept locally and excluded from Git, so documentation li
 3. [Implementation plan](docs/jeff-implementation-plan.md) — M01–M17 and acceptance scenarios.
 4. [Progress tracker](docs/jeff-progress.md) — actual status, evidence, and next step.
 
-Within **M01: install Jeff and ask a real project question**, help, `init`, `config`, registration-only `status`, and the two `ask` questions now work locally. Demo generation and local fixture checks are also implemented. Bounded technical probes and clean-environment CLI checks have macOS evidence. Technical choices and an architecture map are recorded locally; the manual checklist below is the remaining user acceptance step. Hosted CI is handed off to the user rather than claimed as passed. Linux validation is explicitly deferred, not removed from product scope. Other implementation-plan commands remain future contracts.
+Within **M01: install Jeff and ask a real project question**, help, `init`, `config`, registration-only `status`, and the two `ask` questions now work locally. Demo generation and local fixture checks are also implemented. Bounded technical probes and clean-environment CLI checks have macOS evidence. Technical choices and an architecture map are recorded locally. The supplied manual test-branch transcript passed the checklist below; formal milestone acceptance and the M02 handoff still require human approval. CI execution is a separate choice, not a claimed hosted success. Linux validation is explicitly deferred, not removed from product scope. Other implementation-plan commands remain future contracts.
 
 ## Manual M01 acceptance on your test repository
 
 Install Jeff and activate its venv using Getting started above, then change to your **already prepared test repository/branch**. Jeff registration belongs to the repository root, not a branch; do not copy `jeff.local.yaml` between clones. Init writes private registration and ignore rules, so use a disposable/test checkout rather than an unrelated working project.
 
 ### 1. Help and registration
+
+`init` is a Jeff subcommand: run `jeff init`, not bare `init` in the shell.
 
 ```bash
 jeff --help
@@ -246,11 +248,20 @@ From the Jeff source root. Any custom `TMPDIR` or pytest `--basetemp` must be ou
 
 Pydantic validates the public application result contracts. Static AST architecture checks enforce tier imports and selected client restrictions, including negative test cases. They do not sandbox execution or detect dynamic imports.
 
-## macOS CI
+## Local checks and CI options
 
-A local draft at `.github/workflows/ci.yml` covers Python 3.12.11/macOS arm64 installation, pytest, Ruff, mypy and dependency checks, with pinned official actions and an outside-Git test-temp preflight. It does not download AI models, open audio devices or publish releases.
+The Development checks above run natively on your Mac; GitHub-managed compute is not required to execute them. A local passing run is not a hosted CI result. There is no new single-command runner, Docker validation image or self-hosted runner setup shipped in M01.
 
-**Handoff:** the workflow is deliberately **not included in this README-only publication**; the user will manage CI separately. No hosted run is claimed. `.github/` remains trackable because workflows are normally shared source configuration, not private runtime state. Linux validation remains explicitly deferred, not removed from product scope.
+A macOS GitHub Actions draft was prepared and locally validated in the original development checkout. It is not published by this documentation update and need not exist in a fresh clone or the testing checkout. It covers installation, pytest, Ruff, mypy and dependency consistency, not models, audio, desktop or deployment. `.github/` normally stays trackable; private runtime data does not belong there.
+
+Execution choices remain explicit:
+
+- **Native Mac:** use the existing development commands; this is the current recorded automated evidence.
+- **Docker on Mac:** a Linux container can provide additional Linux CLI checks, not native macOS GUI/shortcut/permission validation. No image pull/container run is authorized merely by discussing it.
+- **Self-hosted runner:** GitHub dispatches jobs to your machine; registration, untrusted-PR security and current pricing need separate review. None is registered here.
+- **GitHub-hosted runner:** uses GitHub-managed compute/quota; no job is enabled or run by keeping a draft locally. A testing branch isolates code changes, not runner type or billing.
+
+Use `testing/jeff-test` for testing changes without advancing `main`. Creating a branch alone does not publish or enable a workflow; trigger configuration and explicit publication/dispatch matter. Linux validation remains deferred, not removed from product scope.
 
 ## Configuration and secrets
 
