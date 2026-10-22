@@ -2,7 +2,7 @@
 
 A local developer assistant for macOS and Linux: one text and hold-to-talk voice control surface for your projects, coding sessions, and development tools.
 
-> **Status: M01 in progress.** Editable packaging, project registration/configuration inspection, two read-only Git questions, and reproducible demo repositories are implemented with tests/import-boundary checks. The daemon and later product behavior remain unimplemented. No milestone has been accepted.
+> **Status: M01 macOS implementation verified; manual acceptance pending.** Packaging, project registration/configuration inspection, two read-only Git questions, and reproducible demos work locally. Clean-environment tests and bounded technical probes passed. Linux verification is deferred; hosted CI is user-owned. The daemon and later product behavior remain unimplemented.
 
 ## What Jeff is being built to do
 
@@ -40,16 +40,71 @@ Inner layers do not import outer layers. Clients do not execute commands or acce
 
 ## Getting started
 
-From the Jeff source repository root, using Python 3.12+ and an installed system Git:
+After cloning or opening this repository, run the following from the **Jeff source root** in a macOS/Linux bash or zsh terminal. You need Python **3.12+** and a working system Git (`git --version`). Current CLI validation is limited to macOS with Python 3.12.11; Linux/fresh-machine verification is still pending.
+
+### 1. Create and activate the virtual environment
 
 ```bash
+python3 --version  # Must be 3.12 or newer; use python3.12 below if needed.
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-dev.lock -e '.[dev]'
-.venv/bin/jeff --help
-.venv/bin/python -m jeff --help
+source .venv/bin/activate
 ```
 
-Skip venv creation if you already have the intended `.venv`. Both help entry points exit successfully without project I/O. No arguments displays usage with exit code 2; unimplemented commands such as `start` and `run` are rejected.
+Skip creation if you already have the intended `.venv`; just activate it. Activation makes `python`, `pip`, and the installed `jeff` command use this environment. It applies only to the current terminal.
+
+### 2. Download dependencies and install Jeff
+
+For CLI use:
+
+```bash
+python -m pip install -e .
+```
+
+This downloads the runtime requirements from `pyproject.toml` and installs Jeff in editable mode, so source edits are reflected without reinstalling. **`requirements.txt` alone is not enough**: it contains only the compatibility PyYAML pin, not the complete CLI installation.
+
+For development, including pytest, Ruff, and mypy, use this instead:
+
+```bash
+python -m pip install -r requirements-dev.lock -e '.[dev]'
+```
+
+The lock snapshot is from the tested macOS/Python environment, not a verified cross-platform lock. To resolve development dependencies without that snapshot, use `python -m pip install -e '.[dev]'`; that alternative has not been validated across platforms.
+
+### 3. Run the CLI
+
+```bash
+jeff --help
+python -m jeff --help
+```
+
+Both help entry points exit successfully without project I/O. No arguments displays usage with exit code 2; unimplemented commands such as `start` and `run` are rejected. There is no daemon or desktop app to start yet.
+
+To use an existing project, **activate Jeff's venv before changing directories**, then replace the example path below with your target Git repository:
+
+```bash
+cd /path/to/your/project
+jeff init --json
+jeff config --json
+jeff status --json
+jeff ask "what branch am I on?"
+jeff ask "what changed?" --json
+```
+
+`init` writes private project registration and adds local-state ignore rules in that target repository; the other commands shown are read-only. To try an isolated demo instead, follow the next section.
+
+### Resume later or leave the environment
+
+In a new terminal, return to the Jeff source root and run `source .venv/bin/activate` again; you do not need to recreate the venv or reinstall unchanged requirements. Then change to your registered project and run `jeff` commands.
+
+Without activation, run `.venv/bin/jeff --help` or `.venv/bin/python -m jeff --help` from the Jeff source root. From another directory, use the absolute path to Jeff's `.venv/bin/jeff`.
+
+When finished:
+
+```bash
+deactivate
+```
+
+Deactivation only restores your terminal's previous environment; it does not delete the venv or project registration.
 
 ### Generate the demo repositories
 
@@ -107,7 +162,7 @@ Filenames and branch names use reversible JSON string-body escaping (`metadata_e
 
 Each Git invocation has a five-second timeout and a 1 MiB combined stdout/stderr cap; changes are capped at 10,000 records. Limit/time/failure errors return no partial success. Git transports/lazy fetching and hooks/fsmonitor are disabled, and no credentials are forwarded. Repositories with clean/process filter configuration return `git_filters_unsupported` for change questions: executing those commands is unsafe, while disabling them could misreport changes. Branch queries disable the discovered filters. This is not a general OS sandbox or a fully atomic repository snapshot.
 
-Validated locally on macOS 27.0.1 arm64 with CPython 3.12.11. Linux, other Python versions, a fresh-machine installation, and non-editable release artifacts have not been verified.
+Validated locally on macOS 27.0.1 arm64 with CPython 3.12.11, including a non-editable wheel in new build/application venvs: 126 tests, lint/format/type/dependency checks, and the installed CLI scenario passed. This is not a fresh OS or published release test. Linux and other Python versions remain unverified.
 
 The `docs/` directory is kept locally and excluded from Git, so documentation links below are available only in a checkout with those local files; they will not resolve in a fresh clone. Start with:
 
@@ -116,9 +171,68 @@ The `docs/` directory is kept locally and excluded from Git, so documentation li
 3. [Implementation plan](docs/jeff-implementation-plan.md) — M01–M17 and acceptance scenarios.
 4. [Progress tracker](docs/jeff-progress.md) — actual status, evidence, and next step.
 
-Within **M01: install Jeff and ask a real project question**, help, `init`, `config`, registration-only `status`, and the two `ask` questions now work locally. Demo generation and local fixture checks are also implemented. Technical probes, CI, and required platform acceptance remain pending. Other implementation-plan commands remain future contracts.
+Within **M01: install Jeff and ask a real project question**, help, `init`, `config`, registration-only `status`, and the two `ask` questions now work locally. Demo generation and local fixture checks are also implemented. Bounded technical probes and clean-environment CLI checks have macOS evidence. Technical choices and an architecture map are recorded locally; the manual checklist below is the remaining user acceptance step. Hosted CI is handed off to the user rather than claimed as passed. Linux validation is explicitly deferred, not removed from product scope. Other implementation-plan commands remain future contracts.
+
+## Manual M01 acceptance on your test repository
+
+Install Jeff and activate its venv using Getting started above, then change to your **already prepared test repository/branch**. Jeff registration belongs to the repository root, not a branch; do not copy `jeff.local.yaml` between clones. Init writes private registration and ignore rules, so use a disposable/test checkout rather than an unrelated working project.
+
+### 1. Help and registration
+
+```bash
+jeff --help
+python -m jeff --help
+jeff init --json
+jeff config --json
+jeff status --json
+jeff init --json
+```
+
+Expect exit 0, valid JSON, the correct canonical root, and the **same `project_id`** throughout. The second init reports `created: false` and preserves existing settings. If the repository was already registered, the first init also reports false; do not delete its configuration to force a fresh result. `status` reports registration, not daemon/process health.
+
+### 2. Real branch and change answers
+
+On macOS, use system Git for the reference branch (some existing non-system Git binaries may be incompatible with the machine):
+
+```bash
+/usr/bin/git branch --show-current
+jeff ask "what branch am I on?" --json
+jeff ask "what changed?" --json
+```
+
+Expect the actual branch, or an explicit detached/unborn state where applicable. Change results include visible metadata, `complete: false` and exclusion flags—not file contents, raw diffs, or a claim that the entire repo is clean.
+
+Create one unique synthetic file without overwriting existing work:
+
+```bash
+probe_file="$(mktemp ./jeff-m01-check.XXXXXX)" &&
+  printf 'Synthetic M01 check\n' > "$probe_file"
+jeff ask "what changed?" --json
+```
+
+Expect that filename as untracked, unless your test repository deliberately ignores it. You can also make a known edit/stage it using your own usual tools and compare the reported state. Jeff's questions do not stage, commit, fetch or update the index. Optional cleanup removes **only** the synthetic file you just created:
+
+```bash
+rm -- "$probe_file"
+```
+
+### 3. Safe failures
+
+These commands intentionally return exit **1**; run interactively or handle that expected status in scripts:
+
+```bash
+jeff ask "unsupported M01 test" --json
+outside="$(mktemp -d /private/tmp/jeff-m01-manual.XXXXXX)"
+(cd "$outside" && jeff status --json)
+```
+
+Expect `unsupported_intent` for the first and `not_a_repository` for the second. The outside-repository check is read-only and must use a genuinely outside-Git directory, not a folder nested under Jeff or your test repository. Optional `rmdir -- "$outside"` removes only that empty temporary directory. Before initializing an unregistered test repository, `jeff status --json` should instead report `project_not_initialized`; skip that case if already registered, rather than deleting state.
+
+**Report back:** whether help, stable identity/repeat init, actual branch, visible file changes and both safe failures behaved as expected. These confirm the manual M01 CLI acceptance. Daemon, desktop and microphone/model integration are later milestones; the feasibility probes are not shipped voice features. No credentials or `.env` setup are needed.
 
 ## Development checks
+
+From the Jeff source root. Any custom `TMPDIR` or pytest `--basetemp` must be outside Git repositories: ignored scratch inside a checkout still inherits its Git ancestors.
 
 ```bash
 .venv/bin/python -m pytest tests/unit tests/architecture tests/integration tests/acceptance -q
@@ -131,6 +245,12 @@ Within **M01: install Jeff and ask a real project question**, help, `init`, `con
 `pyproject.toml` owns runtime/dev requirements and tool settings. Direct dependencies are pinned to the locally tested versions. PyYAML 6.0.3 parses bounded private project configuration through the filesystem adapter. `requirements.txt` retains the same pin for compatibility with existing local tooling. `requirements-dev.lock` snapshots resolved dependencies for this macOS/Python environment; it is not hash-verified, does not lock isolated build tools, and has not been validated cross-platform.
 
 Pydantic validates the public application result contracts. Static AST architecture checks enforce tier imports and selected client restrictions, including negative test cases. They do not sandbox execution or detect dynamic imports.
+
+## macOS CI
+
+A local draft at `.github/workflows/ci.yml` covers Python 3.12.11/macOS arm64 installation, pytest, Ruff, mypy and dependency checks, with pinned official actions and an outside-Git test-temp preflight. It does not download AI models, open audio devices or publish releases.
+
+**Handoff:** the workflow is deliberately **not included in this README-only publication**; the user will manage CI separately. No hosted run is claimed. `.github/` remains trackable because workflows are normally shared source configuration, not private runtime state. Linux validation remains explicitly deferred, not removed from product scope.
 
 ## Configuration and secrets
 
