@@ -1,6 +1,6 @@
 # Application — tier 1
 
-**Status:** M01 project identity and deterministic branch/change questions implemented. No daemon, arbitrary execution, or approval system yet.
+**Status:** M01 project/Git use cases and M02 runtime/control contracts implemented. Actual internal control lifecycle exists in adapters; public CLI routing, storage readiness, arbitrary execution and approvals remain later work.
 
 **Ownership:** `projects.py` contains `ProjectService`, discovery/storage protocols, and Pydantic result contracts. Filesystem operations, YAML, Git subprocesses, and presentation belong elsewhere.
 
@@ -34,6 +34,20 @@ Changes intentionally report `complete: false`, `visible_clean`, protected-path/
 
 **Configuration/security:** adapters own schema/file formats. The application requires stable project targeting and never silently rebinds moved projects. This slice exposes narrow registration behavior, not a general action approval/execution system.
 
-**Owning milestone:** M01. [Unit tests](../../../tests/unit/test_projects.py) use controlled ports; real storage/discovery and installed checks are under [integration](../../../tests/integration/README.md) and [acceptance](../../../tests/acceptance/README.md).
+## Runtime contracts — M02 slice 1
+
+`runtime.py` owns frozen, extra-forbidden `RuntimeIdentityData`, `RuntimeStatusData`, `RuntimeLayout`, `PathObservation` and `RuntimePathInspection`. Status validates identity/state coherence and uses allowlisted issue codes for unknown/unhealthy observations. Inspection contains exactly seven unique roles: two directories plus database/settings/credential/socket/lock. Missing/present have no issue; unsafe/unknown require one. No credential body or arbitrary reason field exists. Human-readable validation hides input values; callers must still never forward raw validation exceptions or `.errors()` data as public results.
+
+`RuntimePathInputs` carries trusted explicit platform/home/temp/UID values and independent optional `data_dir`/`runtime_dir` strings. The pure contracts do not read the environment. The internal slice-2 bootstrap now selects these fields from `JEFF_DATA_DIR`/`JEFF_RUNTIME_DIR`; public CLI behavior remains unchanged. `RuntimeLayout` derives fixed filenames from its roots. The expected UID is trusted host input, not client-selected authority.
+
+`PROTOCOL_REVISION = 1` and `DEFAULT_RUNTIME_LIMITS` declare the reviewed framing/admission/deadline/history budgets; they implement no codec, deadline, readiness or authentication. Mac preflight constants reserve terminators: socket 103 bytes, pathname 1023 bytes, component 255 bytes. Linux selection/verification is deferred. See [contract tests](../../../tests/unit/test_runtime_contracts.py) and [path tests](../../../tests/unit/test_runtime_paths.py).
+
+## Authenticated control contracts — M02 slice 2
+
+`RuntimeControl.start/status/stop() -> ControlSuccess | Failure` binds one installation. `ControlObservation` separates process/control readiness from `application_ready: false` and `storage_check: not_performed`; it never invents schema compatibility. Unknown outcomes are fixed-code failures, not guessed stopped results. `ControlFault`/`control_failure` map allowlisted descriptions without raw exceptions or frames.
+
+`AuthRequest` masks its credential in repr and validates fixed-format input; it is internal transport data, never a public result. `AuthAccepted`, `ControlRequest` and `ControlResponse` are strict typed control messages, with protocol/request metadata separate from M01 JSON bodies. Only hello/status/targeted stop exist; no project dispatcher or durable replay/history claim. Adapters must enforce actual framing/auth/deadlines; model construction alone confers no authority. See [codec tests](../../../tests/unit/test_runtime_control_protocol.py).
+
+**Owning milestones:** M01 and M02 control foundation. [Unit tests](../../../tests/unit/test_projects.py) use controlled ports; real storage/discovery and installed checks are under [integration](../../../tests/integration/README.md) and [acceptance](../../../tests/acceptance/README.md).
 
 Run `.venv/bin/python -m pytest tests/unit tests/integration tests/acceptance -q` after [installation](../../../README.md). Extend with typed use cases and ports when the next real behavior needs them. See [package map](../README.md).

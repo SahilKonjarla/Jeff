@@ -1,6 +1,6 @@
 # Bootstrap — composition root
 
-**Status:** M01 CLI/discovery/configuration/question wiring implemented; daemon lifecycle and other adapters remain unimplemented.
+**Status:** M01 public CLI wiring and M02 internal authenticated control-child composition implemented. Public lifecycle commands and application/storage readiness remain unimplemented.
 
 **Ownership:** `main.py` constructs `ProjectService(GitProjectDiscovery(), FileProjectStore())` and `QuestionService(projects, GitRepositoryRead())`, then passes both to `create_app`. It contains no project rules, storage implementation, policy decisions, or provider logic.
 
@@ -21,6 +21,12 @@ Both use the same service/adapters. Constructing them performs no project I/O; h
 
 **Configuration/security:** the file adapter owns private schema/storage; Git discovery owns its narrow subprocess environment. Bootstrap must preserve those responsibilities and never become an alternate authorization path.
 
-**Owning milestones:** M01 local composition; M02 later adds daemon state/lifecycle. [Installed tests](../../../tests/acceptance/README.md) exercise public entry points outside the source repository; [architecture checks](../../../tests/architecture/README.md) reject inward bootstrap imports.
+## Internal control composition — M02 slice 2
+
+`runtime.create_runtime_controller() -> RuntimeControl` reads the two documented directory overrides plus trusted host metadata only when called. It constructs an installation-bound controller, not an alternate public CLI path. With both overrides it skips home/temp lookup. Otherwise standard Darwin TMPDIR metadata (canonical /private/tmp when unset) selects the temp base without tempfile.gettempdir's write probes; explicit startup performs actual path validation/creation. `runtime.main()` is the internal child entry point used with a validated inherited lifetime-lock FD and non-secret instance UUID. It refuses invalid descriptors before state access, adopts real ownership, applies a restrictive child umask, then runs authenticated control IPC. No credential argv/environment, user-state scan, SQLite/settings creation, project dispatcher or autostart.
+
+The child retains its raw lock descriptor until kernel process exit. `application_ready` remains false and storage is not checked. Do not invoke this entry manually against default user paths or treat it as `jeff start`; public CLI wiring remains unchanged until the storage gate. [Installed tests](../../../tests/acceptance/test_installed_runtime_control.py) demonstrate parent/child installation identity, survival after launcher exit and authenticated shutdown from another caller.
+
+**Owning milestones:** M01 local composition and M02 internal control lifecycle. [Installed tests](../../../tests/acceptance/README.md) exercise public entry points outside the source repository; [architecture checks](../../../tests/architecture/README.md) reject inward bootstrap imports.
 
 Run `.venv/bin/python -m pytest tests/acceptance tests/architecture -q` from the root after installation. Add explicit wiring only when a real adapter exists. Full daemon lifecycle/recovery and cross-platform acceptance remain pending. See [package map](../README.md).

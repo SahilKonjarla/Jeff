@@ -1,13 +1,18 @@
 # Unit tests
 
-**Status:** M01 CLI, domain identity, and application use-case tests implemented.
+**Status:** M01 CLI/domain/application tests and M02 runtime/control contracts, pure paths and strict codec tests implemented.
 
 - [test_demo_safety.py](test_demo_safety.py): generator preflight/refusal, symlinks/traversal/markers, no writes or Git on preserved repos, missing Git, partial-state refusal, and prevention of parent-repository Git fallback.
 - [test_cli.py](test_cli.py): help/no-argument behavior, unavailable commands, and help without adapter calls or files.
 - [test_questions.py](test_questions.py): deterministic routing, unsupported input without Git access/echo, registered targeting/time, protected origin/destination filtering, and safe terminal metadata.
 - [test_projects.py](test_projects.py): absolute roots, stable repeat initialization, inspection without implicit registration, and mismatched roots from a controlled port.
 
-**Dependencies:** pytest, Typer test runner, Pydantic result contracts, domain/application/interfaces. Controlled discovery/storage doubles exercise the same public interface as adapters without invoking Git or storage. Real filesystem/process checks belong under integration/acceptance.
+- [test_runtime_contracts.py](test_runtime_contracts.py): immutable identity/state invariants, strict safe result construction/serialization, fixed inspection roles and protocol/limit declarations; no process ownership claim.
+- [test_runtime_paths.py](test_runtime_paths.py): injected Mac defaults, independent overrides, no cwd/environment fallback, safe invalid-input failures, known system aliases, byte-length bounds and honest unverified-platform refusal. Resolver tests perform no installation I/O.
+
+- [test_runtime_control_protocol.py](test_runtime_control_protocol.py): strict framed control requests, duplicate keys/non-finite/UTF-8/version/type/nesting rejection, length limits before body receive, truncated frames and bounded output. Socketpair cases use owned descriptors only.
+
+**Dependencies:** pytest, Typer test runner, Pydantic result contracts, domain/application/interfaces, pure path selection and control codec. Controlled discovery/storage doubles exercise the same public interface as adapters without invoking Git or storage. Real filesystem/process checks belong under integration/acceptance.
 
 From the repository root after [installation](../../README.md):
 
@@ -15,4 +20,4 @@ From the repository root after [installation](../../README.md):
 .venv/bin/python -m pytest tests/unit -q
 ```
 
-**Owning milestone:** M01, not yet accepted. No daemon, approvals, jobs, or provider behavior is implemented/tested; read-only Git-question rules are covered. Fixtures contain only synthetic data, no credentials or environment files. Extend through real public contracts rather than test-only execution paths. See [test map](../README.md).
+**Owning milestones:** M01 (formal acceptance separate) and M02 foundation only. Real control lifecycle is tested separately under integration/acceptance. Unit contracts/codec alone prove no runtime ownership/readiness. Approvals/jobs/providers remain unimplemented. Read-only Git-question rules remain covered. Fixtures contain only synthetic data, no credentials or environment files. Extend through real public contracts rather than test-only execution paths. See [test map](../README.md).
