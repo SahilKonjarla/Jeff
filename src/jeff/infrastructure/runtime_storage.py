@@ -15,8 +15,18 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from jeff.application.history import (
+    ACTIVITY_EVENT_LIMIT,
+    ActivityEvent,
+    ActivityMeta,
+    ActivityPage,
+    ActivityRecord,
+    ActivityTrace,
+    ReplayScope,
+    activity_code,
+)
 from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS, ControlFault
 from jeff.application.storage import (
     DATABASE_APPLICATION_ID,
@@ -58,6 +68,41 @@ _RECEIPT_INDEX = "CREATE INDEX receipts_unfinished ON request_receipts(state,own
 _COLUMNS = (
     "request_id,owner_instance_id,operation,canonical_root,project_id,"
     "state,accepted_at_ms,finished_at_ms,outcome_code"
+)
+_ACTIVITY_META = (
+    "CREATE TABLE activity_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+    "epoch TEXT NOT NULL, "
+    "coverage_started_at_ms INTEGER NOT NULL CHECK(coverage_started_at_ms>=0), "
+    "high_water INTEGER NOT NULL CHECK(high_water>=0), "
+    "generation INTEGER NOT NULL CHECK(generation>=0))"
+)
+_ACTIVITY_REQUESTS = (
+    "CREATE TABLE activity_requests ("
+    "request_id TEXT PRIMARY KEY REFERENCES request_receipts(request_id), "
+    "canonical_root TEXT NOT NULL, project_id TEXT, accepted_sequence INTEGER NOT NULL UNIQUE)"
+)
+_ACTIVITY_EVENTS = (
+    "CREATE TABLE activity_events (event_id INTEGER PRIMARY KEY, "
+    "request_id TEXT NOT NULL REFERENCES request_receipts(request_id), "
+    "owner_instance_id TEXT NOT NULL, "
+    "canonical_root TEXT NOT NULL, project_id TEXT, scope_project_id TEXT, kind TEXT NOT NULL, "
+    "recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms>=0), code TEXT, git_category TEXT, "
+    "elapsed_ms INTEGER, output_bytes INTEGER, git_started INTEGER CHECK(git_started IN (0,1)), "
+    "registration_created INTEGER CHECK(registration_created IN (0,1)))"
+)
+_ACTIVITY_INDEXES = {
+    "activity_trace": "CREATE INDEX activity_trace ON activity_events(request_id,event_id)",
+    "activity_replay": (
+        "CREATE INDEX activity_replay ON activity_events(scope_project_id,canonical_root,event_id)"
+    ),
+    "activity_history": (
+        "CREATE INDEX activity_history "
+        "ON activity_requests(project_id,canonical_root,accepted_sequence)"
+    ),
+}
+_EVENT_COLUMNS = (
+    "event_id,request_id,owner_instance_id,canonical_root,project_id,kind,recorded_at_ms,"
+    "code,git_category,elapsed_ms,output_bytes,git_started,registration_created"
 )
 _SIDECARS = ("state.sqlite3-journal", "state.sqlite3-wal", "state.sqlite3-shm")
 _FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -107,7 +152,7 @@ def _schema(connection: sqlite3.Connection) -> int:
     if connection.execute("PRAGMA application_id").fetchone() != (DATABASE_APPLICATION_ID,):
         raise StorageFault("storage_unrecognized")
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version not in (0, 1, DATABASE_SCHEMA):
+    if version not in (0, 1, 2, DATABASE_SCHEMA):
         raise StorageFault("storage_schema_unsupported")
     if connection.execute("PRAGMA journal_mode").fetchone() != ("delete",):
         raise StorageFault("storage_recovery_required")
@@ -117,8 +162,17 @@ def _schema(connection: sqlite3.Connection) -> int:
     if version >= 2:
         expected["request_receipts"] = ("table", _RECEIPTS)
         expected["receipts_unfinished"] = ("index", _RECEIPT_INDEX)
+    if version >= 3:
+        expected.update(
+            {
+                "activity_meta": ("table", _ACTIVITY_META),
+                "activity_requests": ("table", _ACTIVITY_REQUESTS),
+                "activity_events": ("table", _ACTIVITY_EVENTS),
+            }
+        )
+        expected.update({name: ("index", sql) for name, sql in _ACTIVITY_INDEXES.items()})
     found = connection.execute(
-        "SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT 5"
+        "SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT 11"
     ).fetchall()
 
     def normalize(text: object) -> str:
@@ -132,11 +186,11 @@ def _schema(connection: sqlite3.Connection) -> int:
     ):
         raise StorageFault("storage_schema_unsupported")
     ledger = connection.execute(
-        "SELECT version,name FROM schema_migrations ORDER BY version LIMIT 3"
+        "SELECT version,name FROM schema_migrations ORDER BY version LIMIT 4"
     ).fetchall()
     if ledger != [
         (number, name)
-        for number, name in ((1, "registry_v1"), (2, "request_receipts_v2"))
+        for number, name in ((1, "registry_v1"), (2, "request_receipts_v2"), (3, "activity_v3"))
         if number <= version
     ]:
         raise StorageFault("storage_schema_unsupported")
@@ -145,8 +199,26 @@ def _schema(connection: sqlite3.Connection) -> int:
 
 @dataclass
 class _Work:
-    operation: Literal["index", "lookup", "claim", "finish", "inspect", "root_claimed"]
-    payload: Project | ReceiptClaim | ReceiptTransition | ReceiptScope | Path
+    operation: Literal[
+        "index",
+        "lookup",
+        "claim",
+        "finish",
+        "inspect",
+        "root_claimed",
+        "observe",
+        "trace",
+        "replay",
+    ]
+    payload: (
+        Project
+        | ReceiptClaim
+        | ReceiptTransition
+        | ReceiptScope
+        | Path
+        | ActivityRecord
+        | ReplayScope
+    )
     deadline: float
     result: Future[object]
 
@@ -228,10 +300,39 @@ class SQLiteStorage:
     def inspect(self, scope: ReceiptScope, *, deadline: float) -> Receipt | None:
         return cast(Receipt | None, self._submit("inspect", scope, deadline))
 
+    def observe(self, record: ActivityRecord, *, deadline: float) -> ActivityEvent:
+        return cast(ActivityEvent, self._submit("observe", record, deadline))
+
+    def trace(
+        self, scope: ReceiptScope, *, deadline: float
+    ) -> tuple[Receipt | None, ActivityTrace | None]:
+        return cast(
+            tuple[Receipt | None, ActivityTrace | None], self._submit("trace", scope, deadline)
+        )
+
+    def replay(self, scope: ReplayScope, *, deadline: float) -> ActivityPage:
+        return cast(ActivityPage, self._submit("replay", scope, deadline))
+
     def _submit(
         self,
-        operation: Literal["index", "lookup", "claim", "finish", "inspect", "root_claimed"],
-        payload: Project | ReceiptClaim | ReceiptTransition | ReceiptScope | Path,
+        operation: Literal[
+            "index",
+            "lookup",
+            "claim",
+            "finish",
+            "inspect",
+            "root_claimed",
+            "observe",
+            "trace",
+            "replay",
+        ],
+        payload: Project
+        | ReceiptClaim
+        | ReceiptTransition
+        | ReceiptScope
+        | Path
+        | ActivityRecord
+        | ReplayScope,
         deadline: float | None,
     ) -> object:
         if isinstance(payload, Project) and (
@@ -375,7 +476,24 @@ class SQLiteStorage:
                 )
                 connection.execute("PRAGMA user_version=2")
                 connection.execute("COMMIT")
+            if version < 3:
+                connection.execute("BEGIN IMMEDIATE")
+                for sql in (
+                    _ACTIVITY_META,
+                    _ACTIVITY_REQUESTS,
+                    _ACTIVITY_EVENTS,
+                    *_ACTIVITY_INDEXES.values(),
+                ):
+                    connection.execute(sql)
+                connection.execute(
+                    "INSERT INTO activity_meta VALUES (1,?,?,0,0)",
+                    (str(uuid4()), time.time_ns() // 1000000),
+                )
+                connection.execute("INSERT INTO schema_migrations VALUES (3,'activity_v3')")
+                connection.execute("PRAGMA user_version=3")
+                connection.execute("COMMIT")
             _schema(connection)
+            self._activity_meta(connection)
             if self.instance_id is not None:
                 self._reconcile(connection, self.instance_id)
             self._check(root, fd)
@@ -390,6 +508,8 @@ class SQLiteStorage:
 
     def _execute(self, connection: sqlite3.Connection, work: _Work, root: int, fd: int) -> object:
         self._check(root, fd)
+        if work.operation in ("observe", "trace", "replay"):
+            return self._activity_work(connection, work, root, fd)
         if work.operation == "root_claimed":
             assert isinstance(work.payload, Path)
             return (
@@ -432,26 +552,265 @@ class SQLiteStorage:
         return Receipt.model_validate(dict(zip(_COLUMNS.split(","), row, strict=True)))
 
     @staticmethod
-    def _reconcile(connection: sqlite3.Connection, instance: UUID) -> None:
+    def _activity_meta(connection: sqlite3.Connection) -> ActivityMeta:
+        row = connection.execute(
+            "SELECT epoch,coverage_started_at_ms,high_water,generation "
+            "FROM activity_meta WHERE singleton=1"
+        ).fetchone()
+        if row is None:
+            raise StorageFault("storage_unrecognized")
+        return ActivityMeta(
+            database_epoch=row[0],
+            coverage_started_at_ms=row[1],
+            high_water=row[2],
+            retention_generation=row[3],
+        )
+
+    @staticmethod
+    def _activity_event(row: tuple[object, ...]) -> ActivityEvent:
+        (
+            sequence,
+            request,
+            owner,
+            root,
+            project,
+            kind,
+            at,
+            code,
+            category,
+            elapsed,
+            size,
+            started,
+            created,
+        ) = row
+        return ActivityEvent.model_validate(
+            {
+                "sequence": sequence,
+                "request_id": request,
+                "owner_instance_id": owner,
+                "canonical_root": root,
+                "project_id": project,
+                "kind": kind,
+                "recorded_at_ms": at,
+                "code": code,
+                "git": None
+                if category is None
+                else {
+                    "category": category,
+                    "process_started": bool(started),
+                    "code": code,
+                    "elapsed_ms": elapsed,
+                    "output_bytes": size,
+                },
+                "registration_created": None if created is None else bool(created),
+            }
+        )
+
+    def _append_event(
+        self,
+        connection: sqlite3.Connection,
+        receipt: Receipt,
+        kind: str,
+        *,
+        code: str | None = None,
+        record: ActivityRecord | None = None,
+        fresh: bool = False,
+    ) -> ActivityEvent | None:
+        if (
+            not fresh
+            and connection.execute(
+                "SELECT 1 FROM activity_requests WHERE request_id=?", (str(receipt.request_id),)
+            ).fetchone()
+            is None
+        ):
+            return None  # Existing receipts are legacy metadata, never invented traces.
+        count = int(
+            connection.execute(
+                "SELECT count(*) FROM activity_events WHERE request_id=?",
+                (str(receipt.request_id),),
+            ).fetchone()[0]
+        )
+        terminal = kind in (
+            "request.succeeded",
+            "request.failed",
+            "request.unknown",
+            "request.interrupted",
+        )
+        if count >= (ACTIVITY_EVENT_LIMIT if terminal else ACTIVITY_EVENT_LIMIT - 2):
+            raise StorageFault("activity_budget_exceeded")
+        meta = self._activity_meta(connection)
+        git = record.git if record is not None else None
+        event = ActivityEvent.model_validate(
+            {
+                "sequence": meta.high_water + 1,
+                "request_id": receipt.request_id,
+                "owner_instance_id": receipt.owner_instance_id,
+                "canonical_root": receipt.canonical_root,
+                "project_id": receipt.project_id,
+                "kind": kind,
+                "recorded_at_ms": time.time_ns() // 1000000,
+                "code": git.code
+                if git is not None
+                else activity_code(code)
+                if code is not None
+                else None,
+                "git": git,
+                "registration_created": record.registration_created if record is not None else None,
+            }
+        )
+        connection.execute(
+            "INSERT INTO activity_events(event_id,request_id,owner_instance_id,canonical_root,"
+            "project_id,scope_project_id,kind,recorded_at_ms,code,git_category,elapsed_ms,output_bytes,"
+            "git_started,registration_created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                event.sequence,
+                str(event.request_id),
+                str(event.owner_instance_id),
+                str(event.canonical_root),
+                str(event.project_id) if event.project_id else None,
+                str(event.project_id) if event.project_id else None,
+                event.kind,
+                event.recorded_at_ms,
+                event.code,
+                git.category if git else None,
+                git.elapsed_ms if git else None,
+                git.output_bytes if git else None,
+                int(git.process_started) if git else None,
+                int(event.registration_created) if event.registration_created is not None else None,
+            ),
+        )
+        connection.execute(
+            "UPDATE activity_meta SET high_water=? WHERE singleton=1", (event.sequence,)
+        )
+        return event
+
+    @staticmethod
+    def _scoped_receipt(connection: sqlite3.Connection, scope: ReceiptScope) -> Receipt | None:
+        row = connection.execute(
+            f"SELECT {_COLUMNS} FROM request_receipts WHERE request_id=?", (str(scope.request_id),)
+        ).fetchone()
+        receipt = SQLiteStorage._receipt(row) if row is not None else None
+        if receipt is not None and (
+            receipt.canonical_root != scope.canonical_root
+            or (
+                receipt.project_id != scope.project_id
+                and not (
+                    scope.allow_unbound_init
+                    and receipt.operation == "init"
+                    and receipt.project_id is None
+                )
+            )
+        ):
+            raise StorageFault("receipt_scope_mismatch")
+        return receipt
+
+    def _activity_work(
+        self, connection: sqlite3.Connection, work: _Work, root: int, fd: int
+    ) -> object:
+        payload = work.payload
+        if work.operation == "trace":
+            assert isinstance(payload, ReceiptScope)
+            receipt = self._scoped_receipt(connection, payload)
+            if receipt is None:
+                return None, None
+            known = (
+                connection.execute(
+                    "SELECT 1 FROM activity_requests WHERE request_id=?", (str(payload.request_id),)
+                ).fetchone()
+                is not None
+            )
+            rows = connection.execute(
+                f"SELECT {_EVENT_COLUMNS} FROM activity_events "
+                "WHERE request_id=? ORDER BY event_id LIMIT 33",
+                (str(payload.request_id),),
+            ).fetchall()
+            trace = ActivityTrace(
+                **self._activity_meta(connection).model_dump(),
+                legacy_metadata_only=not known,
+                events=tuple(self._activity_event(row) for row in rows),
+            )
+            self._check(root, fd)
+            return receipt, trace
+        if work.operation == "replay":
+            assert isinstance(payload, ReplayScope)
+            meta = self._activity_meta(connection)
+            if payload.after > meta.high_water or (
+                payload.expected_epoch is not None and payload.expected_epoch != meta.database_epoch
+            ):
+                raise StorageFault("activity_invalid_cursor")
+            rows = connection.execute(
+                f"SELECT {_EVENT_COLUMNS} FROM activity_events WHERE scope_project_id=? "
+                "AND canonical_root=? AND event_id>? AND event_id<=? ORDER BY event_id LIMIT ?",
+                (
+                    str(payload.project_id),
+                    str(payload.canonical_root),
+                    payload.after,
+                    meta.high_water,
+                    payload.limit + 1,
+                ),
+            ).fetchall()
+            events = tuple(self._activity_event(row) for row in rows[: payload.limit])
+            self._check(root, fd)
+            return ActivityPage(
+                **meta.model_dump(),
+                events=events,
+                has_more=len(rows) > payload.limit,
+                next_after=events[-1].sequence if events else payload.after,
+            )
+        assert isinstance(payload, ActivityRecord)
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            f"SELECT {_COLUMNS} FROM request_receipts WHERE request_id=?",
+            (str(payload.request_id),),
+        ).fetchone()
+        receipt = self._receipt(row) if row is not None else None
+        if (
+            receipt is None
+            or receipt.owner_instance_id != payload.owner_instance_id
+            or receipt.state != "running"
+            or (self.instance_id is not None and payload.owner_instance_id != self.instance_id)
+        ):
+            raise StorageFault("receipt_conflict")
+        event = self._append_event(
+            connection,
+            receipt,
+            "git.finished" if payload.git is not None else "registration.observed",
+            record=payload,
+        )
+        if event is None:
+            raise StorageFault("receipt_conflict")
+        self._check(root, fd)
+        try:
+            connection.execute("COMMIT")
+            self._check(root, fd)
+        except Exception:
+            if not connection.in_transaction:
+                raise StorageFault("storage_outcome_unconfirmed") from None
+            raise
+        return event
+
+    def _reconcile(self, connection: sqlite3.Connection, instance: UUID) -> None:
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.start_seconds
         while True:
             if time.monotonic() >= deadline:
                 raise StorageFault("storage_busy")
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                "SELECT request_id FROM request_receipts WHERE state IN ('accepted','running') "
+                f"SELECT {_COLUMNS} FROM request_receipts WHERE state IN ('accepted','running') "
                 "AND owner_instance_id<>? LIMIT 100",
                 (str(instance),),
             ).fetchall()
             if not rows:
                 connection.execute("COMMIT")
                 return
-            for (request_id,) in rows:
+            for row in rows:
+                receipt = self._receipt(row)
                 connection.execute(
                     "UPDATE request_receipts SET state='unknown',finished_at_ms=?,"
                     "outcome_code='interrupted' WHERE request_id=?",
-                    (time.time_ns() // 1000000, request_id),
+                    (time.time_ns() // 1000000, str(receipt.request_id)),
                 )
+                self._append_event(connection, receipt, "request.interrupted", code="interrupted")
             connection.execute("COMMIT")
 
     def _receipt_work(
@@ -500,6 +859,17 @@ class SQLiteStorage:
                         receipt.accepted_at_ms,
                         None,
                         None,
+                    ),
+                )
+                event = self._append_event(connection, receipt, "request.accepted", fresh=True)
+                assert event is not None
+                connection.execute(
+                    "INSERT INTO activity_requests VALUES (?,?,?,?)",
+                    (
+                        str(receipt.request_id),
+                        str(receipt.canonical_root),
+                        str(receipt.project_id) if receipt.project_id else None,
+                        event.sequence,
                     ),
                 )
                 result = ReceiptClaimResult(created=True, receipt=receipt)
@@ -556,6 +926,21 @@ class SQLiteStorage:
                     "finished_at_ms": finished,
                     "outcome_code": payload.outcome_code,
                 }
+            )
+        if isinstance(payload, ReceiptTransition):
+            assert isinstance(result, Receipt)
+            if associating:
+                connection.execute(
+                    "UPDATE activity_requests SET project_id=? WHERE request_id=?",
+                    (str(result.project_id), str(result.request_id)),
+                )
+                connection.execute(
+                    "UPDATE activity_events SET scope_project_id=? WHERE request_id=?",
+                    (str(result.project_id), str(result.request_id)),
+                )
+            kind = "identity.established" if associating else "request." + payload.state
+            self._append_event(
+                connection, result, kind, code=payload.error_code or payload.outcome_code
             )
         self._check(root, fd)
         if writing:
@@ -638,6 +1023,8 @@ class SQLiteStorage:
                                 "registry_conflict",
                                 "receipt_conflict",
                                 "receipt_scope_mismatch",
+                                "activity_invalid_cursor",
+                                "activity_budget_exceeded",
                             ):
                                 self._failed(fault)
                                 self._closing.set()

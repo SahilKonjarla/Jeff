@@ -130,7 +130,7 @@ def test_control_readiness_never_claims_storage_or_application_readiness() -> No
 
 
 def test_limits_match_reviewed_budget_and_reject_invalid_configurations() -> None:
-    assert PROTOCOL_REVISION == 3
+    assert PROTOCOL_REVISION == 4
     assert DEFAULT_RUNTIME_LIMITS.request_bytes == 65536
     assert DEFAULT_RUNTIME_LIMITS.response_bytes == 16777216
     assert DEFAULT_RUNTIME_LIMITS.active_requests == 4

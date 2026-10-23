@@ -71,7 +71,7 @@ def test_receipt_claim_finish_lookup_and_restart_without_replay(tmp_path: Path) 
         again = SQLiteStorage(owner, instance_id=uuid4())
         again.start()
         try:
-            assert again.wait_ready(5).schema_version == 2
+            assert again.wait_ready(5).schema_version == 3
             recovered = again.inspect(scope, deadline=deadline())
             assert recovered is not None and recovered.state == "unknown"
             assert recovered.outcome_code == "interrupted"
@@ -117,7 +117,7 @@ def test_schema_one_registry_migrates_and_concurrent_claim_is_unique(tmp_path: P
         storage = SQLiteStorage(owner, instance_id=instance)
         storage.start()
         try:
-            assert storage.wait_ready(5).schema_version == 2
+            assert storage.wait_ready(5).schema_version == 3
             assert storage.lookup(project) == project
             claim = ReceiptClaim(
                 request_id=uuid4(),
@@ -246,8 +246,11 @@ def test_schema_two_migration_failure_rolls_back_actual_ddl_and_preserves_regist
             initial.close()
         # Construct a clean owned v1 fixture from current known schema, never real data.
         with closing(original(layout.database, isolation_level=None)) as fixture:
+            fixture.execute("DROP TABLE activity_events")
+            fixture.execute("DROP TABLE activity_requests")
+            fixture.execute("DROP TABLE activity_meta")
             fixture.execute("DROP TABLE request_receipts")
-            fixture.execute("DELETE FROM schema_migrations WHERE version=2")
+            fixture.execute("DELETE FROM schema_migrations WHERE version>=2")
             fixture.execute("PRAGMA user_version=1")
         before = layout.database.read_bytes()
         with monkeypatch.context() as patch:
@@ -263,7 +266,7 @@ def test_schema_two_migration_failure_rolls_back_actual_ddl_and_preserves_regist
         retry = SQLiteStorage(owner)
         retry.start()
         try:
-            assert retry.wait_ready(5).schema_version == 2
+            assert retry.wait_ready(5).schema_version == 3
             assert retry.lookup(project) == project
         finally:
             retry.close()

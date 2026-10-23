@@ -7,15 +7,18 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from jeff.application.history import GitObserver
 from jeff.application.projects import ErrorData, Failure, ProjectService
 from jeff.domain.projects import ProjectError
 from jeff.domain.repository import BranchState, FileChange, escape_metadata, protected_path
 
 
 class GitRead(Protocol):
-    def read_branch(self, root: Path, *, deadline: float | None = None) -> BranchState: ...
+    def read_branch(
+        self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
+    ) -> BranchState: ...
     def read_changes(
-        self, root: Path, *, deadline: float | None = None
+        self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
     ) -> tuple[FileChange, ...]: ...
 
 
@@ -95,7 +98,12 @@ class QuestionService:
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def execute(
-        self, question: str, directory: Path, *, deadline: float | None = None
+        self,
+        question: str,
+        directory: Path,
+        *,
+        deadline: float | None = None,
+        observer: GitObserver | None = None,
     ) -> QuestionSuccess | Failure:
         intent = question_intent(question)
         if intent is None:
@@ -112,7 +120,9 @@ class QuestionService:
         try:
             if intent == "ask.branch":
                 branch = self._git.read_branch(
-                    root, **({"deadline": deadline} if deadline is not None else {})
+                    root,
+                    deadline=deadline,
+                    observer=observer,
                 )
                 return QuestionSuccess(
                     data=BranchAnswer(
@@ -128,7 +138,9 @@ class QuestionService:
                     )
                 )
             raw = self._git.read_changes(
-                root, **({"deadline": deadline} if deadline is not None else {})
+                root,
+                deadline=deadline,
+                observer=observer,
             )
             visible: list[ChangeData] = []
             for change in raw:

@@ -56,12 +56,20 @@ New exclusively created DBs commit a Jeff application marker/empty schema-0 ledg
 
 SQLite opens an escaped pathname URI, not the checked FD. Private ancestry, no-follow file checks and before/after identity checks narrow races but do not prove hostile same-user/ACL safety. SQLite alone manages its owned live journals; ordinary control status never mistakes a transient owned journal for a pre-existing recovery file. Connection/descriptor close failures remain unconfirmed, not successful cancellation.
 
-## Project RPC and receipts — checkpoints A/B
+## Project RPC and receipts — slice 4 checkpoints A/B
 
 `runtime_dispatch.RuntimeDispatcher` owns four non-daemon workers/16 pending typed requests, independent of the SQL queue. Closing refuses queued work without claiming durable acceptance and drains actual active work; cancelling a caller is not thread completion. `runtime_ipc.RuntimeProjectClient` uses native/authenticated instance identity, one unary connection and a shared bounded budget; no autostart, retry or local fallback. Server caps project/receipt connections at 15 of 16 so ordinary project saturation leaves a control opportunity (not an unlimited auth-flood guarantee).
 
 Schema 2 adds only `request_receipts` plus its fixed state/owner index. The existing SQL owner handles claim/finish/scoped read and bounded startup reconciliation; v1 registry rows/DDL are preserved by transactional migration. Duplicate/conflicting IDs never run project work again. Lost commit/delivery remains unconfirmed; clean restart marks unfinished prior-instance receipts unknown. Read-only config/inspection stores no access timestamp or registry row. The SQL owner also supplies an exact-root existence boolean and a once-only running-init null→actual UUID transition, without schema changes/rebinding. Partial YAML/ignore writes survive DB failure; uncertainty is preserved. No raw answer archive or completed history/recovery feature.
 
 Optional absolute deadlines propagate into existing Git invocation budgets; actual native process cleanup remains the Git adapter's responsibility. RPC control uses cached facts, not blocking SQL/Git on the event loop. C now exposes public lifecycle/routing. Authenticated cached full readiness requires live workers, storage and control; public start waits for it. The client checks actual ownership/endpoint absence before reporting daemon_not_running, never starts/falls back, and uses composed local diagnostics only for status. Layout selection is lazy, so help/invalid-project status does not touch unused runtime locations.
+
+## Durable evidence — slice 5 checkpoint A
+
+Schema3 adds activity metadata (persistent database epoch/coverage/high-water/generation), activity request routing/acceptance order and a fixed-column event journal with scoped replay/trace indexes. The same SQL owner commits receipt transitions and evidence atomically; no raw argv/streams/questions/answers/config are stored. Actual supported v0/v1/v2 structures are validated before ordered migration; extra-object/ledger sentinels grow deliberately. Prior registry/receipt definitions remain unchanged; no reset/sidecar recovery.
+
+Trace reads return receipt and bounded evidence from one owner-thread work item. Legacy metadata is explicit. New init routing association updates only routing UUIDs; observed historical UUIDs stay truthful. V4 adds finite evidence trace/replay unary messages and two live capabilities, not a generic SQL interface or live subscription. Event IDs survive normal restart; invalid epoch/future seek refuses. Max32 records/request reserves terminal capacity; overflow is an error, not silent truncation. No tombstones/expiry until D.
+
+The Git adapter wraps actual native subprocess execution, records process-start fact, monotonic duration/observed bytes/fixed outcome only after cleanup, and passes evidence to a request-bound sink. Cleanup metadata can outlive caller budget by the bounded existing completion allowance while actual workers remain accounted. Control/stop remain responsive; old v3 fixtures require matching-old shutdown, never owner replacement/rekey.
 
 Add future persistence/runtime adapters only against actual application ports. See [package map](../README.md).

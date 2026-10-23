@@ -20,7 +20,7 @@ from jeff.application.projects import ErrorData, Failure
 from jeff.application.storage import StorageIssueCode, StorageReadiness, storage_failure
 from jeff.domain.runtime import RuntimeIdentity, RuntimeSnapshot, RuntimeState
 
-PROTOCOL_REVISION = 3
+PROTOCOL_REVISION = 4
 MAC_SOCKET_PATH_BYTES = 103
 MAC_PATH_BYTES = 1023  # Darwin PATH_MAX=1024, reserving the terminator.
 MAC_NAME_BYTES = 255
@@ -199,7 +199,15 @@ class RuntimeLimits(_RuntimeModel):
 DEFAULT_RUNTIME_LIMITS = RuntimeLimits()
 
 
-ProjectCapability = Literal["ask.branch", "ask.changes", "init", "config", "receipt.inspect"]
+ProjectCapability = Literal[
+    "ask.branch",
+    "ask.changes",
+    "init",
+    "config",
+    "receipt.inspect",
+    "activity.trace",
+    "activity.replay",
+]
 
 
 class ControlObservation(_RuntimeModel):
@@ -228,7 +236,15 @@ class ControlObservation(_RuntimeModel):
             self.control_ready
             and self.storage.state == "ready"
             and set(self.available_operations)
-            == {"ask.branch", "ask.changes", "init", "config", "receipt.inspect"}
+            == {
+                "ask.branch",
+                "ask.changes",
+                "init",
+                "config",
+                "receipt.inspect",
+                "activity.trace",
+                "activity.replay",
+            }
         ):
             raise ValueError(
                 "Full application readiness requires all supported handlers and storage."

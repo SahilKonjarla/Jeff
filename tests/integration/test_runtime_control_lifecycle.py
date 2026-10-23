@@ -163,7 +163,7 @@ def test_oversized_and_unauthenticated_shutdown_frames_never_dispatch(
         b"\xff\xff\xff\xff",
         encode_message(
             {
-                "revision": 3,
+                "revision": 4,
                 "request_id": "00000000-0000-4000-8000-000000000001",
                 "operation": "stop",
             },

@@ -16,6 +16,7 @@
 
 - [test_project_rpc_contracts.py](test_project_rpc_contracts.py): v3 instance-bound finite messages, strict budgets/path/auth identity and receipt payload refusal.
 - [test_cli.py](test_cli.py): lazy application client/control factories, lifecycle delegation, no client action fallback, JSON/stderr correlation separation; native behavior is proved separately in acceptance.
+- [test_activity_contracts.py](test_activity_contracts.py): strict finite observation/trace/replay values and evidence request scope/shape, no raw payloads.
 - [test_project_dispatch.py](test_project_dispatch.py): init/config/both-question dispatch, duplicate/scoped inspection, read-only diagnostics, missing-indexed-YAML refusal and real YAML/SQLite partial faults through the application interface; owned Git/YAML/SQLite and explicit synthetic privacy sink checks.
 
 **Dependencies:** pytest, Typer test runner, Pydantic result contracts, domain/application/interfaces, pure path selection and control codec. Controlled discovery/storage doubles exercise the same public interface as adapters without invoking Git or storage. Real filesystem/process checks belong under integration/acceptance.

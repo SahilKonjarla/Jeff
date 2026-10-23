@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from jeff.application.dispatch import ProjectCall, ProjectDispatcher, ReceiptQuery
+from jeff.application.dispatch import EvidenceQuery, ProjectCall, ProjectDispatcher, ReceiptQuery
 from jeff.application.projects import Failure, ProjectService, Success
 from jeff.application.questions import QuestionService, QuestionSuccess
 from jeff.application.runtime import RuntimeIdentityData, RuntimeLayout
@@ -53,6 +53,19 @@ def test_branch_receipt_duplicate_and_scope_without_answer_archive(
                 ReceiptQuery(directory=git_repo, request_id=call.request_id), time.monotonic() + 10
             )
             assert inspected.receipt == first.receipt
+            _, trace = storage.trace(
+                ReceiptScope(
+                    request_id=call.request_id,
+                    canonical_root=git_repo,
+                    project_id=UUID(first.result.data.project_id),
+                ),
+                deadline=time.monotonic() + 5,
+            )
+            assert trace is not None
+            observed = [event.git for event in trace.events if event.git is not None]
+            assert [event.category for event in observed] == ["filters.inspect", "status.branch"]
+            assert all(event.code == "ok" and event.elapsed_ms >= 0 for event in observed)
+            assert observed[-1].output_bytes > 0
             wrong = dispatch.execute(
                 call.model_copy(update={"request_id": uuid4(), "expected_project_id": uuid4()}),
                 time.monotonic() + 10,
@@ -130,9 +143,77 @@ def test_config_is_read_only_unindexed_and_changes_use_existing_policy(
                 and bounded.receipt is not None
                 and bounded.receipt.state == "failed"
             )
+            _, evidence = storage.trace(
+                ReceiptScope(
+                    request_id=bounded.request_id, canonical_root=git_repo, project_id=project_id
+                ),
+                deadline=time.monotonic() + 5,
+            )
+            assert evidence is not None and evidence.events[-1].code == "git_output_limit"
+            assert any(
+                event.git is not None
+                and event.git.process_started
+                and event.git.code == "git_output_limit"
+                for event in evidence.events
+            )
         finally:
             storage.close()
     assert b"SYNTHETIC_PRIVATE_CONTENT" not in layout.database.read_bytes()
+
+
+def test_real_git_timeout_evidence_is_recorded_after_actual_child_reaping(
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    projects = ProjectService(GitProjectDiscovery(), FileProjectStore())
+    assert projects.execute("init", git_repo).ok
+    identity = RuntimeIdentityData(instance_id=uuid4(), pid=os.getpid())
+    layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
+    owner = RuntimeStateStore(layout).acquire(create=True)
+    assert owner is not None
+    original = subprocess.Popen
+    children: list[subprocess.Popen[bytes]] = []
+
+    def launch(command: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        child = original(command, **kwargs)
+        children.append(child)
+        if "status" in command:
+            patch.setattr(git_adapter, "GIT_TIMEOUT", 0)
+        return child
+
+    with owner:
+        store = SQLiteStorage(owner, instance_id=identity.instance_id)
+        store.start()
+        try:
+            assert store.wait_ready(5).state == "ready"
+            dispatch = ProjectDispatcher(
+                projects, QuestionService(projects, GitRepositoryRead()), store, identity
+            )
+            call = ProjectCall(operation="ask", directory=git_repo, question="what branch am I on?")
+            with monkeypatch.context() as patch:
+                patch.setattr(subprocess, "Popen", launch)
+                result = dispatch.execute(call, time.monotonic() + 10)
+            assert not result.result.ok and result.result.error.code == "git_timeout", result
+            assert children and all(child.poll() is not None for child in children)
+            assert result.receipt is not None
+            _, trace = store.trace(
+                ReceiptScope(
+                    request_id=call.request_id,
+                    canonical_root=git_repo,
+                    project_id=result.receipt.project_id,
+                ),
+                deadline=time.monotonic() + 5,
+            )
+            assert trace is not None and trace.events[-1].code == "git_timeout"
+            assert any(
+                event.git is not None
+                and event.git.code == "git_timeout"
+                and event.git.process_started
+                for event in trace.events
+            )
+        finally:
+            store.close()
 
 
 def test_unregistered_init_claims_root_then_associates_real_identity(
@@ -275,6 +356,13 @@ def test_failed_yaml_publication_preserves_ignore_and_root_bound_unknown_receipt
                 ReceiptQuery(directory=git_repo, request_id=call.request_id), time.monotonic() + 10
             )
             assert inspected.receipt == failed.receipt and inspected.error is None, inspected
+            evidence = dispatch.inspect_evidence(
+                EvidenceQuery(operation="trace", directory=git_repo, request_id=call.request_id),
+                time.monotonic() + 10,
+            )
+            assert evidence.trace is not None and evidence.receipt == failed.receipt
+            assert evidence.trace.events[-1].kind == "request.unknown"
+            assert all(event.project_id is None for event in evidence.trace.events)
             forged = dispatch.inspect_receipt(
                 ReceiptQuery(
                     directory=git_repo, request_id=call.request_id, expected_project_id=uuid4()
@@ -300,6 +388,12 @@ def test_failed_yaml_publication_preserves_ignore_and_root_bound_unknown_receipt
                 and refused.error is not None
                 and refused.error.error.code == "receipt_unavailable"
             )
+            evidence = dispatch.inspect_evidence(
+                EvidenceQuery(operation="trace", directory=moved, request_id=call.request_id),
+                time.monotonic() + 10,
+            )
+            assert evidence.trace is None and evidence.error is not None
+            assert evidence.error.error.code == "receipt_unavailable"
             assert (
                 layout.database.read_bytes() == before and not (moved / "jeff.local.yaml").exists()
             )

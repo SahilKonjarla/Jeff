@@ -19,6 +19,7 @@
 - [test_project_registry.py](test_project_registry.py): real Git/YAML authority, no implicit indexing, privacy, deleted/changed/moved registrations and byte/ignore preservation.
 - [test_runtime_storage_lifecycle.py](test_runtime_storage_lifecycle.py): actual v2 storage-ready child/restart, settings reload, safe failure pipe and fail-and-exit, diagnostic-only/malformed pipe refusal, short-lived native reader-lease races, responsive status/stop under a real SQLite busy lock. Genuine handles are captured; forced fixture cleanup fails the check.
 
+- [test_runtime_activity.py](test_runtime_activity.py): owner-thread atomic lifecycle/evidence, scoped bounded replay, nullable identity routing, event budget/owner guards, real rollback/lost-ack faults, actual retained-v3 schema2→3 migration rollback/preserved legacy metadata and registry.
 - [test_runtime_request_receipts.py](test_runtime_request_receipts.py): actual v1→v2 migration/rollback with preserved registry, concurrent claim uniqueness, scope checks, no-write inspection, restart unknown, stale completion refusal and actual commit acknowledgement loss.
 - [test_runtime_project_dispatch.py](test_runtime_project_dispatch.py): four active/16 pending, real drain/refusal, plus actual owned child/socket control under subprocess-boundary slow-Git faults, response disconnect/deadline and 15 project connections. Real branch behavior is separately proven without driver faults; these labelled faults test timing/ownership, not Git quality. Native stop waits until active synthetic Git processes actually finish.
 

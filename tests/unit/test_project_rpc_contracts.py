@@ -12,7 +12,7 @@ from jeff.application.storage import DATABASE_SCHEMA, ReceiptTransition
 
 
 def test_versions_and_strict_instance_bound_project_call() -> None:
-    assert PROTOCOL_REVISION == 3 and DATABASE_SCHEMA == 2
+    assert PROTOCOL_REVISION == 4 and DATABASE_SCHEMA == 3
     call = ProjectCall(
         request_id=uuid4(),
         operation="ask",
@@ -37,10 +37,10 @@ def test_invalid_project_paths_have_no_transport_authority(path: str) -> None:
 
 def test_authentication_cannot_claim_identity_without_auth_or_omit_on_success() -> None:
     with pytest.raises(ValidationError):
-        AuthAccepted(revision=3, authenticated=True)
+        AuthAccepted(revision=4, authenticated=True)
     with pytest.raises(ValidationError):
         AuthAccepted(
-            revision=3,
+            revision=4,
             authenticated=False,
             error="runtime_authentication_failed",
             identity=RuntimeIdentityData(instance_id=uuid4(), pid=1),

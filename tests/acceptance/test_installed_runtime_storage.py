@@ -29,7 +29,7 @@ def test_installed_storage_registry_survives_actual_daemon_restart(
     controller = RuntimeController(layout)
     try:
         first = controller.start()
-        assert isinstance(first, ControlSuccess) and first.data.storage.schema_version == 2
+        assert isinstance(first, ControlSuccess) and first.data.storage.schema_version == 3
         assert first.data.application_ready is True
         assert isinstance(controller.stop(), ControlSuccess)
         for operation in ("index", "lookup"):

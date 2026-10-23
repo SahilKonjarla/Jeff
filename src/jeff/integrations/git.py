@@ -8,6 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from jeff.application.history import GitCategory, GitObservation, GitObserver
 from jeff.domain.projects import ProjectError
 from jeff.domain.repository import BranchState, FileChange, git_exclusions
 
@@ -17,7 +18,56 @@ MAX_CHANGES = 10_000
 
 
 def _run_git(
-    executable: str, directory: Path, *arguments: str, deadline: float | None = None
+    executable: str,
+    directory: Path,
+    *arguments: str,
+    deadline: float | None = None,
+    observer: GitObserver | None = None,
+    category: GitCategory | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    began = time.monotonic_ns()
+    measured = [0, 0]
+    code: str = "git_failed"
+    try:
+        result = _run_git_process(
+            executable, directory, *arguments, deadline=deadline, measured=measured
+        )
+        code = (
+            "ok"
+            if result.returncode == 0 or (category == "filters.inspect" and result.returncode == 1)
+            else "git_failed"
+        )
+        return result
+    except ProjectError as error:
+        code = (
+            error.code
+            if error.code in ("git_timeout", "git_output_limit", "git_unavailable")
+            else "git_failed"
+        )
+        raise
+    finally:
+        if observer is not None:
+            if category is None:
+                raise ValueError("Observed Git requires a fixed invocation category.")
+            observer.record(
+                GitObservation.model_validate(
+                    {
+                        "category": category,
+                        "code": code,
+                        "process_started": bool(measured[1]),
+                        "elapsed_ms": max(0, (time.monotonic_ns() - began) // 1000000),
+                        "output_bytes": measured[0],
+                    }
+                )
+            )
+
+
+def _run_git_process(
+    executable: str,
+    directory: Path,
+    *arguments: str,
+    deadline: float | None = None,
+    measured: list[int] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Bound both streams while reading; kill/reap only this owned process on failure."""
     command = [
@@ -57,6 +107,8 @@ def _run_git(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         ) as process:
+            if measured is not None:
+                measured[1] = 1
             try:
                 assert process.stdout is not None and process.stderr is not None
                 buffers = {"stdout": bytearray(), "stderr": bytearray()}
@@ -79,6 +131,8 @@ def _run_git(
                                 selector.unregister(key.fileobj)
                                 continue
                             total += len(chunk)
+                            if measured is not None:
+                                measured[0] = total
                             if total > GIT_OUTPUT_LIMIT:
                                 raise ProjectError(
                                     "git_output_limit",
@@ -164,7 +218,7 @@ class GitProjectDiscovery:
             executable,
             directory,
             *arguments,
-            **({"deadline": deadline} if deadline is not None else {}),
+            deadline=deadline,
         )
         return subprocess.CompletedProcess(
             result.args,
@@ -255,16 +309,30 @@ def _parse_status(output: bytes) -> tuple[BranchState, tuple[FileChange, ...]]:
 
 
 class GitRepositoryRead:
-    def read_branch(self, root: Path, *, deadline: float | None = None) -> BranchState:
-        branch, _ = _parse_status(self._status(root, branch_only=True, deadline=deadline))
+    def read_branch(
+        self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
+    ) -> BranchState:
+        branch, _ = _parse_status(
+            self._status(root, branch_only=True, deadline=deadline, observer=observer)
+        )
         return branch
 
-    def read_changes(self, root: Path, *, deadline: float | None = None) -> tuple[FileChange, ...]:
-        _, changes = _parse_status(self._status(root, branch_only=False, deadline=deadline))
+    def read_changes(
+        self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
+    ) -> tuple[FileChange, ...]:
+        _, changes = _parse_status(
+            self._status(root, branch_only=False, deadline=deadline, observer=observer)
+        )
         return changes
 
     @staticmethod
-    def _status(root: Path, *, branch_only: bool, deadline: float | None = None) -> bytes:
+    def _status(
+        root: Path,
+        *,
+        branch_only: bool,
+        deadline: float | None = None,
+        observer: GitObserver | None = None,
+    ) -> bytes:
         executable = shutil.which("git", path=os.defpath)
         if executable is None:
             raise ProjectError(
@@ -281,7 +349,9 @@ class GitRepositoryRead:
             "--name-only",
             "--get-regexp",
             r"^filter\..*\.(clean|process|required)$",
-            **({"deadline": deadline} if deadline is not None else {}),
+            deadline=deadline,
+            observer=observer,
+            category="filters.inspect",
         )
         if filters.returncode not in {0, 1}:
             raise ProjectError(
@@ -331,7 +401,9 @@ class GitRepositoryRead:
             "--",
             ".",
             *exclusions,
-            **({"deadline": deadline} if deadline is not None else {}),
+            deadline=deadline,
+            observer=observer,
+            category="status.branch" if branch_only else "status.changes",
         )
         if result.returncode != 0:
             raise ProjectError(

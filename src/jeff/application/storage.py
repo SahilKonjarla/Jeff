@@ -6,11 +6,19 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
+from jeff.application.history import (
+    ActivityCode,
+    ActivityEvent,
+    ActivityPage,
+    ActivityRecord,
+    ActivityTrace,
+    ReplayScope,
+)
 from jeff.application.projects import ErrorData, Failure, ProjectService
 from jeff.domain.projects import Project
 
 SETTINGS_SCHEMA = 1
-DATABASE_SCHEMA = 2
+DATABASE_SCHEMA = 3
 DATABASE_APPLICATION_ID = int.from_bytes(b"JEFF", "big")
 STORAGE_PENDING_LIMIT = 16
 SETTINGS_LIMIT = 65536
@@ -27,6 +35,8 @@ StorageIssueCode = Literal[
     "registry_conflict",
     "receipt_conflict",
     "receipt_scope_mismatch",
+    "activity_invalid_cursor",
+    "activity_budget_exceeded",
 ]
 _MESSAGES: dict[StorageIssueCode, str] = {
     "settings_invalid": "Private settings are invalid or unsafe; existing bytes were not replaced.",
@@ -45,6 +55,12 @@ _MESSAGES: dict[StorageIssueCode, str] = {
     "registry_conflict": "The indexed project identity and root conflict; no rebind was performed.",
     "receipt_conflict": "The request identity, target or state conflicts; no work was replayed.",
     "receipt_scope_mismatch": "No receipt is available in the validated project scope.",
+    "activity_invalid_cursor": (
+        "Activity cursor epoch or position is invalid; resynchronize explicitly."
+    ),
+    "activity_budget_exceeded": (
+        "The bounded evidence budget is exhausted; no steps were silently dropped."
+    ),
 }
 
 
@@ -142,6 +158,7 @@ class Receipt(ReceiptClaim):
 
 
 class ReceiptTransition(_StorageModel):
+    error_code: ActivityCode | None = None
     request_id: UUID
     owner_instance_id: UUID
     project_id: UUID | None = None
@@ -152,6 +169,8 @@ class ReceiptTransition(_StorageModel):
     def completion(self) -> Self:
         if (self.state == "running") != (self.outcome_code is None):
             raise ValueError("Only terminal transitions require an outcome.")
+        if self.error_code is not None and self.state == "running":
+            raise ValueError("Only a terminal transition carries an outcome code.")
         if self.project_id is not None and self.state != "running":
             raise ValueError("Identity association is a running-init transition only.")
         if self.state == "succeeded" and self.outcome_code != "ok":
@@ -172,6 +191,11 @@ class ReceiptClaimResult(_StorageModel):
 
 
 class RequestLedger(Protocol):
+    def observe(self, record: ActivityRecord, *, deadline: float) -> ActivityEvent: ...
+    def trace(
+        self, scope: ReceiptScope, *, deadline: float
+    ) -> tuple[Receipt | None, ActivityTrace | None]: ...
+    def replay(self, scope: ReplayScope, *, deadline: float) -> ActivityPage: ...
     def claim(self, claim: ReceiptClaim, *, deadline: float) -> ReceiptClaimResult: ...
     def finish(self, transition: ReceiptTransition, *, deadline: float) -> Receipt: ...
     def inspect(self, scope: ReceiptScope, *, deadline: float) -> Receipt | None: ...

@@ -20,6 +20,9 @@ from pydantic import BaseModel, Field, RootModel
 from jeff.application.dispatch import (
     PROJECT_OPERATIONS,
     DispatchReply,
+    EvidenceQuery,
+    EvidenceReply,
+    EvidenceRequest,
     ProjectCall,
     ProjectRequest,
     ProjectStatusService,
@@ -52,7 +55,10 @@ from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
 
 class RpcRequest(
     RootModel[
-        Annotated[ControlRequest | ProjectRequest | ReceiptRequest, Field(discriminator="kind")]
+        Annotated[
+            ControlRequest | ProjectRequest | ReceiptRequest | EvidenceRequest,
+            Field(discriminator="kind"),
+        ]
     ]
 ):
     pass
@@ -363,6 +369,31 @@ class RuntimeProjectClient:
                     accepted=None,
                 )
 
+    def inspect_evidence(self, query: EvidenceQuery) -> EvidenceReply:
+        deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
+        with self._connect(deadline) as connection:
+            try:
+                request = EvidenceRequest(
+                    query=query,
+                    expected_instance_id=connection.identity.instance_id,
+                    remaining_ms=max(1, int(_remaining(deadline) * 1000)),
+                )
+                reply = self._exchange(connection, request, EvidenceReply)
+                if (
+                    reply.request_id != query.query_id
+                    or reply.identity != connection.identity
+                    or reply.operation != query.operation
+                ):
+                    raise ControlFault("runtime_ownership_unconfirmed")
+                return reply
+            except (OSError, ControlFault):
+                return EvidenceReply(
+                    request_id=query.query_id,
+                    identity=connection.identity,
+                    operation=query.operation,
+                    error=dispatch_failure("request_outcome_unknown"),
+                )
+
     def inspect_receipt(self, query: ReceiptQuery) -> ReceiptReply:
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
         with self._connect(deadline) as connection:
@@ -431,7 +462,7 @@ class ControlServer:
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         project_slot = False
-        response: ControlResponse | DispatchReply | ReceiptReply
+        response: ControlResponse | DispatchReply | ReceiptReply | EvidenceReply
         try:
             uid, _ = peer_identity(cast(socket.socket, writer.get_extra_info("socket")))
             if uid != self.owner.store.layout.uid:
@@ -482,7 +513,7 @@ class ControlServer:
                     RpcRequest,
                 )
             ).root
-            if isinstance(request, (ProjectRequest, ReceiptRequest)):
+            if isinstance(request, (ProjectRequest, ReceiptRequest, EvidenceRequest)):
                 if self._project_connections >= DEFAULT_RUNTIME_LIMITS.connections - 1:
                     response = self._project_refusal(request, busy=True)
                 else:
@@ -544,8 +575,12 @@ class ControlServer:
                 pass
 
     def _project_refusal(
-        self, request: ProjectRequest | ReceiptRequest, *, busy: bool = False, unknown: bool = False
-    ) -> DispatchReply | ReceiptReply:
+        self,
+        request: ProjectRequest | ReceiptRequest | EvidenceRequest,
+        *,
+        busy: bool = False,
+        unknown: bool = False,
+    ) -> DispatchReply | ReceiptReply | EvidenceReply:
         error = dispatch_failure(
             "request_outcome_unknown" if unknown else "runtime_busy" if busy else "runtime_stopping"
         )
@@ -556,11 +591,18 @@ class ControlServer:
                 result=error,
                 accepted=None if unknown else False,
             )
+        if isinstance(request, EvidenceRequest):
+            return EvidenceReply(
+                request_id=request.query.query_id,
+                identity=self.identity,
+                operation=request.query.operation,
+                error=error,
+            )
         return ReceiptReply(request_id=request.query.query_id, identity=self.identity, error=error)
 
     async def _project(
-        self, request: ProjectRequest | ReceiptRequest, began: float
-    ) -> DispatchReply | ReceiptReply:
+        self, request: ProjectRequest | ReceiptRequest | EvidenceRequest, began: float
+    ) -> DispatchReply | ReceiptReply | EvidenceReply:
         if request.expected_instance_id != self.identity.instance_id:
             error = self._project_refusal(request)
             failure = dispatch_failure("project_target_mismatch")

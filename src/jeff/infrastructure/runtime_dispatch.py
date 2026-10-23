@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 from jeff.application.dispatch import (
     DispatchReply,
+    EvidenceQuery,
+    EvidenceReply,
     ProjectCall,
     ProjectDispatcher,
     ReceiptQuery,
@@ -19,9 +21,9 @@ from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS, ControlFault
 
 @dataclass
 class _Work:
-    call: ProjectCall | ReceiptQuery
+    call: ProjectCall | ReceiptQuery | EvidenceQuery
     deadline: float
-    result: Future[DispatchReply | ReceiptReply]
+    result: Future[DispatchReply | ReceiptReply | EvidenceReply]
 
 
 class RuntimeDispatcher:
@@ -64,9 +66,9 @@ class RuntimeDispatcher:
                 raise ControlFault("runtime_start_failed") from None
 
     def submit(
-        self, call: ProjectCall | ReceiptQuery, deadline: float
-    ) -> Future[DispatchReply | ReceiptReply]:
-        result: Future[DispatchReply | ReceiptReply] = Future()
+        self, call: ProjectCall | ReceiptQuery | EvidenceQuery, deadline: float
+    ) -> Future[DispatchReply | ReceiptReply | EvidenceReply]:
+        result: Future[DispatchReply | ReceiptReply | EvidenceReply] = Future()
         with self._mutex:
             if not self._ready or self._closing.is_set():
                 raise ControlFault("runtime_busy")
@@ -90,8 +92,12 @@ class RuntimeDispatcher:
             raise ControlFault("runtime_stop_unconfirmed")
 
     def _refused(
-        self, call: ProjectCall | ReceiptQuery, *, closing: bool = False, unknown: bool = False
-    ) -> DispatchReply | ReceiptReply:
+        self,
+        call: ProjectCall | ReceiptQuery | EvidenceQuery,
+        *,
+        closing: bool = False,
+        unknown: bool = False,
+    ) -> DispatchReply | ReceiptReply | EvidenceReply:
         error = dispatch_failure(
             "request_outcome_unknown"
             if unknown
@@ -105,6 +111,13 @@ class RuntimeDispatcher:
                 identity=self.dispatch.identity,
                 result=error,
                 accepted=None if unknown else False,
+            )
+        if isinstance(call, EvidenceQuery):
+            return EvidenceReply(
+                request_id=call.query_id,
+                identity=self.dispatch.identity,
+                operation=call.operation,
+                error=error,
             )
         return ReceiptReply(request_id=call.query_id, identity=self.dispatch.identity, error=error)
 
@@ -121,6 +134,8 @@ class RuntimeDispatcher:
                     result = self._refused(work.call, closing=self._closing.is_set())
                 elif isinstance(work.call, ProjectCall):
                     result = self.dispatch.execute(work.call, work.deadline)
+                elif isinstance(work.call, EvidenceQuery):
+                    result = self.dispatch.inspect_evidence(work.call, work.deadline)
                 else:
                     result = self.dispatch.inspect_receipt(work.call, work.deadline)
                 work.result.set_result(result)

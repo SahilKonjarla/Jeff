@@ -8,6 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from jeff.application.dispatch import DispatchReply, ProjectCall, ReceiptQuery, ReceiptReply
+from jeff.application.history import GitObserver
 from jeff.application.projects import Failure, ProjectService
 from jeff.application.questions import BranchAnswer, ChangesAnswer, QuestionService
 from jeff.application.runtime import RuntimeIdentityData
@@ -37,11 +38,15 @@ class Git:
         self.changes = changes
         self.roots: list[Path] = []
 
-    def read_branch(self, root: Path, *, deadline: float | None = None) -> BranchState:
+    def read_branch(
+        self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
+    ) -> BranchState:
         self.roots.append(root)
         return BranchState("main", "a" * 40, False, False)
 
-    def read_changes(self, root: Path, *, deadline: float | None = None) -> tuple[FileChange, ...]:
+    def read_changes(
+        self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
+    ) -> tuple[FileChange, ...]:
         self.roots.append(root)
         return self.changes
 

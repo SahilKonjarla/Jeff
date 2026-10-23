@@ -62,6 +62,14 @@ Changes intentionally report `complete: false`, `visible_clean`, protected-path/
 
 `ProjectStatusService` validates local Git/YAML before invoking the lazy runtime-control factory. `ProjectStatusSuccess` preserves ProjectData and explicitly adds `runtime`; it is not a project-action wire result. Config/status/inspection never implicitly index or create activity/access timestamps. `ProjectClient.status` is composed separately from daemon-dependent execution, not a fallback.
 
+## Internal durable evidence — slice 5 checkpoint A
+
+`history.py` owns immutable finite observation/event/trace/replay values without runtime/storage/dispatch imports. Actual Git completion emits only fixed category/code, process-start fact, monotonic duration and observed byte count after cleanup; prelaunch refusal cannot pretend a process started. Per-request sinks are explicit, never shared mutable request context. Evidence failure does not turn a partial request into ordinary success.
+
+Schema 3 atomically appends accepted/running/identity/terminal/interrupted events with receipt transitions. At most 32 events/request with terminal capacity reserved. Earlier init observations keep truthful null known identity while their validated routing identity is associated once. Old schema-2 receipts remain exact-ID legacy metadata, with no invented events/backfill. Duplicate IDs do not create new activity.
+
+`EvidenceClient.inspect_evidence(EvidenceQuery)` is an internal installed-client seam: exact scoped trace+receipt snapshot, or bounded project-root/UUID replay with epoch/sequence checks (max64). V4 evidence requests use the same native/auth/instance/frame/admission/deadline policy and bounded workers. Reads do not index/write timestamps/advance high-water. Public history/debug CLI, opaque public cursors, live subscriptions and retention remain B–D, not delivered A features.
+
 **Owning milestones:** M01 and M02 public control/storage/project-RPC foundation. [Unit tests](../../../tests/unit/test_projects.py) use controlled ports; real storage/discovery and installed checks are under [integration](../../../tests/integration/README.md) and [acceptance](../../../tests/acceptance/README.md).
 
 Run `.venv/bin/python -m pytest tests/unit tests/integration tests/acceptance -q` after [installation](../../../README.md). Extend with typed use cases and ports when the next real behavior needs them. See [package map](../README.md).

@@ -33,9 +33,9 @@ def test_ready_requires_real_schema_and_settings_and_failed_requires_safe_code()
     with pytest.raises(ValidationError):
         StorageReadiness(state="failed")
     ready = StorageReadiness(
-        state="ready", schema_version=2, retention_days=30, settings_source="default_file"
+        state="ready", schema_version=3, retention_days=30, settings_source="default_file"
     )
-    assert ready.schema_version == 2
+    assert ready.schema_version == 3
     with pytest.raises(ValidationError):
         StorageReadiness(
             state="ready", schema_version=True, retention_days=30, settings_source="default_file"

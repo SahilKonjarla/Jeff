@@ -16,6 +16,14 @@ from pydantic import (
     model_validator,
 )
 
+from jeff.application.history import (
+    ActivityPage,
+    ActivityRecord,
+    ActivityTrace,
+    GitObservation,
+    ReplayScope,
+    activity_code,
+)
 from jeff.application.projects import ErrorData, Failure, ProjectData, ProjectService, Success
 from jeff.application.questions import QuestionService, QuestionSuccess, question_intent
 from jeff.application.runtime import (
@@ -45,6 +53,8 @@ PROJECT_OPERATIONS: tuple[ProjectCapability, ...] = (
     "init",
     "config",
     "receipt.inspect",
+    "activity.trace",
+    "activity.replay",
 )
 
 
@@ -88,6 +98,69 @@ class ProjectCall(ProjectScope):
 class ReceiptQuery(ProjectScope):
     query_id: UUID = Field(default_factory=uuid4)
     request_id: UUID
+
+
+class EvidenceQuery(ProjectScope):
+    query_id: UUID = Field(default_factory=uuid4)
+    operation: Literal["trace", "replay"]
+    request_id: UUID | None = None
+    after: StrictInt = Field(default=0, ge=0, le=9223372036854775807)
+    limit: StrictInt = Field(default=64, gt=0, le=64)
+    expected_epoch: UUID | None = None
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        if self.operation == "trace":
+            if (
+                self.request_id is None
+                or self.after != 0
+                or self.limit != 64
+                or self.expected_epoch is not None
+            ):
+                raise ValueError("Trace accepts one scoped request ID only.")
+        elif self.request_id is not None:
+            raise ValueError("Replay uses an epoch/sequence, not a request ID.")
+        return self
+
+
+class EvidenceRequest(_DispatchModel):
+    revision: StrictInt = Field(
+        default=PROTOCOL_REVISION, ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION
+    )
+    kind: Literal["evidence"] = "evidence"
+    expected_instance_id: UUID
+    remaining_ms: StrictInt = Field(default=30000, gt=0, le=30000)
+    query: EvidenceQuery
+
+
+class EvidenceReply(_DispatchModel):
+    revision: StrictInt = Field(
+        default=PROTOCOL_REVISION, ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION
+    )
+    request_id: UUID
+    identity: RuntimeIdentityData
+    operation: Literal["trace", "replay"]
+    receipt: Receipt | None = None
+    trace: ActivityTrace | None = None
+    page: ActivityPage | None = None
+    error: Failure | None = None
+    missing_is_not_nonexecution_proof: Literal[True] = True
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        if self.error is not None and any(
+            x is not None for x in (self.receipt, self.trace, self.page)
+        ):
+            raise ValueError("An error cannot carry evidence.")
+        if (self.receipt is None) != (self.trace is None):
+            raise ValueError("Trace and receipt are one owner-thread snapshot.")
+        if self.operation == "trace" and self.page is not None:
+            raise ValueError("Trace cannot carry a replay page.")
+        if self.operation == "replay" and (self.receipt is not None or self.trace is not None):
+            raise ValueError("Replay cannot carry a trace snapshot.")
+        if self.operation == "replay" and self.error is None and self.page is None:
+            raise ValueError("Replay requires a page or fixed failure.")
+        return self
 
 
 class ProjectRequest(_DispatchModel):
@@ -166,6 +239,21 @@ def dispatch_failure(
 
 class DispatchStore(RequestLedger, ProjectRegistry, Protocol):
     pass
+
+
+class _RequestObserver:
+    def __init__(
+        self, store: DispatchStore, request_id: UUID, owner: UUID, deadline: float
+    ) -> None:
+        self.store, self.request_id, self.owner, self.deadline = store, request_id, owner, deadline
+
+    def record(self, observation: GitObservation) -> None:
+        self.store.observe(
+            ActivityRecord(
+                request_id=self.request_id, owner_instance_id=self.owner, git=observation
+            ),
+            deadline=max(self.deadline, time.monotonic() + 2),
+        )
 
 
 class ProjectDispatcher:
@@ -318,12 +406,25 @@ class ProjectDispatcher:
                                 deadline=absolute_deadline,
                             )
                         project = actual
+                        self.store.observe(
+                            ActivityRecord(
+                                request_id=call.request_id,
+                                owner_instance_id=self.identity.instance_id,
+                                registration_created=initialized.data.created,
+                            ),
+                            deadline=absolute_deadline,
+                        )
                         self.store.index(project, deadline=absolute_deadline)
             else:
                 assert project is not None
                 self.store.index(project, deadline=absolute_deadline)
                 result = self.questions.execute(
-                    call.question or "", root, deadline=absolute_deadline
+                    call.question or "",
+                    root,
+                    deadline=absolute_deadline,
+                    observer=_RequestObserver(
+                        self.store, call.request_id, self.identity.instance_id, absolute_deadline
+                    ),
                 )
             if not isinstance(result, Failure):
                 rebound = self._bind(call, absolute_deadline)
@@ -339,6 +440,9 @@ class ProjectDispatcher:
                 ReceiptTransition(
                     request_id=call.request_id,
                     owner_instance_id=self.identity.instance_id,
+                    error_code=activity_code(result.error.code)
+                    if isinstance(result, Failure)
+                    else None,
                     state=("unknown" if initialization_attempted else "failed")
                     if isinstance(result, Failure)
                     else "succeeded",
@@ -401,6 +505,72 @@ class ProjectDispatcher:
                 except Exception:
                     pass
             return reply(dispatch_failure("request_outcome_unknown"), accepted)
+
+    def inspect_evidence(self, query: EvidenceQuery, absolute_deadline: float) -> EvidenceReply:
+        def failed(error: Failure) -> EvidenceReply:
+            return EvidenceReply(
+                request_id=query.query_id,
+                identity=self.identity,
+                operation=query.operation,
+                error=error,
+            )
+
+        bound = self._bind(query, absolute_deadline)
+        if isinstance(bound, Failure):
+            if query.operation != "trace" or bound.error.code != "project_not_initialized":
+                return failed(bound)
+            root_result = self.projects.resolve_root(query.directory, deadline=absolute_deadline)
+            if isinstance(root_result, Failure):
+                return failed(root_result)
+            if query.expected_project_id is not None or (
+                query.expected_root is not None and query.expected_root != root_result
+            ):
+                return failed(dispatch_failure("project_target_mismatch"))
+            root, project_id = root_result, None
+        else:
+            root, project_id = bound.root, bound.project_id
+        try:
+            if query.operation == "trace":
+                assert query.request_id is not None
+                receipt, trace = self.store.trace(
+                    ReceiptScope(
+                        request_id=query.request_id,
+                        canonical_root=root,
+                        project_id=project_id,
+                        allow_unbound_init=True,
+                    ),
+                    deadline=absolute_deadline,
+                )
+                return EvidenceReply(
+                    request_id=query.query_id,
+                    identity=self.identity,
+                    operation=query.operation,
+                    receipt=receipt,
+                    trace=trace,
+                )
+            assert project_id is not None
+            page = self.store.replay(
+                ReplayScope(
+                    project_id=project_id,
+                    canonical_root=root,
+                    after=query.after,
+                    limit=query.limit,
+                    expected_epoch=query.expected_epoch,
+                ),
+                deadline=absolute_deadline,
+            )
+            return EvidenceReply(
+                request_id=query.query_id,
+                identity=self.identity,
+                operation=query.operation,
+                page=page,
+            )
+        except StorageFault as error:
+            return failed(
+                dispatch_failure("receipt_unavailable")
+                if error.code == "receipt_scope_mismatch"
+                else storage_failure(error.code)
+            )
 
     def inspect_receipt(self, query: ReceiptQuery, absolute_deadline: float) -> ReceiptReply:
         bound = self._bind(query, absolute_deadline)
@@ -471,6 +641,10 @@ class ProjectStatusService:
         return ProjectStatusSuccess(
             data=ProjectStatusData(**project.data.model_dump(), runtime=runtime.data)
         )
+
+
+class EvidenceClient(Protocol):
+    def inspect_evidence(self, query: EvidenceQuery) -> EvidenceReply: ...
 
 
 class ProjectClient(Protocol):

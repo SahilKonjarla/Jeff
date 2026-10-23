@@ -20,6 +20,7 @@ from jeff.application.dispatch import (
     ProjectRequest,
     ReceiptQuery,
 )
+from jeff.application.history import GitObserver
 from jeff.application.projects import ProjectService
 from jeff.application.questions import QuestionService
 from jeff.application.runtime import (
@@ -46,13 +47,15 @@ def test_four_active_sixteen_pending_and_actual_drain(git_repo: Path, tmp_path: 
     release = threading.Event()
 
     class HeldGit(GitRepositoryRead):
-        def read_branch(self, root: Path, *, deadline: float | None = None) -> BranchState:
+        def read_branch(
+            self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
+        ) -> BranchState:
             nonlocal active
             with entered:
                 active += 1
                 entered.notify_all()
             assert release.wait(10)
-            return super().read_branch(root, deadline=deadline)
+            return super().read_branch(root, deadline=deadline, observer=observer)
 
     identity = RuntimeIdentityData(instance_id=uuid4(), pid=os.getpid())
     layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
