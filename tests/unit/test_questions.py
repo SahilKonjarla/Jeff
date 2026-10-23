@@ -7,15 +7,17 @@ from uuid import uuid4
 import pytest
 from typer.testing import CliRunner
 
-from jeff.application.projects import ProjectService
+from jeff.application.dispatch import DispatchReply, ProjectCall, ReceiptQuery, ReceiptReply
+from jeff.application.projects import Failure, ProjectService
 from jeff.application.questions import BranchAnswer, ChangesAnswer, QuestionService
+from jeff.application.runtime import RuntimeIdentityData
 from jeff.domain.projects import Project, ProjectError
 from jeff.domain.repository import BranchState, FileChange, escape_metadata, protected_path
 from jeff.interfaces.cli import create_app
 
 
 class Discovery:
-    def find_root(self, directory: Path) -> Path:
+    def find_root(self, directory: Path, *, deadline: float | None = None) -> Path:
         return directory
 
 
@@ -35,11 +37,11 @@ class Git:
         self.changes = changes
         self.roots: list[Path] = []
 
-    def read_branch(self, root: Path) -> BranchState:
+    def read_branch(self, root: Path, *, deadline: float | None = None) -> BranchState:
         self.roots.append(root)
         return BranchState("main", "a" * 40, False, False)
 
-    def read_changes(self, root: Path) -> tuple[FileChange, ...]:
+    def read_changes(self, root: Path, *, deadline: float | None = None) -> tuple[FileChange, ...]:
         self.roots.append(root)
         return self.changes
 
@@ -108,7 +110,24 @@ def test_hidden_rename_side_and_display_characters_are_filtered(
     assert result.data.changes[0].path == escape_metadata("line\n\x1b[31m\u202e.txt")
     assert result.data.changes[0].staged and result.data.changes[0].unstaged
     assert ".env" not in result.model_dump_json()
-    displayed = CliRunner().invoke(create_app(projects, service), ["ask", "what changed?"])
+
+    class Client:
+        def execute(self, call: ProjectCall) -> DispatchReply:
+            return DispatchReply(
+                request_id=call.request_id,
+                identity=RuntimeIdentityData(instance_id=uuid4(), pid=1),
+                result=service.execute(call.question or "", call.directory),
+            )
+
+        def status(self, directory: Path) -> Failure:
+            raise AssertionError("Not a status test")
+
+        def inspect_receipt(self, query: ReceiptQuery) -> ReceiptReply:
+            raise AssertionError("No receipt command")
+
+    displayed = CliRunner().invoke(
+        create_app(Client, lambda: pytest.fail("No lifecycle")), ["ask", "what changed?"]
+    )
     assert displayed.exit_code == 0
     assert "\x1b" not in displayed.output and "\u202e" not in displayed.output
     assert r"line\n\u001b[31m\u202e.txt" in displayed.output

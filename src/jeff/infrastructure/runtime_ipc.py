@@ -1,4 +1,4 @@
-"""Strict bounded control framing and injected cached facts; no SQL/project dispatch."""
+"""Bounded native/authenticated unary transport; no SQL or Git execution on the loop."""
 
 import asyncio
 import ctypes
@@ -11,11 +11,25 @@ import struct
 import sys
 import time
 from collections.abc import Callable
-from typing import Self, cast
+from pathlib import Path
+from typing import Annotated, Self, cast
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, RootModel
 
+from jeff.application.dispatch import (
+    PROJECT_OPERATIONS,
+    DispatchReply,
+    ProjectCall,
+    ProjectRequest,
+    ProjectStatusService,
+    ProjectStatusSuccess,
+    ReceiptQuery,
+    ReceiptReply,
+    ReceiptRequest,
+    dispatch_failure,
+)
+from jeff.application.projects import Failure
 from jeff.application.runtime import (
     DEFAULT_RUNTIME_LIMITS,
     PROTOCOL_REVISION,
@@ -32,7 +46,16 @@ from jeff.application.runtime import (
 )
 from jeff.application.storage import StorageReadiness
 from jeff.domain.runtime import RuntimeState
+from jeff.infrastructure.runtime_dispatch import RuntimeDispatcher
 from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
+
+
+class RpcRequest(
+    RootModel[
+        Annotated[ControlRequest | ProjectRequest | ReceiptRequest, Field(discriminator="kind")]
+    ]
+):
+    pass
 
 
 def peer_identity(connection: socket.socket) -> tuple[int, int]:
@@ -185,11 +208,15 @@ class ControlConnection:
             )
             if reply.error is not None:
                 raise ControlFault(reply.error)
+            if reply.identity is None or reply.identity.pid != self.peer_pid:
+                raise ControlFault("runtime_peer_unverified")
+            self.identity = reply.identity
         except (OSError, ControlFault) as error:
             self.connection.close()
             if isinstance(error, ControlFault) and error.code in (
                 "runtime_protocol_incompatible",
                 "runtime_authentication_failed",
+                "runtime_peer_unverified",
             ):
                 raise
             raise ControlFault("runtime_handshake_unconfirmed") from None
@@ -233,6 +260,7 @@ class ControlConnection:
                 observation is None
                 or observation.identity is None
                 or observation.identity.pid != self.peer_pid
+                or observation.identity != self.identity
             ):
                 raise ControlFault("runtime_ownership_unconfirmed")
             if (
@@ -266,6 +294,96 @@ class ControlClient:
             return connection.request(operation, expected_instance_id)
 
 
+class RuntimeProjectClient:
+    """One authenticated unary call; no autostart, response replay or local fallback."""
+
+    def __init__(
+        self,
+        layout: RuntimeLayout | Callable[[], RuntimeLayout],
+        *,
+        diagnostics: ProjectStatusService | None = None,
+    ) -> None:
+        self._layout = layout
+        self._diagnostics = diagnostics
+
+    def status(self, directory: Path) -> ProjectStatusSuccess | Failure:
+        if self._diagnostics is None:
+            raise ValueError("Local diagnostics were not composed for this RPC-only client.")
+        return self._diagnostics.execute(directory)
+
+    def _connect(self, deadline: float) -> ControlConnection:
+        layout = self._layout() if callable(self._layout) else self._layout
+        try:
+            store = RuntimeStateStore(layout)
+            owner = store.acquire(create=False)
+            if owner is not None:
+                with owner:
+                    owner.require_no_endpoint()
+                raise ControlFault("daemon_not_running")
+        except ControlFault as error:
+            if error.code == "runtime_absent":
+                raise ControlFault("daemon_not_running") from None
+            raise
+        token = store.read_credential()
+        return ControlClient(layout, token).connect(deadline)
+
+    @staticmethod
+    def _exchange[Reply: BaseModel](
+        connection: ControlConnection, request: BaseModel, model: type[Reply]
+    ) -> Reply:
+        if connection.used:
+            raise ControlFault("runtime_protocol_error")
+        connection.used = True
+        connection.connection.settimeout(_remaining(connection.deadline))
+        connection.connection.sendall(
+            encode_message(request.model_dump(mode="json"), DEFAULT_RUNTIME_LIMITS.request_bytes)
+        )
+        return receive_message(
+            connection.connection, DEFAULT_RUNTIME_LIMITS.response_bytes, connection.deadline, model
+        )
+
+    def execute(self, call: ProjectCall) -> DispatchReply:
+        deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
+        with self._connect(deadline) as connection:
+            try:
+                request = ProjectRequest(
+                    call=call,
+                    expected_instance_id=connection.identity.instance_id,
+                    remaining_ms=max(1, int(_remaining(deadline) * 1000)),
+                )
+                reply = self._exchange(connection, request, DispatchReply)
+                if reply.request_id != call.request_id or reply.identity != connection.identity:
+                    raise ControlFault("runtime_ownership_unconfirmed")
+                return reply
+            except (OSError, ControlFault):
+                return DispatchReply(
+                    request_id=call.request_id,
+                    identity=connection.identity,
+                    result=dispatch_failure("request_outcome_unknown"),
+                    accepted=None,
+                )
+
+    def inspect_receipt(self, query: ReceiptQuery) -> ReceiptReply:
+        deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
+        with self._connect(deadline) as connection:
+            try:
+                request = ReceiptRequest(
+                    query=query,
+                    expected_instance_id=connection.identity.instance_id,
+                    remaining_ms=max(1, int(_remaining(deadline) * 1000)),
+                )
+                reply = self._exchange(connection, request, ReceiptReply)
+                if reply.request_id != query.query_id or reply.identity != connection.identity:
+                    raise ControlFault("runtime_ownership_unconfirmed")
+                return reply
+            except (OSError, ControlFault):
+                return ReceiptReply(
+                    request_id=query.query_id,
+                    identity=connection.identity,
+                    error=dispatch_failure("request_outcome_unknown"),
+                )
+
+
 async def _async_receive[Message: BaseModel](
     reader: asyncio.StreamReader, maximum: int, seconds: float, model: type[Message]
 ) -> Message:
@@ -297,12 +415,14 @@ class ControlServer:
         self._token = token
         self.identity = identity
         self.storage_snapshot = storage_snapshot
+        self.dispatcher: RuntimeDispatcher | None = None
+        self._project_connections = 0
         self.stopping = False
         self._stop = asyncio.Event()
         self._tasks: set[asyncio.Task[None]] = set()
 
     def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        if self.stopping or len(self._tasks) >= DEFAULT_RUNTIME_LIMITS.connections:
+        if len(self._tasks) >= DEFAULT_RUNTIME_LIMITS.connections:
             writer.close()
             return
         task = asyncio.create_task(self._handle(reader, writer))
@@ -310,6 +430,8 @@ class ControlServer:
         task.add_done_callback(self._tasks.discard)
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        project_slot = False
+        response: ControlResponse | DispatchReply | ReceiptReply
         try:
             uid, _ = peer_identity(cast(socket.socket, writer.get_extra_info("socket")))
             if uid != self.owner.store.layout.uid:
@@ -346,23 +468,35 @@ class ControlServer:
                 return
             await _async_send(
                 writer,
-                AuthAccepted(revision=PROTOCOL_REVISION, authenticated=True),
+                AuthAccepted(
+                    revision=PROTOCOL_REVISION, authenticated=True, identity=self.identity
+                ),
                 DEFAULT_RUNTIME_LIMITS.auth_bytes,
             )
-            request = await _async_receive(
-                reader,
-                DEFAULT_RUNTIME_LIMITS.request_bytes,
-                DEFAULT_RUNTIME_LIMITS.frame_seconds,
-                ControlRequest,
-            )
+            began = time.monotonic()
+            request = (
+                await _async_receive(
+                    reader,
+                    DEFAULT_RUNTIME_LIMITS.request_bytes,
+                    DEFAULT_RUNTIME_LIMITS.frame_seconds,
+                    RpcRequest,
+                )
+            ).root
+            if isinstance(request, (ProjectRequest, ReceiptRequest)):
+                if self._project_connections >= DEFAULT_RUNTIME_LIMITS.connections - 1:
+                    response = self._project_refusal(request, busy=True)
+                else:
+                    project_slot = True
+                    self._project_connections += 1
+                    response = await self._project(request, began)
+                await _async_send(writer, response, DEFAULT_RUNTIME_LIMITS.response_bytes)
+                return
             error: ControlIssueCode | None = None
             if (
                 request.expected_instance_id is not None
                 and request.expected_instance_id != self.identity.instance_id
             ):
                 error = "runtime_ownership_unconfirmed"
-            elif self.stopping:
-                error = "runtime_busy"
             if error:
                 response = ControlResponse(
                     revision=PROTOCOL_REVISION, request_id=request.request_id, error=error
@@ -371,11 +505,24 @@ class ControlServer:
                 if request.operation == "stop":
                     self.stopping = True
                     self._stop.set()  # accepted shutdown persists even if reply delivery fails
+                storage = self.storage_snapshot()
                 observation = ControlObservation(
                     state=RuntimeState.STOPPING if self.stopping else RuntimeState.RUNNING,
                     identity=self.identity,
                     control_ready=not self.stopping,
-                    storage=self.storage_snapshot(),
+                    application_ready=(
+                        not self.stopping
+                        and storage.state == "ready"
+                        and self.dispatcher is not None
+                        and self.dispatcher.ready
+                    ),
+                    storage=storage,
+                    available_operations=PROJECT_OPERATIONS
+                    if not self.stopping
+                    and storage.state == "ready"
+                    and self.dispatcher is not None
+                    and self.dispatcher.ready
+                    else (),
                 )
                 response = ControlResponse(
                     revision=PROTOCOL_REVISION,
@@ -386,6 +533,8 @@ class ControlServer:
         except (ControlFault, OSError, ValueError, asyncio.IncompleteReadError, TimeoutError):
             pass  # Never log/echo auth, raw frames, parser or OS details.
         finally:
+            if project_slot:
+                self._project_connections -= 1
             writer.close()
             try:
                 await asyncio.wait_for(
@@ -393,6 +542,54 @@ class ControlServer:
                 )
             except (OSError, TimeoutError):
                 pass
+
+    def _project_refusal(
+        self, request: ProjectRequest | ReceiptRequest, *, busy: bool = False, unknown: bool = False
+    ) -> DispatchReply | ReceiptReply:
+        error = dispatch_failure(
+            "request_outcome_unknown" if unknown else "runtime_busy" if busy else "runtime_stopping"
+        )
+        if isinstance(request, ProjectRequest):
+            return DispatchReply(
+                request_id=request.call.request_id,
+                identity=self.identity,
+                result=error,
+                accepted=None if unknown else False,
+            )
+        return ReceiptReply(request_id=request.query.query_id, identity=self.identity, error=error)
+
+    async def _project(
+        self, request: ProjectRequest | ReceiptRequest, began: float
+    ) -> DispatchReply | ReceiptReply:
+        if request.expected_instance_id != self.identity.instance_id:
+            error = self._project_refusal(request)
+            failure = dispatch_failure("project_target_mismatch")
+            return (
+                error.model_copy(update={"result": failure})
+                if isinstance(error, DispatchReply)
+                else error.model_copy(update={"error": failure})
+            )
+        if self.stopping:
+            return self._project_refusal(request)
+        if self.storage_snapshot().state != "ready":
+            if self.dispatcher is not None:
+                self.dispatcher.request_close()
+            return self._project_refusal(request, busy=True)
+        if self.dispatcher is None or not self.dispatcher.ready:
+            return self._project_refusal(request, busy=True)
+        deadline = began + min(request.remaining_ms / 1000, DEFAULT_RUNTIME_LIMITS.request_seconds)
+        try:
+            work = request.call if isinstance(request, ProjectRequest) else request.query
+            future = self.dispatcher.submit(work, deadline)
+        except ControlFault:
+            return self._project_refusal(request, busy=True)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(future)),
+                timeout=max(0, deadline - time.monotonic()),
+            )
+        except TimeoutError:
+            return self._project_refusal(request, unknown=True)
 
     def request_stop(self) -> None:
         self.stopping = True
@@ -414,6 +611,11 @@ class ControlServer:
                 limit=DEFAULT_RUNTIME_LIMITS.request_bytes + 4,
             )
             await self._stop.wait()
+            if self.dispatcher is not None:
+                self.dispatcher.request_close()
+                while not self.dispatcher.closed:
+                    await asyncio.sleep(0.01)
+                self.dispatcher.close(timeout=0)
         finally:
             self.stopping = True
             if server is not None:

@@ -33,7 +33,7 @@ def test_start_requires_storage_and_restart_reloads_private_settings(tmp_path: P
         first = controller.start()
         assert isinstance(first, ControlSuccess), first
         assert first.data.storage.state == "ready" and first.data.storage.retention_days == 30
-        assert first.data.application_ready is False
+        assert first.data.application_ready is True
         payload = b"# fixture only\nschema_version: 1\nhistory: {retention_days: 7}\n"
         layout.settings.write_bytes(payload)
         current = controller.status()
@@ -87,7 +87,7 @@ def test_startup_pipe_is_bounded_diagnostic_not_readiness_authority(
 import json,os,struct,sys
 fd=int(sys.argv[1]);kind=sys.argv[3]
 error='SYNTHETIC_PRIVATE' if kind=='unknown_error' else None
-payload=json.dumps({'revision':2,'instance_id':sys.argv[2],'error':error}).encode()
+payload=json.dumps({'revision':3,'instance_id':sys.argv[2],'error':error}).encode()
 frame=struct.pack('!I',len(payload))+payload
 if kind=='oversized':frame=b'\\xff\\xff\\xff\\xff'
 if kind=='truncated':frame=b'\\x00'

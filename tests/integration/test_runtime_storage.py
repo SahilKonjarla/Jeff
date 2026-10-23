@@ -32,7 +32,7 @@ def test_real_registry_commit_reopen_and_readonly_lookup(tmp_path: Path) -> None
         try:
             ready = storage.wait_ready(5)
             assert ready.state == "ready", ready
-            assert ready.schema_version == 1 and ready.retention_days == 30
+            assert ready.schema_version == 2 and ready.retention_days == 30
             assert storage.lookup(project) is None
             assert storage.index(project) == (project, True)
             assert storage.index(project) == (project, False)
@@ -83,7 +83,7 @@ def test_conservative_adoption_preserves_existing_database_and_sidecars(
                 fixture.execute("CREATE TABLE foreign_data(value TEXT)")
                 if kind == "newer":
                     fixture.execute(f"PRAGMA application_id={DATABASE_APPLICATION_ID}")
-                    fixture.execute("PRAGMA user_version=2")
+                    fixture.execute("PRAGMA user_version=3")
             layout.database.chmod(0o600)
         if kind in ("journal", "wal", "shm"):
             sidecar = layout.data_dir / ("state.sqlite3-" + kind)
@@ -310,7 +310,7 @@ def test_recognized_marker_does_not_bless_unknown_objects_or_mismatched_ledger(
             fixture.execute(
                 "CREATE TABLE sqliteXforeign(value TEXT)"
                 if alteration == "unknown_object"
-                else "UPDATE schema_migrations SET name='unknown_migration'"
+                else "UPDATE schema_migrations SET name='unknown_migration' WHERE version=1"
             )
         before = layout.database.read_bytes()
         refused = SQLiteStorage(owner)

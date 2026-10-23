@@ -82,7 +82,7 @@ def test_controller_start_status_stop_and_repeat_start_use_one_real_owner(
         assert not root.joinpath("r").exists()
         first = controller.start()
         assert isinstance(first, ControlSuccess), first
-        assert first.data.control_ready and not first.data.application_ready
+        assert first.data.control_ready and first.data.application_ready
         again = RuntimeController(layout).start()
         assert isinstance(again, ControlSuccess), again
         assert again.data.identity == first.data.identity
@@ -163,7 +163,7 @@ def test_oversized_and_unauthenticated_shutdown_frames_never_dispatch(
         b"\xff\xff\xff\xff",
         encode_message(
             {
-                "revision": 2,
+                "revision": 3,
                 "request_id": "00000000-0000-4000-8000-000000000001",
                 "operation": "stop",
             },

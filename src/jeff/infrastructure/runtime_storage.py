@@ -13,7 +13,8 @@ import time
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
-from typing import Literal
+from pathlib import Path
+from typing import Literal, cast
 from uuid import UUID
 
 from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS, ControlFault
@@ -21,6 +22,11 @@ from jeff.application.storage import (
     DATABASE_APPLICATION_ID,
     DATABASE_SCHEMA,
     STORAGE_PENDING_LIMIT,
+    Receipt,
+    ReceiptClaim,
+    ReceiptClaimResult,
+    ReceiptScope,
+    ReceiptTransition,
     StorageFault,
     StorageIssueCode,
     StorageReadiness,
@@ -33,6 +39,25 @@ _LEDGER = "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEX
 _PROJECTS = (
     "CREATE TABLE projects (project_id TEXT NOT NULL PRIMARY KEY, "
     "canonical_root TEXT NOT NULL UNIQUE)"
+)
+_RECEIPTS = (
+    "CREATE TABLE request_receipts (request_id TEXT NOT NULL PRIMARY KEY, "
+    "owner_instance_id TEXT NOT NULL, operation TEXT NOT NULL "
+    "CHECK(operation IN ('init','ask.branch','ask.changes')), "
+    "canonical_root TEXT NOT NULL, project_id TEXT, "
+    "state TEXT NOT NULL CHECK(state IN ('accepted','running','succeeded','failed','unknown')), "
+    "accepted_at_ms INTEGER NOT NULL CHECK(accepted_at_ms>=0), finished_at_ms INTEGER, "
+    "outcome_code TEXT CHECK(outcome_code IN "
+    "('ok','operation_failed','timeout','interrupted','partial','target_mismatch')), "
+    "CHECK(project_id IS NOT NULL OR operation='init'), "
+    "CHECK((state IN ('accepted','running') AND finished_at_ms IS NULL "
+    "AND outcome_code IS NULL) OR (state IN ('succeeded','failed','unknown') "
+    "AND finished_at_ms IS NOT NULL AND outcome_code IS NOT NULL)))"
+)
+_RECEIPT_INDEX = "CREATE INDEX receipts_unfinished ON request_receipts(state,owner_instance_id)"
+_COLUMNS = (
+    "request_id,owner_instance_id,operation,canonical_root,project_id,"
+    "state,accepted_at_ms,finished_at_ms,outcome_code"
 )
 _SIDECARS = ("state.sqlite3-journal", "state.sqlite3-wal", "state.sqlite3-shm")
 _FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -82,39 +107,48 @@ def _schema(connection: sqlite3.Connection) -> int:
     if connection.execute("PRAGMA application_id").fetchone() != (DATABASE_APPLICATION_ID,):
         raise StorageFault("storage_unrecognized")
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version not in (0, DATABASE_SCHEMA):
+    if version not in (0, 1, DATABASE_SCHEMA):
         raise StorageFault("storage_schema_unsupported")
     if connection.execute("PRAGMA journal_mode").fetchone() != ("delete",):
         raise StorageFault("storage_recovery_required")
-    expected = {"schema_migrations": _LEDGER}
-    if version == DATABASE_SCHEMA:
-        expected["projects"] = _PROJECTS
+    expected = {"schema_migrations": ("table", _LEDGER)}
+    if version >= 1:
+        expected["projects"] = ("table", _PROJECTS)
+    if version >= 2:
+        expected["request_receipts"] = ("table", _RECEIPTS)
+        expected["receipts_unfinished"] = ("index", _RECEIPT_INDEX)
     found = connection.execute(
-        "SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT 3"
+        "SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT 5"
     ).fetchall()
 
     def normalize(text: object) -> str:
         return " ".join(str(text).upper().split())
 
     if len(found) != len(expected) or any(
-        kind != "table" or name not in expected or normalize(sql) != normalize(expected[name])
+        name not in expected
+        or kind != expected[name][0]
+        or normalize(sql) != normalize(expected[name][1])
         for kind, name, sql in found
     ):
         raise StorageFault("storage_schema_unsupported")
     ledger = connection.execute(
-        "SELECT version,name FROM schema_migrations ORDER BY version LIMIT 2"
+        "SELECT version,name FROM schema_migrations ORDER BY version LIMIT 3"
     ).fetchall()
-    if ledger != ([] if version == 0 else [(1, "registry_v1")]):
+    if ledger != [
+        (number, name)
+        for number, name in ((1, "registry_v1"), (2, "request_receipts_v2"))
+        if number <= version
+    ]:
         raise StorageFault("storage_schema_unsupported")
     return version
 
 
 @dataclass
 class _Work:
-    operation: Literal["index", "lookup"]
-    project: Project
+    operation: Literal["index", "lookup", "claim", "finish", "inspect", "root_claimed"]
+    payload: Project | ReceiptClaim | ReceiptTransition | ReceiptScope | Path
     deadline: float
-    result: Future[bool]
+    result: Future[object]
 
 
 class SQLiteStorage:
@@ -122,8 +156,9 @@ class SQLiteStorage:
     never the control loop. No SQL/connection/cursor is exposed through this interface.
     """
 
-    def __init__(self, owner: Ownership) -> None:
+    def __init__(self, owner: Ownership, *, instance_id: UUID | None = None) -> None:
         self.owner = owner
+        self.instance_id = instance_id
         self._mutex = threading.Lock()
         self._state = StorageReadiness()
         self._initialized = threading.Event()
@@ -173,20 +208,45 @@ class SQLiteStorage:
         if self._close_fault is not None:
             raise self._close_fault
 
-    def index(self, project: Project) -> tuple[Project, bool]:
-        return project, self._submit("index", project)
+    def index(self, project: Project, *, deadline: float | None = None) -> tuple[Project, bool]:
+        return project, cast(bool, self._submit("index", project, deadline))
 
-    def lookup(self, project: Project) -> Project | None:
-        return project if self._submit("lookup", project) else None
+    def lookup(self, project: Project, *, deadline: float | None = None) -> Project | None:
+        return project if self._submit("lookup", project, deadline) else None
 
-    def _submit(self, operation: Literal["index", "lookup"], project: Project) -> bool:
-        if (
-            not isinstance(project.project_id, UUID)
-            or not project.root.is_absolute()
-            or "\0" in str(project.root)
+    def root_claimed(self, root: Path, *, deadline: float | None = None) -> bool:
+        if not root.is_absolute() or "\0" in str(root):
+            raise StorageFault("registry_conflict")
+        return cast(bool, self._submit("root_claimed", root, deadline))
+
+    def claim(self, claim: ReceiptClaim, *, deadline: float) -> ReceiptClaimResult:
+        return cast(ReceiptClaimResult, self._submit("claim", claim, deadline))
+
+    def finish(self, transition: ReceiptTransition, *, deadline: float) -> Receipt:
+        return cast(Receipt, self._submit("finish", transition, deadline))
+
+    def inspect(self, scope: ReceiptScope, *, deadline: float) -> Receipt | None:
+        return cast(Receipt | None, self._submit("inspect", scope, deadline))
+
+    def _submit(
+        self,
+        operation: Literal["index", "lookup", "claim", "finish", "inspect", "root_claimed"],
+        payload: Project | ReceiptClaim | ReceiptTransition | ReceiptScope | Path,
+        deadline: float | None,
+    ) -> object:
+        if isinstance(payload, Project) and (
+            not isinstance(payload.project_id, UUID)
+            or not payload.root.is_absolute()
+            or "\0" in str(payload.root)
         ):
             raise StorageFault("registry_conflict")
-        result: Future[bool] = Future()
+        deadline = min(
+            deadline if deadline is not None else float("inf"),
+            time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds,
+        )
+        if deadline <= time.monotonic():
+            raise StorageFault("storage_busy")
+        result: Future[object] = Future()
         with self._mutex:
             if not self._accepting:
                 raise StorageFault("storage_closing")
@@ -194,15 +254,15 @@ class SQLiteStorage:
                 self._queue.put_nowait(
                     _Work(
                         operation,
-                        project,
-                        time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds,
+                        payload,
+                        deadline,
                         result,
                     )
                 )
             except queue.Full:
                 raise StorageFault("storage_busy") from None
         try:
-            return result.result(timeout=DEFAULT_RUNTIME_LIMITS.request_seconds)
+            return result.result(timeout=max(0, deadline - time.monotonic()))
         except FutureTimeout:
             # Only queued work can be cancelled safely; running SQL keeps its slot.
             raise StorageFault(
@@ -305,7 +365,19 @@ class SQLiteStorage:
                 )
                 connection.execute("PRAGMA user_version=1")
                 connection.execute("COMMIT")
+            if version < 2:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(_RECEIPTS)
+                connection.execute(_RECEIPT_INDEX)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,name) VALUES (?,?)",
+                    (2, "request_receipts_v2"),
+                )
+                connection.execute("PRAGMA user_version=2")
+                connection.execute("COMMIT")
             _schema(connection)
+            if self.instance_id is not None:
+                self._reconcile(connection, self.instance_id)
             self._check(root, fd)
             return connection, fd
         except BaseException:
@@ -316,9 +388,20 @@ class SQLiteStorage:
                 self._release(connection, fd)
             raise
 
-    def _execute(self, connection: sqlite3.Connection, work: _Work, root: int, fd: int) -> bool:
+    def _execute(self, connection: sqlite3.Connection, work: _Work, root: int, fd: int) -> object:
         self._check(root, fd)
-        project_id, path = str(work.project.project_id), str(work.project.root)
+        if work.operation == "root_claimed":
+            assert isinstance(work.payload, Path)
+            return (
+                connection.execute(
+                    "SELECT 1 FROM projects WHERE canonical_root=?", (str(work.payload),)
+                ).fetchone()
+                is not None
+            )
+        if work.operation not in ("index", "lookup"):
+            return self._receipt_work(connection, work, root, fd)
+        assert isinstance(work.payload, Project)
+        project_id, path = str(work.payload.project_id), str(work.payload.root)
         writing = work.operation == "index"
         if writing:
             connection.execute("BEGIN IMMEDIATE")
@@ -343,6 +426,147 @@ class SQLiteStorage:
                 raise StorageFault("storage_outcome_unconfirmed") from None
             raise
         return created if writing else bool(rows)
+
+    @staticmethod
+    def _receipt(row: tuple[object, ...]) -> Receipt:
+        return Receipt.model_validate(dict(zip(_COLUMNS.split(","), row, strict=True)))
+
+    @staticmethod
+    def _reconcile(connection: sqlite3.Connection, instance: UUID) -> None:
+        deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.start_seconds
+        while True:
+            if time.monotonic() >= deadline:
+                raise StorageFault("storage_busy")
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT request_id FROM request_receipts WHERE state IN ('accepted','running') "
+                "AND owner_instance_id<>? LIMIT 100",
+                (str(instance),),
+            ).fetchall()
+            if not rows:
+                connection.execute("COMMIT")
+                return
+            for (request_id,) in rows:
+                connection.execute(
+                    "UPDATE request_receipts SET state='unknown',finished_at_ms=?,"
+                    "outcome_code='interrupted' WHERE request_id=?",
+                    (time.time_ns() // 1000000, request_id),
+                )
+            connection.execute("COMMIT")
+
+    def _receipt_work(
+        self, connection: sqlite3.Connection, work: _Work, root: int, fd: int
+    ) -> object:
+        payload = work.payload
+        assert isinstance(payload, (ReceiptClaim, ReceiptTransition, ReceiptScope))
+        writing = work.operation != "inspect"
+        if writing:
+            connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            f"SELECT {_COLUMNS} FROM request_receipts WHERE request_id=?",
+            (str(payload.request_id),),
+        ).fetchone()
+        receipt = self._receipt(row) if row is not None else None
+        result: object
+        if isinstance(payload, ReceiptClaim):
+            if receipt is not None:
+                if (
+                    receipt.operation != payload.operation
+                    or receipt.canonical_root != payload.canonical_root
+                    or (
+                        receipt.project_id != payload.project_id
+                        and not (receipt.operation == "init" and receipt.project_id is None)
+                    )
+                ):
+                    raise StorageFault("receipt_conflict")
+                result = ReceiptClaimResult(created=False, receipt=receipt)
+            else:
+                if self.instance_id is not None and payload.owner_instance_id != self.instance_id:
+                    raise StorageFault("receipt_conflict")
+                receipt = Receipt(
+                    **payload.model_dump(),
+                    state="accepted",
+                    accepted_at_ms=time.time_ns() // 1000000,
+                )
+                connection.execute(
+                    f"INSERT INTO request_receipts({_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        str(receipt.request_id),
+                        str(receipt.owner_instance_id),
+                        receipt.operation,
+                        str(receipt.canonical_root),
+                        str(receipt.project_id) if receipt.project_id is not None else None,
+                        receipt.state,
+                        receipt.accepted_at_ms,
+                        None,
+                        None,
+                    ),
+                )
+                result = ReceiptClaimResult(created=True, receipt=receipt)
+        elif isinstance(payload, ReceiptScope):
+            if receipt is not None and (
+                receipt.canonical_root != payload.canonical_root
+                or (
+                    receipt.project_id != payload.project_id
+                    and not (
+                        payload.allow_unbound_init
+                        and receipt.operation == "init"
+                        and receipt.project_id is None
+                    )
+                )
+            ):
+                raise StorageFault("receipt_scope_mismatch")
+            result = receipt
+        else:
+            associating = (
+                receipt is not None
+                and receipt.operation == "init"
+                and receipt.project_id is None
+                and receipt.state == "running"
+                and payload.state == "running"
+                and payload.project_id is not None
+            )
+            if (
+                receipt is None
+                or receipt.owner_instance_id != payload.owner_instance_id
+                or (self.instance_id is not None and payload.owner_instance_id != self.instance_id)
+                or receipt.state not in ("accepted", "running")
+                or (payload.state == "running" and receipt.state != "accepted" and not associating)
+                or (payload.project_id is not None and not associating)
+            ):
+                raise StorageFault("receipt_conflict")
+            finished = None if payload.state == "running" else time.time_ns() // 1000000
+            project_id = payload.project_id if associating else receipt.project_id
+            connection.execute(
+                "UPDATE request_receipts SET state=?,finished_at_ms=?,outcome_code=?,project_id=? "
+                "WHERE request_id=?",
+                (
+                    payload.state,
+                    finished,
+                    payload.outcome_code,
+                    str(project_id) if project_id is not None else None,
+                    str(payload.request_id),
+                ),
+            )
+            result = Receipt.model_validate(
+                {
+                    **receipt.model_dump(),
+                    "state": payload.state,
+                    "project_id": project_id,
+                    "finished_at_ms": finished,
+                    "outcome_code": payload.outcome_code,
+                }
+            )
+        self._check(root, fd)
+        if writing:
+            try:
+                connection.execute("COMMIT")
+                self._check(root, fd)
+            except Exception:
+                if not connection.in_transaction:
+                    raise StorageFault("storage_outcome_unconfirmed") from None
+                raise
+        return result
 
     def _release(self, connection: sqlite3.Connection | None, fd: int) -> None:
         try:
@@ -409,7 +633,12 @@ class SQLiteStorage:
                                 self._closing.set()
                             else:
                                 fault = _fault(error)
-                            if fault.code not in ("storage_busy", "registry_conflict"):
+                            if fault.code not in (
+                                "storage_busy",
+                                "registry_conflict",
+                                "receipt_conflict",
+                                "receipt_scope_mismatch",
+                            ):
                                 self._failed(fault)
                                 self._closing.set()
                             if not work.result.done():

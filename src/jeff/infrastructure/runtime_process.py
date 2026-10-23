@@ -1,4 +1,4 @@
-"""Bounded installed-process control. No public CLI wiring, PID/name kill or replay."""
+"""Bounded installed-process control. No presentation, PID/name kill or action replay."""
 
 import os
 import select
@@ -102,7 +102,7 @@ class RuntimeController:
                     observed = self._ready(store, ready_deadline)
                     if observed.storage.error is not None:
                         raise ControlFault(observed.storage.error)
-                    if observed.storage.state == "ready":
+                    if observed.application_ready:
                         return ControlSuccess(data=observed)
                 except ControlFault as error:
                     if error.code not in (
@@ -179,7 +179,7 @@ class RuntimeController:
                         raise ControlFault("runtime_ownership_unconfirmed")
                     if observation.storage.error is not None:
                         raise ControlFault(observation.storage.error)
-                    if observation.storage.state == "ready":
+                    if observation.application_ready:
                         return ControlSuccess(data=observation)
                     time.sleep(min(0.02, max(0, ready_deadline - time.monotonic())))
                 except ControlFault as error:

@@ -1,14 +1,9 @@
-"""Wire project ports to local adapters without starting a daemon."""
+"""Lazy public CLI composition; only the daemon composes question execution."""
 
-from jeff.application.projects import ProjectService
-from jeff.application.questions import QuestionService
-from jeff.infrastructure.project_files import FileProjectStore
-from jeff.integrations.git import GitProjectDiscovery, GitRepositoryRead
+from jeff.bootstrap.runtime import create_project_client, create_runtime_controller
 from jeff.interfaces.cli import create_app
 
 
 def main() -> None:
-    """Construct adapters; actual I/O occurs only when a project command runs."""
-    service = ProjectService(GitProjectDiscovery(), FileProjectStore())
-    questions = QuestionService(service, GitRepositoryRead())
-    create_app(service, questions)()
+    """Help/syntax does not select locations or create/connect to installation state."""
+    create_app(create_project_client, create_runtime_controller)()

@@ -1,12 +1,12 @@
 # Source layout
 
-**Status:** M01 registration and read-only branch/change questions implemented. Daemon/runtime behavior remains unimplemented.
+**Status:** M01 registration and read-only branch/change questions implemented. M02 adds authenticated public daemon lifecycle/project dispatch, private SQLite/receipts and runtime-aware status; history/doctor/recovery remain pending.
 
 `jeff/` contains the Python package; see its [tier map](jeff/README.md). Packaging and tooling live in [pyproject.toml](../pyproject.toml).
 
 **Owning milestone:** M01. Mac CLI/demo behavior has automated and user-supplied manual evidence; formal milestone acceptance/M02 handoff is not automatic. Demo generation and bounded technical probes live outside the runtime package. Native local validation is recorded; hosted CI is not running and Linux verification is deferred.
 
-**Implemented flow:** the installed `jeff` script or `python -m jeff` calls bootstrap, which injects discovery/storage into the application and CLI. Help does no project I/O; explicit project commands bind a canonical Git root, initialize or inspect declared configuration, and render public-safe typed identity results. `ask` adds deterministic question routing through a Git-read port, with protected-path filtering, escaped metadata, bounded Git subprocesses, and timestamped results. No providers, daemon, or arbitrary user-command execution is started; internal Git reads use narrow validated argv.
+**Implemented flow:** the installed `jeff` script or `python -m jeff` calls bootstrap, which injects lazy application client/control factories into the CLI. Help does no project I/O; explicit project commands bind a canonical Git root, initialize or inspect declared configuration, and render public-safe typed identity results. `ask` adds deterministic question routing through a Git-read port, with protected-path filtering, escaped metadata, bounded Git subprocesses, and timestamped results. Only explicit start launches the authenticated daemon; init/config/ask route through it without fallback and status composes read-only local/runtime facts. No providers or arbitrary user-command execution is started; internal Git reads use narrow validated argv.
 
 **Dependencies/security:** only entry points import bootstrap; inner tiers cannot import outer implementations. Domain remains standard-library-only. The [architecture tests](../tests/architecture/README.md) enforce static import directions, not runtime isolation.
 

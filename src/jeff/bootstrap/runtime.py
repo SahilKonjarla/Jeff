@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
-from jeff.application.projects import Failure
+from jeff.application.dispatch import ProjectClient, ProjectDispatcher, ProjectStatusService
+from jeff.application.projects import Failure, ProjectService
+from jeff.application.questions import QuestionService
 from jeff.application.runtime import (
     PROTOCOL_REVISION,
     ControlFault,
@@ -22,11 +24,14 @@ from jeff.application.runtime import (
     StartupResult,
 )
 from jeff.application.storage import StorageFault
-from jeff.infrastructure.runtime_ipc import ControlServer, encode_message
+from jeff.infrastructure.project_files import FileProjectStore
+from jeff.infrastructure.runtime_dispatch import RuntimeDispatcher
+from jeff.infrastructure.runtime_ipc import ControlServer, RuntimeProjectClient, encode_message
 from jeff.infrastructure.runtime_paths import resolve_layout
 from jeff.infrastructure.runtime_process import RuntimeController
 from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
 from jeff.infrastructure.runtime_storage import SQLiteStorage
+from jeff.integrations.git import GitProjectDiscovery, GitRepositoryRead
 
 
 def _selected_layout() -> RuntimeLayout:
@@ -59,10 +64,21 @@ def create_runtime_controller() -> RuntimeControl:
     return RuntimeController(_selected_layout())
 
 
+def create_project_client() -> ProjectClient:
+    """Lazy location selection; local Git is composed only for read-only status."""
+    return RuntimeProjectClient(
+        _selected_layout,
+        diagnostics=ProjectStatusService(
+            ProjectService(GitProjectDiscovery(), FileProjectStore()), create_runtime_controller
+        ),
+    )
+
+
 async def _serve(
     owner: Ownership, token: bytes, identity: RuntimeIdentityData, result_fd: int
 ) -> None:
-    storage = SQLiteStorage(owner)
+    storage = SQLiteStorage(owner, instance_id=identity.instance_id)
+    dispatcher: RuntimeDispatcher | None = None
     server = ControlServer(owner, token, identity, storage.snapshot)
     serving = asyncio.create_task(server.serve())
     try:
@@ -72,6 +88,15 @@ async def _serve(
                 await serving
             await asyncio.sleep(0.01)
         state = storage.snapshot()
+        if state.state == "ready" and not server.stopping:
+            projects = ProjectService(GitProjectDiscovery(), FileProjectStore())
+            dispatcher = RuntimeDispatcher(
+                ProjectDispatcher(
+                    projects, QuestionService(projects, GitRepositoryRead()), storage, identity
+                )
+            )
+            dispatcher.start()
+            server.dispatcher = dispatcher
         packet = encode_message(
             StartupResult(
                 revision=PROTOCOL_REVISION, instance_id=identity.instance_id, error=state.error
@@ -96,6 +121,12 @@ async def _serve(
         try:
             await serving
         finally:
+            # Native work/threads close before SQL and raw lifetime ownership can end.
+            if dispatcher is not None:
+                dispatcher.request_close()
+                while not dispatcher.closed:
+                    await asyncio.sleep(0.01)
+                dispatcher.close(timeout=0)
             # Cooperative observation, not an executor/cancelled wait mistaken for SQL exit.
             storage.request_close()
             while not storage.closed:
@@ -105,7 +136,7 @@ async def _serve(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Internal owned control child; no application readiness."
+        description="Internal owned daemon child; use public jeff start."
     )
     parser.add_argument("--lock-fd", type=int, required=True)
     parser.add_argument("--instance-id", type=UUID, required=True)

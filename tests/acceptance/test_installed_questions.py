@@ -11,6 +11,8 @@ import pytest
 from jeff.application.projects import Failure, Success
 from jeff.application.questions import BranchAnswer, ChangesAnswer, QuestionSuccess
 
+pytestmark = pytest.mark.usefixtures("running_cli")
+
 
 def run(root: Path, entry: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     prefix = (
@@ -25,6 +27,10 @@ def run(root: Path, entry: str, *arguments: str) -> subprocess.CompletedProcess[
             "PATH": os.defpath,
             "NO_COLOR": "1",
             "TERM": "dumb",
+            **{
+                name: os.environ[name]
+                for name in ("HOME", "TMPDIR", "JEFF_DATA_DIR", "JEFF_RUNTIME_DIR")
+            },
             "GIT_DIR": "/invalid/FAKE_TEST_SENTINEL",
         },
         capture_output=True,

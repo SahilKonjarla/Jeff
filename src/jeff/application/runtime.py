@@ -20,7 +20,7 @@ from jeff.application.projects import ErrorData, Failure
 from jeff.application.storage import StorageIssueCode, StorageReadiness, storage_failure
 from jeff.domain.runtime import RuntimeIdentity, RuntimeSnapshot, RuntimeState
 
-PROTOCOL_REVISION = 2
+PROTOCOL_REVISION = 3
 MAC_SOCKET_PATH_BYTES = 103
 MAC_PATH_BYTES = 1023  # Darwin PATH_MAX=1024, reserving the terminator.
 MAC_NAME_BYTES = 255
@@ -199,21 +199,18 @@ class RuntimeLimits(_RuntimeModel):
 DEFAULT_RUNTIME_LIMITS = RuntimeLimits()
 
 
+ProjectCapability = Literal["ask.branch", "ask.changes", "init", "config", "receipt.inspect"]
+
+
 class ControlObservation(_RuntimeModel):
-    """Separate cached storage facts; full application readiness remains unestablished."""
+    """Authenticated control/storage/dispatcher facts, with coherent full readiness."""
 
     state: RuntimeState
     identity: RuntimeIdentityData | None = None
     control_ready: StrictBool = False
-    application_ready: Literal[False] = False
+    application_ready: StrictBool = False
+    available_operations: tuple[ProjectCapability, ...] = ()
     storage: StorageReadiness = Field(default_factory=StorageReadiness)
-
-    @field_validator("application_ready", mode="before")
-    @classmethod
-    def not_application_ready(cls, value: object) -> Literal[False]:
-        if value is not False:
-            raise ValueError("Application readiness is not established by control readiness.")
-        return False
 
     @model_validator(mode="after")
     def coherent(self) -> Self:
@@ -225,6 +222,19 @@ class ControlObservation(_RuntimeModel):
             raise ValueError("Unconfirmed lifecycle observations require a failure result.")
         if self.control_ready != (self.state == RuntimeState.RUNNING):
             raise ValueError("Only running control state may be control-ready.")
+        if len(set(self.available_operations)) != len(self.available_operations):
+            raise ValueError("Capabilities cannot be duplicated.")
+        if self.application_ready and not (
+            self.control_ready
+            and self.storage.state == "ready"
+            and set(self.available_operations)
+            == {"ask.branch", "ask.changes", "init", "config", "receipt.inspect"}
+        ):
+            raise ValueError(
+                "Full application readiness requires all supported handlers and storage."
+            )
+        if self.available_operations and (not self.control_ready or self.storage.state != "ready"):
+            raise ValueError("Project operations require live control and storage.")
         if self.state == RuntimeState.STOPPED and self.storage.state != "not_checked":
             raise ValueError("Stopped status does not establish storage readiness.")
         return self
@@ -247,6 +257,7 @@ ControlIssueCode = (
     | StorageIssueCode
     | Literal[
         "runtime_absent",
+        "daemon_not_running",
         "runtime_credentials_invalid",
         "runtime_ownership_unconfirmed",
         "runtime_endpoint_collision",
@@ -268,6 +279,9 @@ _CONTROL_MESSAGES: dict[ControlIssueCode, str] = {
 _CONTROL_MESSAGES.update(
     {
         "runtime_absent": "No control runtime ownership or endpoint was found.",
+        "daemon_not_running": (
+            "The daemon is stopped. Run jeff start explicitly; no action was executed."
+        ),
         "runtime_credentials_invalid": "The private installation credential is missing or unsafe.",
         "runtime_ownership_unconfirmed": "Runtime ownership could not be established safely.",
         "runtime_endpoint_collision": "An existing endpoint cannot be adopted or removed safely.",
@@ -320,10 +334,13 @@ class AuthRequest(_RuntimeModel):
 class AuthAccepted(_RuntimeModel):
     revision: StrictInt = Field(ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION)
     authenticated: StrictBool
+    identity: RuntimeIdentityData | None = None
     error: Literal["runtime_authentication_failed", "runtime_protocol_incompatible"] | None = None
 
     @model_validator(mode="after")
     def accepted(self) -> Self:
+        if self.authenticated != (self.identity is not None):
+            raise ValueError("Only authenticated peers receive instance identity.")
         if self.authenticated != (self.error is None):
             raise ValueError("Authentication requires exactly one bounded outcome.")
         return self
@@ -333,6 +350,7 @@ ControlOperation = Literal["hello", "status", "stop"]
 
 
 class ControlRequest(_RuntimeModel):
+    kind: Literal["control"] = "control"
     revision: StrictInt = Field(ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION)
     request_id: UUID
     operation: ControlOperation

@@ -1,32 +1,25 @@
 # Bootstrap — composition root
 
-**Status:** M01 public CLI wiring and M02 internal authenticated control-child composition implemented. Slice 3 composes actual private settings/SQLite readiness. Public lifecycle commands and full application readiness remain unimplemented.
+**Status:** M02 slice-4 C wires public explicit lifecycle, runtime-aware status and authenticated daemon-dependent project commands. Full M02 history/events/doctor/recovery and cross-platform acceptance remain pending.
 
-**Ownership:** `main.py` constructs `ProjectService(GitProjectDiscovery(), FileProjectStore())` and `QuestionService(projects, GitRepositoryRead())`, then passes both to `create_app`. It contains no project rules, storage implementation, policy decisions, or provider logic.
+**Ownership:** `main.py` passes lazy `create_project_client` and `create_runtime_controller` factories to CLI presentation. No location selection, project discovery, credential read or connection happens for help/syntax. There is no client-local question adapter or fallback path. Only the daemon composes `QuestionService(..., GitRepositoryRead())` after actual storage initialization.
 
-**Dependencies:** composition may import all tiers. Only entry points and bootstrap itself import bootstrap; domain/application/clients cannot depend on it.
+**Dependencies:** composition may import all tiers; only entry points/bootstrap import bootstrap. No project/domain/storage policy is implemented here.
 
-## Entry points and flow
+## Public entry points
 
-`main() -> None` is declared as `jeff.bootstrap.main:main` in `pyproject.toml`. `jeff/__main__.py` invokes it under the main guard.
+`jeff.bootstrap.main:main` is the installed console entry; `python -m jeff` invokes the same function. Both use the same factories and application interfaces.
 
-After the [root install](../../../README.md):
+`runtime.create_project_client() -> ProjectClient` supplies the authenticated RPC adapter with lazy layout selection and `ProjectStatusService`: the latter first validates local Git/YAML, then selects the runtime controller for read-only status. The local project service is never an init/config/ask fallback. Status preserves identity fields plus explicit runtime observations; invalid/unregistered projects retain their local errors before runtime selection.
 
-```bash
-.venv/bin/jeff --help
-.venv/bin/python -m jeff --help
-```
+`runtime.create_runtime_controller() -> RuntimeControl` selects only the documented JEFF_DATA_DIR/JEFF_RUNTIME_DIR overrides and needed trusted host metadata. Both overrides skip home/temp lookup. Darwin TMPDIR selection avoids tempfile write probes; actual creation/validation is explicit startup only. Public start waits for authenticated matching-instance full application readiness (all five handlers, live workers and schema/settings readiness), not the startup pipe or control hello alone.
 
-Both use the same service/adapters. Constructing them performs no project I/O; help is side-effect-free. Explicit `init`, `config`, `status`, or the two supported `ask` questions invoke application use cases, which call their declared ports. No daemon, provider, credential loading, runtime event bus, or job execution is initialized.
+## Internal daemon ownership
 
-**Configuration/security:** the file adapter owns private schema/storage; Git discovery owns its narrow subprocess environment. Bootstrap must preserve those responsibilities and never become an alternate authorization path.
+`runtime.main()` remains an internal child entry with inherited lifetime-lock FD, bounded one-way startup-result pipe and non-secret instance UUID. It rejects invalid descriptors before state access, adopts actual ownership, applies restrictive umask, starts the dedicated SQL owner and composes bounded dispatch. No credential argv/environment, user-state scan or autostart.
 
-## Internal control composition — M02 slice 2
+The child retains its raw lock descriptor until kernel process exit. Cached control observations distinguish storage/handler/full readiness; partial control/storage startup does not claim application-ready. Diagnostic startup-pipe metadata is not authority. Initialization failure closes/exits; shutdown drains actual project workers before the SQL owner and native process exit. No arbitrary PID/name signalling or default-state repair.
 
-`runtime.create_runtime_controller() -> RuntimeControl` reads the two documented directory overrides plus trusted host metadata only when called. It constructs an installation-bound controller, not an alternate public CLI path. With both overrides it skips home/temp lookup. Otherwise standard Darwin TMPDIR metadata (canonical /private/tmp when unset) selects the temp base without tempfile.gettempdir's write probes; explicit startup performs actual path validation/creation. `runtime.main()` is the internal child entry point used with a validated inherited lifetime-lock FD, one-way startup-result pipe and non-secret instance UUID. It refuses invalid descriptors before state access, adopts real ownership, applies a restrictive child umask, then runs authenticated control IPC. No credential argv/environment, user-state scan, project dispatcher or autostart. Slice 3 starts the dedicated storage owner without blocking control on settings/SQL initialization.
+Do not invoke internal entry points against normal/user installations as fixtures. [Installed control](../../../tests/acceptance/test_installed_runtime_control.py) proves matching installation/native identity, launcher exit survival and authenticated shutdown. [Public workflow](../../../tests/acceptance/test_daemon_cli_workflow.py) proves real public start/stop/project/restart/status and uncertain-delivery correlation, with no fallback.
 
-The child retains its raw lock descriptor until kernel process exit. `application_ready` remains false; cached storage state separately reports initialization/readiness/failure. Parent start requires authenticated matching-instance control plus actual schema/settings readiness. The bounded pipe carries only safe startup metadata, never authority or raw errors. Failed initialization closes storage/control and exits; normal stop waits for actual owner-thread closure. Do not invoke this entry manually against default user paths or treat it as `jeff start`; public CLI wiring remains unchanged until the storage gate. [Installed tests](../../../tests/acceptance/test_installed_runtime_control.py) demonstrate parent/child installation identity, survival after launcher exit and authenticated shutdown from another caller.
-
-**Owning milestones:** M01 local composition and M02 internal control lifecycle. [Installed tests](../../../tests/acceptance/README.md) exercise public entry points outside the source repository; [architecture checks](../../../tests/architecture/README.md) reject inward bootstrap imports.
-
-Run `.venv/bin/python -m pytest tests/acceptance tests/architecture -q` from the root after installation. Add explicit wiring only when a real adapter exists. Full daemon lifecycle/recovery and cross-platform acceptance remain pending. See [package map](../README.md).
+After [installation](../../../README.md), run documented tests only in approved owned outside-Git arenas. [Architecture checks](../../../tests/architecture/README.md) enforce tier direction. Help/native local proof is not Linux/CI, desktop/audio/provider or formal milestone acceptance. See [package map](../README.md).

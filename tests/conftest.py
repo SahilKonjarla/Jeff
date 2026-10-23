@@ -37,6 +37,45 @@ def owned_runtime_launches(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 @pytest.fixture
+def cli_environment(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, str]:
+    root = tmp_path_factory.mktemp("cli").resolve()
+    for name in ("home", "tmp", "config", "cache", "data"):
+        (root / name).mkdir(mode=0o700)
+    env = {
+        "HOME": str(root / "home"),
+        "TMPDIR": str(root / "tmp"),
+        "XDG_CONFIG_HOME": str(root / "config"),
+        "XDG_CACHE_HOME": str(root / "cache"),
+        "XDG_DATA_HOME": str(root / "data"),
+        "JEFF_DATA_DIR": str(root / "d"),
+        "JEFF_RUNTIME_DIR": str(root / "r"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return env
+
+
+@pytest.fixture
+def running_cli(
+    cli_environment: dict[str, str], owned_runtime_launches: None
+) -> Iterator[dict[str, str]]:
+    from jeff.application.runtime import ControlSuccess
+    from jeff.bootstrap.runtime import create_runtime_controller
+
+    control = create_runtime_controller()
+    try:
+        started = control.start()
+        assert isinstance(started, ControlSuccess) and started.data.application_ready, started
+        yield cli_environment
+    finally:
+        assert isinstance(control.stop(), ControlSuccess)
+        (Path(cli_environment["JEFF_DATA_DIR"]) / "ipc.key").unlink(missing_ok=True)
+
+
+@pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
     executable = shutil.which("git", path=os.defpath)
     assert executable is not None, "These checks require an installed system Git"

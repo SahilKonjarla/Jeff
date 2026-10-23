@@ -6,6 +6,9 @@ import sys
 import sysconfig
 from pathlib import Path
 
+import pytest
+
+from jeff.application.dispatch import ProjectStatusSuccess
 from jeff.application.projects import Success
 from jeff.application.questions import BranchAnswer, ChangesAnswer, QuestionSuccess
 
@@ -20,6 +23,11 @@ def invoke(directory: Path, command: list[str]) -> subprocess.CompletedProcess[s
             "PATH": os.defpath,
             "NO_COLOR": "1",
             "TERM": "dumb",
+            **{
+                name: os.environ[name]
+                for name in ("HOME", "TMPDIR", "JEFF_DATA_DIR", "JEFF_RUNTIME_DIR")
+                if name in os.environ
+            },
             "GIT_DIR": "/nonexistent/SYNTHETIC_PRIVATE_VALUE",
         },
         capture_output=True,
@@ -29,6 +37,7 @@ def invoke(directory: Path, command: list[str]) -> subprocess.CompletedProcess[s
     )
 
 
+@pytest.mark.usefixtures("running_cli")
 def test_generator_cli_and_installed_jeff_for_both_projects(tmp_path: Path) -> None:
     output = tmp_path / "demos"
     generated = invoke(tmp_path, [sys.executable, str(SCRIPT), "--output-dir", str(output)])
@@ -48,9 +57,10 @@ def test_generator_cli_and_installed_jeff_for_both_projects(tmp_path: Path) -> N
             checked = invoke(root, [jeff, operation, "--json"])
             assert checked.returncode == 0, checked.stderr
             assert (
-                Success.model_validate_json(checked.stdout).data.project_id
-                == identity.data.project_id
-            )
+                ProjectStatusSuccess.model_validate_json(checked.stdout)
+                if operation == "status"
+                else Success.model_validate_json(checked.stdout)
+            ).data.project_id == identity.data.project_id
         branch_result = invoke(root, [jeff, "ask", "what branch am I on?", "--json"])
         assert branch_result.returncode == 0, branch_result.stderr
         branch = QuestionSuccess.model_validate_json(branch_result.stdout)

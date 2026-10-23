@@ -1,0 +1,132 @@
+"""Finite worker admission and actual drain; no SQL, transport or per-call executor."""
+
+import queue
+import threading
+import time
+from concurrent.futures import Future
+from dataclasses import dataclass
+
+from jeff.application.dispatch import (
+    DispatchReply,
+    ProjectCall,
+    ProjectDispatcher,
+    ReceiptQuery,
+    ReceiptReply,
+    dispatch_failure,
+)
+from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS, ControlFault
+
+
+@dataclass
+class _Work:
+    call: ProjectCall | ReceiptQuery
+    deadline: float
+    result: Future[DispatchReply | ReceiptReply]
+
+
+class RuntimeDispatcher:
+    def __init__(self, dispatch: ProjectDispatcher) -> None:
+        self.dispatch = dispatch
+        self._queue: queue.Queue[_Work] = queue.Queue(DEFAULT_RUNTIME_LIMITS.pending_requests)
+        self._closing = threading.Event()
+        self._mutex = threading.Lock()
+        self._threads: list[threading.Thread] = []
+        self._ready = False
+
+    @property
+    def ready(self) -> bool:
+        with self._mutex:
+            return (
+                self._ready
+                and not self._closing.is_set()
+                and len(self._threads) == DEFAULT_RUNTIME_LIMITS.active_requests
+                and all(thread.is_alive() for thread in self._threads)
+            )
+
+    @property
+    def closed(self) -> bool:
+        return all(not thread.is_alive() for thread in self._threads)
+
+    def start(self) -> None:
+        with self._mutex:
+            if self._threads or self._closing.is_set():
+                raise ControlFault("runtime_ownership_unconfirmed")
+            try:
+                for number in range(DEFAULT_RUNTIME_LIMITS.active_requests):
+                    thread = threading.Thread(
+                        target=self._run, name=f"jeff-project-{number}", daemon=False
+                    )
+                    thread.start()
+                    self._threads.append(thread)
+                self._ready = True
+            except Exception:
+                self._closing.set()
+                raise ControlFault("runtime_start_failed") from None
+
+    def submit(
+        self, call: ProjectCall | ReceiptQuery, deadline: float
+    ) -> Future[DispatchReply | ReceiptReply]:
+        result: Future[DispatchReply | ReceiptReply] = Future()
+        with self._mutex:
+            if not self._ready or self._closing.is_set():
+                raise ControlFault("runtime_busy")
+            try:
+                self._queue.put_nowait(_Work(call, deadline, result))
+            except queue.Full:
+                raise ControlFault("runtime_busy") from None
+        return result
+
+    def request_close(self) -> None:
+        with self._mutex:
+            self._closing.set()
+            self._ready = False
+
+    def close(self, timeout: float = DEFAULT_RUNTIME_LIMITS.stop_seconds) -> None:
+        self.request_close()
+        deadline = time.monotonic() + timeout
+        for thread in self._threads:
+            thread.join(max(0, deadline - time.monotonic()))
+        if not self.closed:
+            raise ControlFault("runtime_stop_unconfirmed")
+
+    def _refused(
+        self, call: ProjectCall | ReceiptQuery, *, closing: bool = False, unknown: bool = False
+    ) -> DispatchReply | ReceiptReply:
+        error = dispatch_failure(
+            "request_outcome_unknown"
+            if unknown
+            else "runtime_stopping"
+            if closing
+            else "request_timeout"
+        )
+        if isinstance(call, ProjectCall):
+            return DispatchReply(
+                request_id=call.request_id,
+                identity=self.dispatch.identity,
+                result=error,
+                accepted=None if unknown else False,
+            )
+        return ReceiptReply(request_id=call.query_id, identity=self.dispatch.identity, error=error)
+
+    def _run(self) -> None:
+        while not self._closing.is_set() or not self._queue.empty():
+            try:
+                work = self._queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            try:
+                if not work.result.set_running_or_notify_cancel():
+                    continue
+                if self._closing.is_set() or time.monotonic() >= work.deadline:
+                    result = self._refused(work.call, closing=self._closing.is_set())
+                elif isinstance(work.call, ProjectCall):
+                    result = self.dispatch.execute(work.call, work.deadline)
+                else:
+                    result = self.dispatch.inspect_receipt(work.call, work.deadline)
+                work.result.set_result(result)
+            except Exception:
+                # No arbitrary driver/input traceback escapes this owned thread.
+                if not work.result.done():
+                    work.result.set_result(self._refused(work.call, unknown=True))
+            finally:
+                self._queue.task_done()

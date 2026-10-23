@@ -12,7 +12,7 @@ Operation = Literal["init", "config", "status"]
 
 
 class ProjectDiscovery(Protocol):
-    def find_root(self, directory: Path) -> Path:
+    def find_root(self, directory: Path, *, deadline: float | None = None) -> Path:
         """Find a canonical non-bare Git root without user-command execution."""
         ...
 
@@ -65,10 +65,23 @@ class ProjectService:
         self._discovery = discovery
         self._store = store
 
-    def execute(self, operation: Operation, directory: Path) -> Success | Failure:
+    def resolve_root(self, directory: Path, *, deadline: float | None = None) -> Path | Failure:
+        """Read-only canonical binding for an init that has no registration yet."""
+        try:
+            return self._discovery.find_root(
+                directory, **({"deadline": deadline} if deadline is not None else {})
+            )
+        except ProjectError as error:
+            return Failure(error=ErrorData(code=error.code, message=error.message))
+
+    def execute(
+        self, operation: Operation, directory: Path, *, deadline: float | None = None
+    ) -> Success | Failure:
         """Bind a project and return observed identity only, not arbitrary settings."""
         try:
-            root = self._discovery.find_root(directory)
+            root = self._discovery.find_root(
+                directory, **({"deadline": deadline} if deadline is not None else {})
+            )
             created = False
             if operation == "init":
                 project, created = self._store.initialize(Project(uuid4(), root))

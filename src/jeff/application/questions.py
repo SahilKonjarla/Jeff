@@ -13,8 +13,10 @@ from jeff.domain.repository import BranchState, FileChange, escape_metadata, pro
 
 
 class GitRead(Protocol):
-    def read_branch(self, root: Path) -> BranchState: ...
-    def read_changes(self, root: Path) -> tuple[FileChange, ...]: ...
+    def read_branch(self, root: Path, *, deadline: float | None = None) -> BranchState: ...
+    def read_changes(
+        self, root: Path, *, deadline: float | None = None
+    ) -> tuple[FileChange, ...]: ...
 
 
 class AnswerContext(BaseModel):
@@ -72,6 +74,15 @@ class QuestionSuccess(BaseModel):
     error: None = None
 
 
+def question_intent(question: str) -> Literal["ask.branch", "ask.changes"] | None:
+    intent = " ".join(question.casefold().split()).removesuffix("?").rstrip()
+    if intent == "what branch am i on":
+        return "ask.branch"
+    if intent == "what changed":
+        return "ask.changes"
+    return None
+
+
 class QuestionService:
     def __init__(
         self,
@@ -83,22 +94,26 @@ class QuestionService:
         self._git = git
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    def execute(self, question: str, directory: Path) -> QuestionSuccess | Failure:
-        intent = " ".join(question.casefold().split()).removesuffix("?").rstrip()
-        if intent not in {"what branch am i on", "what changed"}:
+    def execute(
+        self, question: str, directory: Path, *, deadline: float | None = None
+    ) -> QuestionSuccess | Failure:
+        intent = question_intent(question)
+        if intent is None:
             return Failure(
                 error=ErrorData(
                     code="unsupported_intent",
                     message="Supported questions: 'what branch am I on?' and 'what changed?'.",
                 )
             )
-        project = self._projects.execute("config", directory)
+        project = self._projects.execute("config", directory, deadline=deadline)
         if not project.ok:
             return project
         root = Path(project.data.root)
         try:
-            if intent == "what branch am i on":
-                branch = self._git.read_branch(root)
+            if intent == "ask.branch":
+                branch = self._git.read_branch(
+                    root, **({"deadline": deadline} if deadline is not None else {})
+                )
                 return QuestionSuccess(
                     data=BranchAnswer(
                         project_id=project.data.project_id,
@@ -112,7 +127,9 @@ class QuestionService:
                         ),
                     )
                 )
-            raw = self._git.read_changes(root)
+            raw = self._git.read_changes(
+                root, **({"deadline": deadline} if deadline is not None else {})
+            )
             visible: list[ChangeData] = []
             for change in raw:
                 if protected_path(change.path) or (

@@ -17,7 +17,7 @@ MAX_CHANGES = 10_000
 
 
 def _run_git(
-    executable: str, directory: Path, *arguments: str
+    executable: str, directory: Path, *arguments: str, deadline: float | None = None
 ) -> subprocess.CompletedProcess[bytes]:
     """Bound both streams while reading; kill/reap only this owned process on failure."""
     command = [
@@ -47,6 +47,8 @@ def _run_git(
         "GIT_ATTR_NOSYSTEM": "1",
         "LC_ALL": "C",
     }
+    if deadline is not None and deadline <= time.monotonic():
+        raise ProjectError("git_timeout", "Git timed out; no command was retried.")
     try:
         with subprocess.Popen(
             command,
@@ -59,7 +61,10 @@ def _run_git(
                 assert process.stdout is not None and process.stderr is not None
                 buffers = {"stdout": bytearray(), "stderr": bytearray()}
                 total = 0
-                deadline = time.monotonic() + GIT_TIMEOUT
+                deadline = min(
+                    deadline if deadline is not None else float("inf"),
+                    time.monotonic() + GIT_TIMEOUT,
+                )
                 with selectors.DefaultSelector() as selector:
                     for label, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
                         os.set_blocking(stream.fileno(), False)
@@ -98,7 +103,7 @@ def _run_git(
 
 
 class GitProjectDiscovery:
-    def find_root(self, directory: Path) -> Path:
+    def find_root(self, directory: Path, *, deadline: float | None = None) -> Path:
         executable = shutil.which("git", path=os.defpath)
         if executable is None:
             raise ProjectError("git_unavailable", "Install Git before initializing a project.")
@@ -108,7 +113,13 @@ class GitProjectDiscovery:
                 raise ProjectError(
                     "invalid_root", "Run Jeff from an existing repository directory."
                 )
-            root_text = self._query(executable, directory, "rev-parse", "--show-toplevel")
+            root_text = self._query(
+                executable,
+                directory,
+                "rev-parse",
+                "--show-toplevel",
+                **({"deadline": deadline} if deadline is not None else {}),
+            )
             if root_text.returncode != 0:
                 raise ProjectError("not_a_repository", "Run Jeff inside a non-bare Git repository.")
             reported_root = Path(root_text.stdout.removesuffix("\n"))
@@ -117,7 +128,14 @@ class GitProjectDiscovery:
             root = reported_root.resolve(strict=True)
             if not root.is_dir() or not directory.is_relative_to(root):
                 raise ProjectError("invalid_root", "Git returned an invalid repository root.")
-            tracked = self._query(executable, root, "ls-files", "--", "jeff.local.yaml")
+            tracked = self._query(
+                executable,
+                root,
+                "ls-files",
+                "--",
+                "jeff.local.yaml",
+                **({"deadline": deadline} if deadline is not None else {}),
+            )
             if tracked.returncode != 0:
                 raise ProjectError(
                     "git_failed", "Git could not inspect private configuration tracking."
@@ -140,9 +158,14 @@ class GitProjectDiscovery:
 
     @staticmethod
     def _query(
-        executable: str, directory: Path, *arguments: str
+        executable: str, directory: Path, *arguments: str, deadline: float | None = None
     ) -> subprocess.CompletedProcess[str]:
-        result = _run_git(executable, directory, *arguments)
+        result = _run_git(
+            executable,
+            directory,
+            *arguments,
+            **({"deadline": deadline} if deadline is not None else {}),
+        )
         return subprocess.CompletedProcess(
             result.args,
             result.returncode,
@@ -232,16 +255,16 @@ def _parse_status(output: bytes) -> tuple[BranchState, tuple[FileChange, ...]]:
 
 
 class GitRepositoryRead:
-    def read_branch(self, root: Path) -> BranchState:
-        branch, _ = _parse_status(self._status(root, branch_only=True))
+    def read_branch(self, root: Path, *, deadline: float | None = None) -> BranchState:
+        branch, _ = _parse_status(self._status(root, branch_only=True, deadline=deadline))
         return branch
 
-    def read_changes(self, root: Path) -> tuple[FileChange, ...]:
-        _, changes = _parse_status(self._status(root, branch_only=False))
+    def read_changes(self, root: Path, *, deadline: float | None = None) -> tuple[FileChange, ...]:
+        _, changes = _parse_status(self._status(root, branch_only=False, deadline=deadline))
         return changes
 
     @staticmethod
-    def _status(root: Path, *, branch_only: bool) -> bytes:
+    def _status(root: Path, *, branch_only: bool, deadline: float | None = None) -> bytes:
         executable = shutil.which("git", path=os.defpath)
         if executable is None:
             raise ProjectError(
@@ -258,6 +281,7 @@ class GitRepositoryRead:
             "--name-only",
             "--get-regexp",
             r"^filter\..*\.(clean|process|required)$",
+            **({"deadline": deadline} if deadline is not None else {}),
         )
         if filters.returncode not in {0, 1}:
             raise ProjectError(
@@ -307,6 +331,7 @@ class GitRepositoryRead:
             "--",
             ".",
             *exclusions,
+            **({"deadline": deadline} if deadline is not None else {}),
         )
         if result.returncode != 0:
             raise ProjectError(

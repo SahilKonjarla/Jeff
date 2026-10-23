@@ -10,11 +10,12 @@ from pathlib import Path
 import pytest
 
 import jeff
-from jeff.application.runtime import ControlSuccess
+from jeff.application.runtime import ControlSuccess, RuntimeLayout
 from jeff.bootstrap.runtime import create_runtime_controller
+from jeff.infrastructure.runtime_process import RuntimeController
 
 
-def test_installed_control_uses_same_installation_and_leaves_public_cli_unchanged(
+def test_installed_control_and_public_start_use_same_installation(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     root = tmp_path_factory.mktemp("installed").resolve()
@@ -74,7 +75,7 @@ finally:
         receipt = json.loads(result.stdout)
         assert jeff.__file__ is not None
         assert Path(receipt["package_file"]).resolve() == Path(jeff.__file__).resolve()
-        assert receipt["control_ready"] is True and receipt["application_ready"] is False
+        assert receipt["control_ready"] is True and receipt["application_ready"] is True
         assert receipt["pid_matches_owned_child"] is True
         assert not (root / "r/daemon.sock").exists()
         assert (root / "d/state.sqlite3").exists()
@@ -86,8 +87,12 @@ finally:
             capture_output=True,
             timeout=10,
         )
-        assert command.returncode == 2
+        assert command.returncode == 0, command.stderr
     finally:
+        cleanup = RuntimeController(
+            RuntimeLayout(data_dir=root / "d", runtime_dir=root / "r", uid=os.geteuid())
+        )
+        assert isinstance(cleanup.stop(), ControlSuccess)
         (root / "d/ipc.key").unlink(missing_ok=True)
         (root / "r/daemon.sock").unlink(missing_ok=True)
 

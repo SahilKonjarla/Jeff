@@ -2,7 +2,7 @@
 
 A local developer assistant for macOS and Linux: one text and hold-to-talk voice control surface for your projects, coding sessions, and development tools.
 
-> **Status: M01 macOS automated and manual checks passed; formal handoff pending.** Packaging, project registration/configuration inspection, two read-only Git questions, and reproducible demos work locally. Clean-environment tests and bounded technical probes passed, and the supplied test-branch transcript matched the manual checklist. Linux validation is deferred; no hosted CI run is claimed. M02 now has an internal macOS authenticated control lifecycle, strict private settings and a versioned SQLite project registry. Public daemon commands/project RPC and later product behavior remain unimplemented.
+> **Status: M01 macOS automated and manual checks passed; formal handoff pending.** Packaging, project registration/configuration inspection, two read-only Git questions, and reproducible demos work locally. Clean-environment tests and bounded technical probes passed, and the supplied test-branch transcript matched the manual checklist. Linux validation is deferred; no hosted CI run is claimed. M02 now has an internal macOS authenticated control lifecycle, strict private settings and a versioned SQLite project registry. M02 slice 4 adds authenticated daemon-routed init/config and both Git questions, minimal request receipts and guarded identity/partial-write handling. Public `start`/`stop` and runtime-aware `status` are implemented; startup requires complete dispatcher/storage readiness. No autostart or in-process fallback. History/debug/events, doctor/stale recovery and later product behavior remain unimplemented; full M02 acceptance is pending.
 
 ## What Jeff is being built to do
 
@@ -36,7 +36,7 @@ The planned implementation is one Python package with a local asyncio daemon, SQ
 | Interfaces | CLI, desktop, voice interaction, and MCP server clients of the application API |
 | Bootstrap | Dependency wiring and lifecycle composition |
 
-Inner layers do not import outer layers. Clients do not execute commands or access storage directly. The current foundation uses Python 3.12+, Typer, Pydantic, PyYAML, pytest, Ruff, and mypy; direct versions are pinned. The internal macOS control/storage foundation uses stdlib asyncio/SQLite; PySide6, application dispatch and broader platform validation remain planned.
+Inner layers do not import outer layers. Clients do not execute commands or access storage directly. The current foundation uses Python 3.12+, Typer, Pydantic, PyYAML, pytest, Ruff, and mypy; direct versions are pinned. The internal macOS control/storage foundation uses stdlib asyncio/SQLite; PySide6 and broader platform validation remain planned.
 
 ## Getting started
 
@@ -77,11 +77,12 @@ jeff --help
 python -m jeff --help
 ```
 
-Both help entry points exit successfully without project I/O. No arguments displays usage with exit code 2; unimplemented commands such as `start` and `run` are rejected. There is no public daemon-start command or desktop app yet. Internal control protocol v2 is incompatible with v1; stop an older instance with its matching older environment before upgrading. Do not use internal entry points against normal user state as a smoke test.
+Both help entry points exit successfully without project I/O or runtime-location selection. No arguments displays usage with exit code 2; unimplemented commands such as `run` are rejected. The public daemon currently runs on macOS; Linux execution remains deferred. There is no desktop app yet. Internal protocol v3 and DB schema 2 are incompatible with older control clients/DB readers; stop an older instance with its matching older environment before upgrading. Do not use internal entry points against normal user state as a smoke test.
 
 To use an existing project, **activate Jeff's venv before changing directories**, then replace the example path below with your target Git repository:
 
 ```bash
+jeff start --json  # Explicit; works outside Git and waits for authenticated readiness.
 cd /path/to/your/project
 jeff init --json
 jeff config --json
@@ -90,7 +91,7 @@ jeff ask "what branch am I on?"
 jeff ask "what changed?" --json
 ```
 
-`init` writes private project registration and adds local-state ignore rules in that target repository; the other commands shown are read-only. To try an isolated demo instead, follow the next section.
+`init` writes private project registration and adds local-state ignore rules in that target repository. Config/status do not mutate application state; questions do not write project files but persist minimal request metadata. While stopped, init/config/ask return `daemon_not_running` without project writes or fallback; help and registration-aware status remain usable. Stop explicitly with `jeff stop --json` (also outside Git). Daemon shutdown drains actual work and confirms native exit; exiting the CLI or deactivating the venv does not stop it. To try an isolated demo instead, follow the next section.
 
 ### Resume later or leave the environment
 
@@ -113,6 +114,7 @@ From the Jeff source root after installation:
 ```bash
 .venv/bin/python scripts/create_demo_projects.py
 source .venv/bin/activate
+jeff start --json
 cd examples/sandbox-project
 jeff init --json
 jeff config --json
@@ -137,22 +139,22 @@ jeff status --json
 
 Init creates a stable project ID and canonical root in private `jeff.local.yaml`, and appends `/jeff.local.yaml` and `/.jeff/` ignore rules without discarding existing rules. Running from a subdirectory targets the same repository. Repeated init preserves identity, configuration contents, and unrelated settings.
 
-Config and status are read-only and expose **identity fields only**, not arbitrary settings, branch information, daemon status, or process health. Unregistered repositories return an actionable error; inspection never initializes them implicitly.
+Config exposes **identity fields only**, never arbitrary settings or branch information. Status preserves these identity fields and adds explicit `runtime` control/storage/application readiness; it validates local registration before selecting runtime locations and never starts the daemon or indexes a project. Unregistered repositories return an actionable error; inspection never initializes them implicitly.
 
-Success exits 0 with `{ok: true, data, error: null}`. Data includes `project_id`, `root`, `config_path`, `registered`, and `created`. Recognized command failures exit 1 with `{ok: false, data: null, error: {code, message}}`. Without `--json`, errors go to stderr. CLI syntax/unknown-command errors use Typer's usage output and exit 2.
+Success exits 0 with `{ok: true, data, error: null}`. Init/config data includes `project_id`, `root`, `config_path`, `registered`, and `created`; status additionally includes `runtime`. Start/stop return their own typed control result. Transport fields do not contaminate init/config/ask bodies; duplicate or uncertain requests emit only `Request: <uuid>` on stderr, including with `--json`. This is metadata correlation, not a public receipt-browsing/history command. A missing receipt does not authorize retry. Recognized command failures exit 1 with `{ok: false, data: null, error: {code, message}}`. Without `--json`, errors go to stderr. CLI syntax/unknown-command errors use Typer's usage output and exit 2.
 
 Initialization rejects malformed/unsupported configuration, unsafe links/special files, tracked private configuration, and mismatched stored roots. Moved-project rebind is not implemented; Jeff will not silently replace the ID. Config creation is atomic and refuses overwrite, but ignore/config changes are **not a cross-file transaction**: a failed config write can leave added ignore rules, which the error reports. Static checks and these safe storage operations are not an OS execution sandbox.
 
 ### Ask a read-only Git question
 
-Inside an initialized target repository:
+With `jeff start` completed, inside an initialized target repository:
 
 ```bash
 jeff ask "what branch am I on?"
 jeff ask "what changed?" --json
 ```
 
-Both questions accept `--json`, case/whitespace normalization, and an optional final question mark. Matching is deterministic with no model calls. Unsupported questions return `unsupported_intent` without echoing the input or invoking Git. Unregistered projects return an error; questions never initialize them.
+Both questions accept `--json`, case/whitespace normalization, and an optional final question mark. Matching is deterministic with no model calls. With a running daemon, unsupported questions return `unsupported_intent` without echoing the input or invoking Git. Unregistered projects return an error; questions never initialize them.
 
 Branch answers report the observed name/commit, detached HEAD, or an unborn branch. Change answers report visible staged/unstaged/untracked, renamed, and conflicted metadata—never file contents or raw diffs. Results identify the registered project/root and UTC observation time. Queries do not stage, commit, fetch, or update the index.
 
@@ -162,7 +164,7 @@ Filenames and branch names use reversible JSON string-body escaping (`metadata_e
 
 Each Git invocation has a five-second timeout and a 1 MiB combined stdout/stderr cap; changes are capped at 10,000 records. Limit/time/failure errors return no partial success. Git transports/lazy fetching and hooks/fsmonitor are disabled, and no credentials are forwarded. Repositories with clean/process filter configuration return `git_filters_unsupported` for change questions: executing those commands is unsafe, while disabling them could misreport changes. Branch queries disable the discovered filters. This is not a general OS sandbox or a fully atomic repository snapshot.
 
-Validated locally on macOS 27.0.1 arm64 with CPython 3.12.11, including a non-editable wheel in new build/application venvs: 126 tests, lint/format/type/dependency checks, and the installed CLI scenario passed. This is not a fresh OS or published release test. Linux and other Python versions remain unverified.
+Historical M01 validation on macOS 27.0.1 arm64 with CPython 3.12.11, including a non-editable wheel in new build/application venvs: 126 tests, lint/format/type/dependency checks, and the installed CLI scenario passed. This is not a fresh OS or published release test. Linux and other Python versions remain unverified.
 
 The `docs/` directory is kept locally and excluded from Git, so documentation links below are available only in a checkout with those local files; they will not resolve in a fresh clone. Start with:
 
@@ -174,6 +176,8 @@ The `docs/` directory is kept locally and excluded from Git, so documentation li
 Within **M01: install Jeff and ask a real project question**, help, `init`, `config`, registration-only `status`, and the two `ask` questions now work locally. Demo generation and local fixture checks are also implemented. Bounded technical probes and clean-environment CLI checks have macOS evidence. Technical choices and an architecture map are recorded locally. The supplied manual test-branch transcript passed the checklist below; formal milestone acceptance and the M02 handoff still require human approval. CI execution is a separate choice, not a claimed hosted success. Linux validation is explicitly deferred, not removed from product scope. Other implementation-plan commands remain future contracts.
 
 ## Manual M01 acceptance on your test repository
+
+Historical M01 checklist/transcript below; it is not a new required human check. Current M02 requires explicit `jeff start` before init/config/ask and adds `runtime` to status. Do not use normal/user installations as test fixtures or delete registration to repeat a check.
 
 Install Jeff and activate its venv using Getting started above, then change to your **already prepared test repository/branch**. Jeff registration belongs to the repository root, not a branch; do not copy `jeff.local.yaml` between clones. Init writes private registration and ignore rules, so use a disposable/test checkout rather than an unrelated working project.
 

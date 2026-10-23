@@ -3,21 +3,27 @@
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import typer
+from pydantic import ValidationError
 
-from jeff.application.projects import ErrorData, Failure, Operation, ProjectService, Success
-from jeff.application.questions import BranchAnswer, ChangesAnswer, QuestionService, QuestionSuccess
+from jeff.application.dispatch import ProjectCall, ProjectClient, ProjectStatusSuccess
+from jeff.application.projects import ErrorData, Failure, Success
+from jeff.application.questions import BranchAnswer, ChangesAnswer, QuestionSuccess
+from jeff.application.runtime import ControlFault, ControlSuccess, RuntimeControl, control_failure
 from jeff.domain.repository import escape_metadata
 
 
-def create_app(service: ProjectService, questions: QuestionService) -> typer.Typer:
+def create_app(
+    client: Callable[[], ProjectClient], control: Callable[[], RuntimeControl]
+) -> typer.Typer:
     """Build a CLI around injected application use cases, not concrete adapters."""
     app = typer.Typer(
         name="jeff",
         help=(
             "Local developer assistant. Project registration and read-only Git questions. "
-            "No daemon."
+            "Explicit authenticated daemon; no autostart or local execution fallback."
         ),
         add_completion=False,
         no_args_is_help=True,
@@ -28,9 +34,15 @@ def create_app(service: ProjectService, questions: QuestionService) -> typer.Typ
     def cli() -> None:
         """Register a project and ask the two supported Git metadata questions."""
 
-    def render(result: Success | QuestionSuccess | Failure, json_output: bool) -> None:
+    def render(
+        result: Success | QuestionSuccess | ProjectStatusSuccess | ControlSuccess | Failure,
+        json_output: bool,
+    ) -> None:
         if json_output:
             typer.echo(json.dumps(result.model_dump(mode="json"), ensure_ascii=True))
+        elif isinstance(result, ControlSuccess):
+            typer.echo(f"Runtime: {result.data.state.value}")
+            typer.echo(f"Application ready: {'yes' if result.data.application_ready else 'no'}")
         elif result.ok:
             data = result.data
             typer.echo(f"Project: {data.project_id}\nRoot: {escape_metadata(data.root)}")
@@ -61,16 +73,32 @@ def create_app(service: ProjectService, questions: QuestionService) -> typer.Typ
                     typer.echo(f"Additional protected records withheld: {data.filtered_records}")
             else:
                 typer.echo("Created registration." if data.created else "Registration preserved.")
+                if isinstance(result, ProjectStatusSuccess):
+                    typer.echo(f"Runtime: {result.data.runtime.state.value}")
+                    typer.echo(
+                        "Application ready: "
+                        f"{'yes' if result.data.runtime.application_ready else 'no'}"
+                    )
         else:
             typer.echo(f"{result.error.code}: {result.error.message}", err=True)
         if not result.ok:
             raise typer.Exit(code=1)
 
     def invoke(
-        call: Callable[[Path], Success | QuestionSuccess | Failure], json_output: bool
+        call: Callable[[Path], Success | QuestionSuccess | ProjectStatusSuccess | Failure],
+        json_output: bool,
     ) -> None:
         try:
             result = call(Path.cwd())
+        except ControlFault as error:
+            result = control_failure(error.code)
+        except ValidationError:
+            result = Failure(
+                error=ErrorData(
+                    code="invalid_project_request",
+                    message="Project request exceeds its path or input bounds.",
+                )
+            )
         except OSError:
             result = Failure(
                 error=ErrorData(
@@ -80,8 +108,47 @@ def create_app(service: ProjectService, questions: QuestionService) -> typer.Typ
             )
         render(result, json_output)
 
-    def execute(operation: Operation, json_output: bool) -> None:
-        invoke(lambda directory: service.execute(operation, directory), json_output)
+    def execute(
+        operation: Literal["init", "config", "ask"], json_output: bool, question: str | None = None
+    ) -> None:
+        def dispatch(directory: Path) -> Success | QuestionSuccess | Failure:
+            call = ProjectCall(operation=operation, directory=directory, question=question)
+            reply = client().execute(call)
+            if (
+                reply.accepted is None
+                or (reply.receipt is not None and reply.receipt.state == "unknown")
+                or (
+                    isinstance(reply.result, Failure)
+                    and reply.result.error.code
+                    in ("duplicate_request", "request_conflict", "request_outcome_unknown")
+                )
+            ):
+                typer.echo(f"Request: {call.request_id}", err=True)
+            return reply.result
+
+        invoke(dispatch, json_output)
+
+    def lifecycle(operation: str, json_output: bool) -> None:
+        try:
+            runtime = control()
+            result = runtime.start() if operation == "start" else runtime.stop()
+        except ControlFault as error:
+            result = control_failure(error.code)
+        render(result, json_output)
+
+    @app.command("start")
+    def start(
+        json_output: bool = typer.Option(False, "--json", help="Print typed runtime readiness."),
+    ) -> None:
+        """Explicitly start the daemon and wait for authenticated full dispatcher readiness."""
+        lifecycle("start", json_output)
+
+    @app.command("stop")
+    def stop(
+        json_output: bool = typer.Option(False, "--json", help="Print confirmed runtime shutdown."),
+    ) -> None:
+        """Drain and stop the authenticated instance; confirm native process exit."""
+        lifecycle("stop", json_output)
 
     @app.command("init")
     def initialize(
@@ -107,8 +174,8 @@ def create_app(service: ProjectService, questions: QuestionService) -> typer.Typ
             False, "--json", help="Print a typed JSON result or error."
         ),
     ) -> None:
-        """Report project registration, not daemon, branch, or process status."""
-        execute("status", json_output)
+        """Read-only project identity and explicit runtime facts; works while stopped."""
+        invoke(lambda directory: client().status(directory), json_output)
 
     @app.command("ask")
     def ask(
@@ -118,6 +185,6 @@ def create_app(service: ProjectService, questions: QuestionService) -> typer.Typ
         ),
     ) -> None:
         """Answer branch/change questions deterministically, without models or Git writes."""
-        invoke(lambda directory: questions.execute(question, directory), json_output)
+        execute("ask", json_output, question)
 
     return app

@@ -13,7 +13,7 @@ class Discovery:
     def __init__(self, root: Path) -> None:
         self.root = root
 
-    def find_root(self, directory: Path) -> Path:
+    def find_root(self, directory: Path, *, deadline: float | None = None) -> Path:
         return self.root
 
 
