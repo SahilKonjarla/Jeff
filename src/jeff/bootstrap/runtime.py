@@ -97,10 +97,19 @@ async def _serve(
         identity,
         _stream_send,
         lambda: storage.snapshot().state == "ready" and storage.notification_healthy,
+        lambda: storage.retention_position(),
     )
-    storage = SQLiteStorage(owner, instance_id=identity.instance_id, commit_hint=events.signal)
+    # D3 invalidates buffered pages using checked committed positions before loop hints.
+    storage = SQLiteStorage(
+        owner,
+        instance_id=identity.instance_id,
+        commit_hint=events.signal,
+        scheduled_retention=True,
+    )
     dispatcher: RuntimeDispatcher | None = None
-    server = ControlServer(owner, token, identity, storage.snapshot)
+    server = ControlServer(
+        owner, token, identity, storage.snapshot, on_stop=storage.pause_retention
+    )
     server.events = events
     serving = asyncio.create_task(server.serve())
     try:

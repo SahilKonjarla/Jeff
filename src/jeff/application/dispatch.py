@@ -601,6 +601,8 @@ class ProjectDispatcher:
                 return reply(storage_failure(error.code), True, final)
             if error.code == "receipt_conflict":
                 return reply(dispatch_failure("request_conflict"), accepted)
+            if accepted is False and error.code == "request_retired":
+                return reply(storage_failure("request_retired"))
             if not accepted and error.code == "storage_busy":
                 return reply(dispatch_failure("runtime_busy"))
             if not accepted:

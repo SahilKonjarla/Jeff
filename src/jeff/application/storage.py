@@ -4,11 +4,20 @@ from pathlib import Path
 from typing import Literal, Protocol, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    FiniteFloat,
+    StrictBool,
+    StrictInt,
+    model_validator,
+)
 
 from jeff.application.history import (
     ActivityCode,
     ActivityEvent,
+    ActivityMeta,
     ActivityPage,
     ActivityRecord,
     ActivityTrace,
@@ -23,7 +32,9 @@ from jeff.application.projects import ErrorData, Failure, ProjectService
 from jeff.domain.projects import Project
 
 SETTINGS_SCHEMA = 1
-DATABASE_SCHEMA = 3
+DATABASE_SCHEMA = 4
+RETIREMENT_BATCH_LIMIT = 100
+RETIREMENT_INTERVAL_SECONDS = 60
 DATABASE_APPLICATION_ID = int.from_bytes(b"JEFF", "big")
 STORAGE_PENDING_LIMIT = 16
 SETTINGS_LIMIT = 65536
@@ -39,6 +50,7 @@ StorageIssueCode = Literal[
     "storage_outcome_unconfirmed",
     "registry_conflict",
     "receipt_conflict",
+    "request_retired",
     "receipt_scope_mismatch",
     "activity_invalid_cursor",
     "activity_budget_exceeded",
@@ -61,6 +73,10 @@ _MESSAGES: dict[StorageIssueCode, str] = {
     ),
     "registry_conflict": "The indexed project identity and root conflict; no rebind was performed.",
     "receipt_conflict": "The request identity, target or state conflicts; no work was replayed.",
+    "request_retired": (
+        "This request UUID is permanently retired; no new action was executed. "
+        "Missing evidence is not permission to retry with a fresh UUID."
+    ),
     "receipt_scope_mismatch": "No receipt is available in the validated project scope.",
     "activity_invalid_cursor": (
         "Activity cursor epoch or position is invalid; resynchronize explicitly."
@@ -195,6 +211,26 @@ class ReceiptScope(_StorageModel):
 class ReceiptClaimResult(_StorageModel):
     created: StrictBool
     receipt: Receipt
+
+
+class RetirementBatch(ActivityMeta):
+    """Bounded committed maintenance result, not a public tombstone lookup."""
+
+    retired_count: StrictInt = Field(ge=0, le=RETIREMENT_BATCH_LIMIT)
+    has_more: StrictBool
+
+
+class RetentionProgress(_StorageModel):
+    """Cached internal maintenance facts; never a tombstone enumeration or SQL read."""
+
+    enabled: StrictBool = False
+    paused: StrictBool = False
+    active: StrictBool = False
+    attempts: StrictInt = Field(default=0, ge=0)
+    next_attempt_at: FiniteFloat | None = Field(default=None, ge=0)
+    last_outcome: Literal["committed", "clock_deferred", "busy", "failed"] | None = None
+    last_batch: RetirementBatch | None = None
+    error: StorageIssueCode | None = None
 
 
 class RequestLedger(Protocol):

@@ -139,6 +139,21 @@ class ActivityMeta(_ActivityModel):
     coverage_started_at_ms: StrictInt = Field(ge=0, le=INT64_MAX)
     high_water: StrictInt = Field(ge=0, le=INT64_MAX)
     retention_generation: StrictInt = Field(ge=0, le=INT64_MAX)
+    replay_floor: StrictInt = Field(default=0, ge=0, le=INT64_MAX)
+
+    @model_validator(mode="after")
+    def floor_ordered(self) -> Self:
+        if self.replay_floor > self.high_water:
+            raise ValueError("Replay floor cannot exceed the committed high-water mark.")
+        return self
+
+
+class RetentionPosition(_ActivityModel):
+    """Committed invalidation facts only; no event payload or alternate journal."""
+
+    database_epoch: UUID
+    retention_generation: StrictInt = Field(ge=0, le=INT64_MAX)
+    replay_floor: StrictInt = Field(ge=0, le=INT64_MAX)
 
 
 class ActivityTrace(ActivityMeta):

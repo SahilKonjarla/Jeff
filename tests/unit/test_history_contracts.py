@@ -53,7 +53,7 @@ def test_finite_queries_do_not_relax_event_replay_or_mix_cursor_kinds() -> None:
     request = EvidenceRequest(
         query=HistoryQuery(directory=Path("/p")), expected_instance_id=uuid4()
     )
-    assert json.loads(request.model_dump_json())["revision"] == 5
+    assert json.loads(request.model_dump_json())["revision"] == 6
     assert EvidenceRequest.model_validate_json(request.model_dump_json()).query.limit == 50
     raw = json.loads(request.model_dump_json())
     del raw["query"]["limit"]

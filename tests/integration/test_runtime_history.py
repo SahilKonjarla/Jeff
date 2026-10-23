@@ -145,7 +145,7 @@ def test_history_snapshot_pages_are_scope_bound_stable_and_read_only(tmp_path: P
                 {"database_epoch": uuid4()},
                 {"project_id": uuid4()},
                 {"canonical_root": tmp_path / "foreign"},
-                {"retention_generation": 1},
+                {"retention_generation": page.retention_generation + 1},
                 {"snapshot_high_water": rest.high_water + 1},
             ):
                 invalid = cursor.model_copy(update=changed).encode()

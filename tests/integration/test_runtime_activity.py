@@ -123,7 +123,7 @@ def test_atomic_lifecycle_evidence_scoped_replay_no_write_and_restart(tmp_path: 
         reopened = SQLiteStorage(owner, instance_id=uuid4())
         reopened.start()
         try:
-            assert reopened.wait_ready(5).schema_version == 3
+            assert reopened.wait_ready(5).schema_version == 4
             _, persisted = reopened.trace(scope, deadline=deadline())
             assert (
                 persisted is not None
@@ -387,7 +387,7 @@ with owner:
         store = SQLiteStorage(owner, instance_id=uuid4())
         store.start()
         try:
-            assert store.wait_ready(5).schema_version == 3
+            assert store.wait_ready(5).schema_version == 4
             from jeff.domain.projects import Project
 
             assert store.lookup(Project(project, tmp_path / "p")) is not None

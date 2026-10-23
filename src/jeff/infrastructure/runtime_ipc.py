@@ -335,6 +335,7 @@ class OwnedActivityStream:
             self._position.database_epoch != ready.metadata.database_epoch
             or self._position.retention_generation != ready.metadata.retention_generation
             or self._position.after > ready.metadata.high_water
+            or self._position.after < ready.metadata.replay_floor
             or (
                 query.expected_root is not None
                 and query.expected_root != self._position.canonical_root
@@ -597,6 +598,8 @@ class ControlServer:
         token: bytes,
         identity: RuntimeIdentityData,
         storage_snapshot: Callable[[], StorageReadiness] = StorageReadiness,
+        *,
+        on_stop: Callable[[], None] | None = None,
     ) -> None:
         if len(token) != 32 or identity.pid != os.getpid():
             raise ControlFault("runtime_ownership_unconfirmed")
@@ -604,6 +607,7 @@ class ControlServer:
         self._token = token
         self.identity = identity
         self.storage_snapshot = storage_snapshot
+        self._on_stop = on_stop
         self.dispatcher: RuntimeDispatcher | None = None
         self.events: RuntimeEvents | None = None
         self._stop_deadline: float | None = None
@@ -833,6 +837,8 @@ class ControlServer:
     def request_stop(self) -> None:
         if self._stop_deadline is None:
             self._stop_deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.stop_seconds
+        if not self.stopping and self._on_stop is not None:
+            self._on_stop()
         self.stopping = True
         if self.events is not None:
             self.events.begin_stop()

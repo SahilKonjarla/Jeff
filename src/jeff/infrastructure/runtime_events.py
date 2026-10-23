@@ -16,7 +16,7 @@ from jeff.application.dispatch import (
     StreamReply,
     SubscriptionQuery,
 )
-from jeff.application.history import ActivityMeta, StreamPage
+from jeff.application.history import ActivityMeta, RetentionPosition, StreamPage
 from jeff.application.projects import Failure
 from jeff.application.runtime import (
     DEFAULT_RUNTIME_LIMITS,
@@ -36,6 +36,8 @@ class _Subscriber:
     cursor: str | None = None
     page: StreamPage | None = None
     final_page: bool = False
+    position: RetentionPosition | None = None
+    sending: bool = False
     error: Failure | None = None
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     done: asyncio.Event = field(default_factory=asyncio.Event)
@@ -43,9 +45,14 @@ class _Subscriber:
 
 class RuntimeEvents:
     def __init__(
-        self, identity: RuntimeIdentityData, send: Send, healthy: Callable[[], bool]
+        self,
+        identity: RuntimeIdentityData,
+        send: Send,
+        healthy: Callable[[], bool],
+        retention_position: Callable[[], RetentionPosition | None],
     ) -> None:
         self.identity, self.send, self.healthy = identity, send, healthy
+        self.retention_position = retention_position
         self.dispatcher: RuntimeDispatcher | None = None
         self._loop = asyncio.get_running_loop()
         self._wake = asyncio.Event()
@@ -68,6 +75,7 @@ class RuntimeEvents:
             and self._pump_task is not None
             and not self._pump_task.done()
             and self.healthy()
+            and self.retention_position() is not None
         )
 
     def start(self, dispatcher: RuntimeDispatcher) -> None:
@@ -93,7 +101,41 @@ class RuntimeEvents:
         with self._hint_lock:
             self._hint_pending = False
         if not self._closed:
+            # Must not wait for the serialized pump/read: a peer may already hold a page.
+            self._invalidate_stale()
             self._wake.set()
+
+    def _current(self, sub: _Subscriber, position: RetentionPosition | None, healthy: bool) -> bool:
+        if sub.error is not None:
+            return False
+        if not healthy or position is None:
+            sub.error = control_failure("activity_stream_closed")
+        elif sub.position is not None and sub.position != position:
+            sub.error = control_failure("activity_invalid_cursor")
+        else:
+            return True
+        sub.wake.set()
+        if sub.sending:
+            # Only this genuine captured writer; no SQL cancellation or guessed PID cleanup.
+            sub.writer.transport.abort()
+        return False
+
+    def _invalidate_stale(self) -> None:
+        position, healthy = self.retention_position(), self.healthy()
+        for sub in tuple(self._streams.values()):
+            self._current(sub, position, healthy)
+
+    async def _send_current(self, sub: _Subscriber, frame: StreamFrame) -> bool:
+        # Admission before each frame; a frame already admitted can race the COMMIT.
+        if not self._current(sub, self.retention_position(), self.healthy()):
+            return False
+        sub.sending = True
+        try:
+            await self.send(sub.writer, frame)
+            # Never advance a cursor/progress after invalidation while a write was suspended.
+            return self._current(sub, self.retention_position(), self.healthy())
+        finally:
+            sub.sending = False
 
     async def _read(self, query: StreamQuery, deadline: float) -> StreamReply:
         async with self._read_lock:
@@ -168,16 +210,23 @@ class RuntimeEvents:
                 cursor=sub.cursor,
             )
             sub.page = page
+            sub.position = RetentionPosition(
+                database_epoch=page.database_epoch,
+                retention_generation=page.retention_generation,
+                replay_floor=page.replay_floor,
+            )
             metadata = ActivityMeta(
                 database_epoch=page.database_epoch,
                 coverage_started_at_ms=page.coverage_started_at_ms,
                 high_water=page.high_water,
                 retention_generation=page.retention_generation,
+                replay_floor=page.replay_floor,
             )
-            await asyncio.wait_for(
-                self.send(writer, self._frame(sub, "ready", metadata=metadata)),
+            if not await asyncio.wait_for(
+                self._send_current(sub, self._frame(sub, "ready", metadata=metadata)),
                 max(0, deadline - time.monotonic()),
-            )
+            ):
+                return
             while sub.error is None:
                 if disconnected.done():
                     sub.error = control_failure("activity_stream_closed")
@@ -193,13 +242,19 @@ class RuntimeEvents:
                     if sub.error is not None:
                         break
                     cursor = current.position(event.sequence).encode()
-                    await self.send(writer, self._frame(sub, "event", cursor=cursor, event=event))
+                    if not await self._send_current(
+                        sub, self._frame(sub, "event", cursor=cursor, event=event)
+                    ):
+                        break
                     sub.cursor = cursor
                 if sub.error is not None:
                     break
                 cursor = current.position(current.scanned_through).encode()
                 if cursor != sub.cursor:
-                    await self.send(writer, self._frame(sub, "progress", cursor=cursor))
+                    if not await self._send_current(
+                        sub, self._frame(sub, "progress", cursor=cursor)
+                    ):
+                        break
                     sub.cursor = cursor
                 final = sub.final_page and not current.has_more
                 sub.page = None
@@ -211,7 +266,8 @@ class RuntimeEvents:
         except ControlFault as error:
             sub.error = control_failure(error.code)
         except (OSError, TimeoutError):
-            sub.error = control_failure("activity_slow_reader")
+            if sub.error is None:
+                sub.error = control_failure("activity_slow_reader")
             writer.transport.abort()
         finally:
             disconnected.cancel()
@@ -235,6 +291,7 @@ class RuntimeEvents:
         try:
             while not self._closed:
                 self._wake.clear()  # clear BEFORE scan: a concurrent hint remains visible
+                self._invalidate_stale()  # also covers suppressed/coalesced hint fallback
                 for sub in tuple(self._streams.values()):
                     if not self.healthy():
                         sub.error = control_failure("activity_stream_closed")
@@ -248,7 +305,9 @@ class RuntimeEvents:
                         sub.error = control_failure(error.code)
                         sub.wake.set()
                         continue
-                    if sub.done.is_set() or sub.error is not None:
+                    if sub.done.is_set() or not self._current(
+                        sub, self.retention_position(), self.healthy()
+                    ):
                         continue
                     if reply.error is not None:
                         sub.error = reply.error

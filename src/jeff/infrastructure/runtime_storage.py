@@ -4,6 +4,7 @@ Python SQLite opens a pathname, not our checked descriptor. Private ancestry plu
 before/after identity checks narrow races; this is not a hostile same-user/ACL proof.
 """
 
+import math
 import os
 import queue
 import sqlite3
@@ -20,6 +21,7 @@ from uuid import UUID, uuid4
 
 from jeff.application.history import (
     ACTIVITY_EVENT_LIMIT,
+    INT64_MAX,
     ActivityEvent,
     ActivityMeta,
     ActivityPage,
@@ -31,6 +33,7 @@ from jeff.application.history import (
     HistoryRead,
     HistoryScope,
     ReplayScope,
+    RetentionPosition,
     StreamCursor,
     StreamPage,
     StreamRead,
@@ -40,12 +43,16 @@ from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS, ControlFault
 from jeff.application.storage import (
     DATABASE_APPLICATION_ID,
     DATABASE_SCHEMA,
+    RETIREMENT_BATCH_LIMIT,
+    RETIREMENT_INTERVAL_SECONDS,
     STORAGE_PENDING_LIMIT,
     Receipt,
     ReceiptClaim,
     ReceiptClaimResult,
     ReceiptScope,
     ReceiptTransition,
+    RetentionProgress,
+    RetirementBatch,
     StorageFault,
     StorageIssueCode,
     StorageReadiness,
@@ -84,6 +91,13 @@ _ACTIVITY_META = (
     "coverage_started_at_ms INTEGER NOT NULL CHECK(coverage_started_at_ms>=0), "
     "high_water INTEGER NOT NULL CHECK(high_water>=0), "
     "generation INTEGER NOT NULL CHECK(generation>=0))"
+)
+_FLOOR_COLUMN = "replay_floor INTEGER NOT NULL DEFAULT 0 CHECK(replay_floor>=0)"
+_ACTIVITY_META_V4 = _ACTIVITY_META[:-1] + ", " + _FLOOR_COLUMN + ")"
+_TOMBSTONES = "CREATE TABLE request_tombstones (request_id TEXT NOT NULL PRIMARY KEY)"
+_EXPIRABLE_INDEX = (
+    "CREATE INDEX receipts_expirable ON request_receipts(finished_at_ms,request_id) "
+    "WHERE state IN ('succeeded','failed')"
 )
 _ACTIVITY_REQUESTS = (
     "CREATE TABLE activity_requests ("
@@ -161,7 +175,7 @@ def _schema(connection: sqlite3.Connection) -> int:
     if connection.execute("PRAGMA application_id").fetchone() != (DATABASE_APPLICATION_ID,):
         raise StorageFault("storage_unrecognized")
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version not in (0, 1, 2, DATABASE_SCHEMA):
+    if version not in (0, 1, 2, 3, DATABASE_SCHEMA):
         raise StorageFault("storage_schema_unsupported")
     if connection.execute("PRAGMA journal_mode").fetchone() != ("delete",):
         raise StorageFault("storage_recovery_required")
@@ -174,14 +188,18 @@ def _schema(connection: sqlite3.Connection) -> int:
     if version >= 3:
         expected.update(
             {
-                "activity_meta": ("table", _ACTIVITY_META),
+                "activity_meta": ("table", _ACTIVITY_META_V4 if version >= 4 else _ACTIVITY_META),
                 "activity_requests": ("table", _ACTIVITY_REQUESTS),
                 "activity_events": ("table", _ACTIVITY_EVENTS),
             }
         )
         expected.update({name: ("index", sql) for name, sql in _ACTIVITY_INDEXES.items()})
+    if version >= 4:
+        expected["request_tombstones"] = ("table", _TOMBSTONES)
+        expected["receipts_expirable"] = ("index", _EXPIRABLE_INDEX)
     found = connection.execute(
-        "SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT 11"
+        "SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT ?",
+        (len(expected) + 1,),
     ).fetchall()
 
     def normalize(text: object) -> str:
@@ -195,11 +213,16 @@ def _schema(connection: sqlite3.Connection) -> int:
     ):
         raise StorageFault("storage_schema_unsupported")
     ledger = connection.execute(
-        "SELECT version,name FROM schema_migrations ORDER BY version LIMIT 4"
+        "SELECT version,name FROM schema_migrations ORDER BY version LIMIT ?", (version + 1,)
     ).fetchall()
     if ledger != [
         (number, name)
-        for number, name in ((1, "registry_v1"), (2, "request_receipts_v2"), (3, "activity_v3"))
+        for number, name in (
+            (1, "registry_v1"),
+            (2, "request_receipts_v2"),
+            (3, "activity_v3"),
+            (4, "retention_v4"),
+        )
         if number <= version
     ]:
         raise StorageFault("storage_schema_unsupported")
@@ -221,6 +244,7 @@ class _Work:
         "debug",
         "history",
         "stream",
+        "retire",
     ]
     payload: (
         Project
@@ -231,6 +255,7 @@ class _Work:
         | ActivityRecord
         | ReplayScope
         | HistoryScope
+        | None
     )
     deadline: float
     result: Future[object]
@@ -247,7 +272,18 @@ class SQLiteStorage:
         *,
         instance_id: UUID | None = None,
         commit_hint: Callable[[], None] | None = None,
+        retention_clock: Callable[[], int] | None = None,
+        retention_monotonic: Callable[[], float] | None = None,
+        scheduled_retention: bool = False,
     ) -> None:
+        self._retention_monotonic = retention_monotonic or time.monotonic
+        self._retention_progress = RetentionProgress(enabled=scheduled_retention)
+        self._retention_position: RetentionPosition | None = None
+        self._retention_clock = retention_clock or (lambda: time.time_ns() // 1000000)
+        self._retention_days: int | None = None
+        self._retention_mono_high: float | None = None
+        self._retention_wall_high: int | None = None
+        self._retention_clock_deferred = False
         self._commit_hint = commit_hint
         self._activity_dirty = False
         self._notification_failed = threading.Event()
@@ -265,6 +301,34 @@ class SQLiteStorage:
     @property
     def notification_healthy(self) -> bool:
         return not self._notification_failed.is_set()
+
+    def pause_retention(self) -> None:
+        """Seal maintenance admission, not active SQL or ordinary action drainage."""
+        with self._mutex:
+            self._retention_progress = self._retention_progress.model_copy(
+                update={
+                    "paused": True,
+                    "next_attempt_at": None,
+                }
+            )
+
+    def retention_position(self) -> RetentionPosition | None:
+        """Mutex-only committed epoch/generation/floor; no SQL or diagnostic writes."""
+        with self._mutex:
+            return self._retention_position
+
+    def _publish_retention(self, meta: ActivityMeta) -> None:
+        position = RetentionPosition(
+            database_epoch=meta.database_epoch,
+            retention_generation=meta.retention_generation,
+            replay_floor=meta.replay_floor,
+        )
+        with self._mutex:
+            self._retention_position = position
+
+    def retention_snapshot(self) -> RetentionProgress:
+        with self._mutex:
+            return self._retention_progress
 
     def snapshot(self) -> StorageReadiness:
         with self._mutex:
@@ -293,6 +357,12 @@ class SQLiteStorage:
         with self._mutex:
             self._accepting = False
             self._closing.set()
+            self._retention_progress = self._retention_progress.model_copy(
+                update={
+                    "paused": True,
+                    "next_attempt_at": None,
+                }
+            )
             if self._state.state != "failed":
                 self._state = StorageReadiness(state="closing")
 
@@ -348,6 +418,10 @@ class SQLiteStorage:
     def stream_page(self, scope: StreamRead, *, deadline: float) -> StreamPage:
         return cast(StreamPage, self._submit("stream", scope, deadline))
 
+    def retire(self, *, deadline: float) -> RetirementBatch:
+        """Installation-internal bounded maintenance; no cutoff/SQL or wire operation."""
+        return cast(RetirementBatch, self._submit("retire", None, deadline))
+
     def _submit(
         self,
         operation: Literal[
@@ -363,6 +437,7 @@ class SQLiteStorage:
             "debug",
             "history",
             "stream",
+            "retire",
         ],
         payload: Project
         | ReceiptClaim
@@ -371,7 +446,8 @@ class SQLiteStorage:
         | Path
         | ActivityRecord
         | ReplayScope
-        | HistoryScope,
+        | HistoryScope
+        | None,
         deadline: float | None,
     ) -> object:
         if isinstance(payload, Project) and (
@@ -531,6 +607,25 @@ class SQLiteStorage:
                 connection.execute("INSERT INTO schema_migrations VALUES (3,'activity_v3')")
                 connection.execute("PRAGMA user_version=3")
                 connection.execute("COMMIT")
+            if version < 4:
+                connection.execute("BEGIN IMMEDIATE")
+                meta = self._activity_meta(connection, legacy=True)
+                if meta.retention_generation == INT64_MAX:
+                    raise StorageFault("storage_schema_unsupported")
+                connection.execute(_TOMBSTONES)
+                connection.execute(_EXPIRABLE_INDEX)
+                connection.execute("ALTER TABLE activity_meta ADD COLUMN " + _FLOOR_COLUMN)
+                connection.execute("UPDATE activity_meta SET generation=generation+1")
+                connection.execute("INSERT INTO schema_migrations VALUES (4,'retention_v4')")
+                connection.execute("PRAGMA user_version=4")
+                self._check(root, fd)
+                try:
+                    connection.execute("COMMIT")
+                    self._check(root, fd)
+                except Exception:
+                    if not connection.in_transaction:
+                        raise StorageFault("storage_outcome_unconfirmed") from None
+                    raise
             _schema(connection)
             self._activity_meta(connection)
             if self.instance_id is not None:
@@ -547,6 +642,8 @@ class SQLiteStorage:
 
     def _execute(self, connection: sqlite3.Connection, work: _Work, root: int, fd: int) -> object:
         self._check(root, fd)
+        if work.operation == "retire":
+            return self._retire(connection, root, fd)
         if work.operation == "stream":
             assert isinstance(work.payload, StreamRead)
             return self._stream_page(connection, work.payload, root, fd)
@@ -597,9 +694,10 @@ class SQLiteStorage:
         return Receipt.model_validate(dict(zip(_COLUMNS.split(","), row, strict=True)))
 
     @staticmethod
-    def _activity_meta(connection: sqlite3.Connection) -> ActivityMeta:
+    def _activity_meta(connection: sqlite3.Connection, *, legacy: bool = False) -> ActivityMeta:
+        fields = "epoch,coverage_started_at_ms,high_water,generation"
         row = connection.execute(
-            "SELECT epoch,coverage_started_at_ms,high_water,generation "
+            f"SELECT {fields}{'' if legacy else ',replay_floor'} "
             "FROM activity_meta WHERE singleton=1"
         ).fetchone()
         if row is None:
@@ -609,6 +707,7 @@ class SQLiteStorage:
             coverage_started_at_ms=row[1],
             high_water=row[2],
             retention_generation=row[3],
+            replay_floor=0 if legacy else row[4],
         )
 
     @staticmethod
@@ -768,6 +867,7 @@ class SQLiteStorage:
                 or cursor.database_epoch != meta.database_epoch
                 or cursor.retention_generation != meta.retention_generation
                 or cursor.after > meta.high_water
+                or cursor.after < meta.replay_floor
             ):
                 raise StorageFault("activity_invalid_cursor")
             after = cursor.after
@@ -910,8 +1010,13 @@ class SQLiteStorage:
         if work.operation == "replay":
             assert isinstance(payload, ReplayScope)
             meta = self._activity_meta(connection)
-            if payload.after > meta.high_water or (
-                payload.expected_epoch is not None and payload.expected_epoch != meta.database_epoch
+            if (
+                payload.after < meta.replay_floor
+                or payload.after > meta.high_water
+                or (
+                    payload.expected_epoch is not None
+                    and payload.expected_epoch != meta.database_epoch
+                )
             ):
                 raise StorageFault("activity_invalid_cursor")
             rows = connection.execute(
@@ -965,6 +1070,197 @@ class SQLiteStorage:
             raise
         return event
 
+    def _retire(self, connection: sqlite3.Connection, root: int, fd: int) -> RetirementBatch:
+        with self._mutex:
+            if self._retention_progress.paused or self._closing.is_set():
+                raise StorageFault("storage_closing")
+        assert self._retention_days is not None
+        now = self._sample_retention_wall()
+        self._retention_clock_deferred = now is None
+        if now is None:
+            raise StorageFault("storage_busy")  # Defer; never clamp to a stale larger cutoff.
+        cutoff = max(0, now - self._retention_days * 86400000)
+        connection.execute("BEGIN IMMEDIATE")
+        meta = self._activity_meta(connection)
+        rows = connection.execute(
+            f"SELECT {_COLUMNS} FROM request_receipts "
+            "WHERE state IN ('succeeded','failed') AND finished_at_ms<? "
+            "ORDER BY finished_at_ms,request_id LIMIT ?",
+            (cutoff, RETIREMENT_BATCH_LIMIT + 1),
+        ).fetchall()
+        selected = rows[:RETIREMENT_BATCH_LIMIT]
+        if selected and meta.retention_generation == INT64_MAX:
+            raise StorageFault("storage_failed")
+        floor = meta.replay_floor
+        for row in selected:
+            receipt = self._receipt(row)
+            request_id = str(receipt.request_id)
+            if row[0] != request_id:
+                raise StorageFault("storage_unrecognized")
+            membership = connection.execute(
+                "SELECT canonical_root,project_id,accepted_sequence FROM activity_requests "
+                "WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            event_rows = connection.execute(
+                f"SELECT {_EVENT_COLUMNS} FROM activity_events WHERE request_id=? "
+                "ORDER BY event_id LIMIT ?",
+                (request_id, ACTIVITY_EVENT_LIMIT + 1),
+            ).fetchall()
+            trace = ActivityTrace(
+                **meta.model_dump(),
+                legacy_metadata_only=membership is None,
+                events=tuple(self._activity_event(event) for event in event_rows),
+            )
+            if membership is not None and membership != (
+                str(receipt.canonical_root),
+                str(receipt.project_id) if receipt.project_id else None,
+                trace.events[0].sequence,
+            ):
+                raise StorageFault("storage_unrecognized")
+            if any(
+                event.request_id != receipt.request_id
+                or event.owner_instance_id != receipt.owner_instance_id
+                or event.canonical_root != receipt.canonical_root
+                for event in trace.events
+            ):
+                raise StorageFault("storage_unrecognized")
+            floor = max(floor, trace.events[-1].sequence if trace.events else 0)
+            connection.execute("INSERT INTO request_tombstones VALUES (?)", (request_id,))
+            connection.execute("DELETE FROM activity_events WHERE request_id=?", (request_id,))
+            connection.execute("DELETE FROM activity_requests WHERE request_id=?", (request_id,))
+            connection.execute("DELETE FROM request_receipts WHERE request_id=?", (request_id,))
+        if selected:
+            connection.execute(
+                "UPDATE activity_meta SET generation=generation+1,replay_floor=? WHERE singleton=1",
+                (floor,),
+            )
+        result = RetirementBatch(
+            **self._activity_meta(connection).model_dump(),
+            retired_count=len(selected),
+            has_more=len(rows) > RETIREMENT_BATCH_LIMIT,
+        )
+        self._check(root, fd)
+        try:
+            connection.execute("COMMIT")
+            self._check(root, fd)
+        except Exception:
+            if not connection.in_transaction:
+                raise StorageFault("storage_outcome_unconfirmed") from None
+            raise
+        self._publish_retention(result)  # Checked COMMIT precedes cache, then caller's hint.
+        self._activity_dirty = bool(selected)
+        return result
+
+    def _sample_retention_wall(self) -> int | None:
+        try:
+            now = self._retention_clock()
+        except Exception:
+            return None
+        if (
+            type(now) is not int
+            or not 0 <= now <= INT64_MAX
+            or (self._retention_wall_high is not None and now < self._retention_wall_high)
+        ):
+            return None
+        self._retention_wall_high = now
+        return now
+
+    def _retention_now(self) -> float | None:
+        try:
+            value = self._retention_monotonic()
+            if (
+                type(value) not in (int, float)
+                or not math.isfinite(value)
+                or value < 0
+                or not math.isfinite(value + RETIREMENT_INTERVAL_SECONDS)
+                or value + RETIREMENT_INTERVAL_SECONDS - value < RETIREMENT_INTERVAL_SECONDS
+                or (self._retention_mono_high is not None and value < self._retention_mono_high)
+            ):
+                return None
+            self._retention_mono_high = float(value)
+            return float(value)
+        except Exception:
+            return None
+
+    def _retention_end(
+        self, *, batch: RetirementBatch | None = None, fault: StorageFault | None = None
+    ) -> None:
+        completed = self._retention_now()
+        with self._mutex:
+            progress = self._retention_progress
+            self._retention_progress = progress.model_copy(
+                update={
+                    "active": False,
+                    "next_attempt_at": completed + RETIREMENT_INTERVAL_SECONDS
+                    if completed is not None
+                    and progress.enabled
+                    and not progress.paused
+                    and not self._closing.is_set()
+                    else None,
+                    "last_outcome": "committed"
+                    if fault is None
+                    else "clock_deferred"
+                    if self._retention_clock_deferred
+                    else "busy"
+                    if fault.code in ("storage_busy", "storage_closing")
+                    else "failed",
+                    "last_batch": batch if batch is not None else progress.last_batch,
+                    "error": fault.code if fault is not None else None,
+                }
+            )
+
+    def _maintain_due(self, connection: sqlite3.Connection, root: int, fd: int) -> None:
+        now = self._retention_now()
+        with self._mutex:
+            progress = self._retention_progress
+            if (
+                not progress.enabled
+                or progress.paused
+                or self._closing.is_set()
+                or self._state.state != "ready"
+                or now is None
+            ):
+                return
+            if progress.next_attempt_at is None:
+                self._retention_progress = progress.model_copy(
+                    update={
+                        "next_attempt_at": now + RETIREMENT_INTERVAL_SECONDS,
+                    }
+                )
+                return
+            if now < progress.next_attempt_at:
+                return
+            self._retention_progress = progress.model_copy(
+                update={
+                    "active": True,
+                    "attempts": progress.attempts + 1,
+                    "next_attempt_at": None,
+                }
+            )
+        self._activity_dirty = False
+        self._retention_clock_deferred = False
+        try:
+            batch = self._retire(connection, root, fd)
+            if self._activity_dirty and self._commit_hint is not None:
+                try:
+                    self._commit_hint()
+                except Exception:
+                    self._notification_failed.set()
+            self._retention_end(batch=batch)
+        except Exception as error:
+            try:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                fault = StorageFault("storage_outcome_unconfirmed")
+            else:
+                fault = _fault(error)
+            if fault.code not in ("storage_busy", "storage_closing"):
+                self._failed(fault)
+                self._closing.set()
+            self._retention_end(fault=fault)
+
     def _reconcile(self, connection: sqlite3.Connection, instance: UUID) -> None:
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.start_seconds
         while True:
@@ -1004,6 +1300,17 @@ class SQLiteStorage:
         receipt = self._receipt(row) if row is not None else None
         result: object
         if isinstance(payload, ReceiptClaim):
+            if receipt is None and (
+                self.instance_id is not None and payload.owner_instance_id != self.instance_id
+            ):
+                raise StorageFault("receipt_conflict")
+            retired = connection.execute(
+                "SELECT 1 FROM request_tombstones WHERE request_id=?", (str(payload.request_id),)
+            ).fetchone()
+            if retired is not None:
+                raise StorageFault(
+                    "storage_unrecognized" if receipt is not None else "request_retired"
+                )
             if receipt is not None:
                 if (
                     receipt.operation != payload.operation
@@ -1148,19 +1455,35 @@ class SQLiteStorage:
         with self._mutex:
             self._accepting = False
             self._state = StorageReadiness(state="failed", error=fault.code)
+            self._retention_position = None
 
     def _run(self) -> None:
         connection = None
         fd = -1
         try:
             settings, source = load_or_create_settings(self.owner)
+            self._retention_days = settings.history.retention_days
             with self.owner.store.directory(self.owner.store.layout.data_dir, create=False) as root:
                 connection, fd = self._open(root)
+                self._publish_retention(self._activity_meta(connection))
+                # Ready-time baseline; invalid time cannot trigger purge.
+                self._sample_retention_wall()
                 with self._mutex:
                     if self._closing.is_set():
                         self._state = StorageReadiness(state="closing")
                     else:
                         self._accepting = True
+                        ready_at = self._retention_now()
+                        if (
+                            self._retention_progress.enabled
+                            and not self._retention_progress.paused
+                            and ready_at is not None
+                        ):
+                            self._retention_progress = self._retention_progress.model_copy(
+                                update={
+                                    "next_attempt_at": ready_at + RETIREMENT_INTERVAL_SECONDS,
+                                }
+                            )
                         self._state = StorageReadiness(
                             state="ready",
                             schema_version=DATABASE_SCHEMA,
@@ -1173,6 +1496,7 @@ class SQLiteStorage:
                         try:
                             work = self._queue.get(timeout=0.05)
                         except queue.Empty:
+                            self._maintain_due(connection, root, fd)
                             continue
                         try:
                             if self.snapshot().state == "failed":
@@ -1204,8 +1528,10 @@ class SQLiteStorage:
                                 fault = _fault(error)
                             if fault.code not in (
                                 "storage_busy",
+                                "storage_closing",
                                 "registry_conflict",
                                 "receipt_conflict",
+                                "request_retired",
                                 "receipt_scope_mismatch",
                                 "activity_invalid_cursor",
                                 "activity_budget_exceeded",
@@ -1217,6 +1543,7 @@ class SQLiteStorage:
                                 work.result.set_exception(fault)
                         finally:
                             self._queue.task_done()
+                            self._maintain_due(connection, root, fd)
                 finally:
                     closing_connection, closing_fd = connection, fd
                     connection, fd = None, -1
