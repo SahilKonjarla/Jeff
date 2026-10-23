@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
-from jeff.application.dispatch import ProjectClient, ProjectDispatcher, ProjectStatusService
+from jeff.application.dispatch import (
+    ActivityClient,
+    ProjectClient,
+    ProjectDispatcher,
+    ProjectStatusService,
+)
 from jeff.application.projects import Failure, ProjectService
 from jeff.application.questions import QuestionService
 from jeff.application.runtime import (
@@ -26,7 +31,13 @@ from jeff.application.runtime import (
 from jeff.application.storage import StorageFault
 from jeff.infrastructure.project_files import FileProjectStore
 from jeff.infrastructure.runtime_dispatch import RuntimeDispatcher
-from jeff.infrastructure.runtime_ipc import ControlServer, RuntimeProjectClient, encode_message
+from jeff.infrastructure.runtime_events import RuntimeEvents
+from jeff.infrastructure.runtime_ipc import (
+    ControlServer,
+    RuntimeProjectClient,
+    _stream_send,
+    encode_message,
+)
 from jeff.infrastructure.runtime_paths import resolve_layout
 from jeff.infrastructure.runtime_process import RuntimeController
 from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
@@ -74,12 +85,23 @@ def create_project_client() -> ProjectClient:
     )
 
 
+def create_activity_client() -> ActivityClient:
+    """Lazy installed subscription interface; no CLI/auto-start/cursor persistence."""
+    return RuntimeProjectClient(_selected_layout)
+
+
 async def _serve(
     owner: Ownership, token: bytes, identity: RuntimeIdentityData, result_fd: int
 ) -> None:
-    storage = SQLiteStorage(owner, instance_id=identity.instance_id)
+    events = RuntimeEvents(
+        identity,
+        _stream_send,
+        lambda: storage.snapshot().state == "ready" and storage.notification_healthy,
+    )
+    storage = SQLiteStorage(owner, instance_id=identity.instance_id, commit_hint=events.signal)
     dispatcher: RuntimeDispatcher | None = None
     server = ControlServer(owner, token, identity, storage.snapshot)
+    server.events = events
     serving = asyncio.create_task(server.serve())
     try:
         storage.start()
@@ -97,6 +119,7 @@ async def _serve(
             )
             dispatcher.start()
             server.dispatcher = dispatcher
+            events.start(dispatcher)
         packet = encode_message(
             StartupResult(
                 revision=PROTOCOL_REVISION, instance_id=identity.instance_id, error=state.error

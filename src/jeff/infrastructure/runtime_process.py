@@ -103,6 +103,8 @@ class RuntimeController:
                     if observed.storage.error is not None:
                         raise ControlFault(observed.storage.error)
                     if observed.application_ready:
+                        if "activity.subscribe" not in observed.available_operations:
+                            raise ControlFault("runtime_capability_unavailable")
                         return ControlSuccess(data=observed)
                 except ControlFault as error:
                     if error.code not in (
@@ -180,6 +182,8 @@ class RuntimeController:
                     if observation.storage.error is not None:
                         raise ControlFault(observation.storage.error)
                     if observation.application_ready:
+                        if "activity.subscribe" not in observation.available_operations:
+                            raise ControlFault("runtime_capability_unavailable")
                         return ControlSuccess(data=observation)
                     time.sleep(min(0.02, max(0, ready_deadline - time.monotonic())))
                 except ControlFault as error:

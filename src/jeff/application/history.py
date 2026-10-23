@@ -290,3 +290,80 @@ class ActivityPage(ActivityMeta):
     events: tuple[ActivityEvent, ...] = Field(max_length=64)
     next_after: StrictInt = Field(ge=0, le=INT64_MAX)
     has_more: StrictBool
+
+
+class StreamCursor(HistoryScope):
+    kind: Literal["activity.v1"] = "activity.v1"
+    database_epoch: UUID
+    retention_generation: StrictInt = Field(ge=0, le=INT64_MAX)
+    after: StrictInt = Field(ge=0, le=INT64_MAX)
+
+    def encode(self) -> str:
+        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode().rstrip("=")
+
+    @classmethod
+    def decode(cls, token: str) -> Self:
+        def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("Invalid activity cursor.")
+                result[key] = value
+            return result
+
+        def invalid(value: str) -> None:
+            raise ValueError("Invalid activity cursor.")
+
+        try:
+            if not token or len(token) > 8192:
+                raise ValueError("Invalid activity cursor.")
+            data = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
+            result = cls.model_validate(
+                json.loads(data.decode("utf-8"), object_pairs_hook=unique, parse_constant=invalid)
+            )
+            if result.encode() != token:
+                raise ValueError("Invalid activity cursor.")
+            return result
+        except (ValueError, TypeError, binascii.Error, RecursionError):
+            raise ValueError("Invalid activity cursor.") from None
+
+
+class StreamRead(HistoryScope):
+    cursor: str | None = Field(default=None, max_length=8192)
+    limit: StrictInt = Field(default=64, gt=0, le=64)
+
+
+class StreamPage(ActivityMeta, HistoryScope):
+    start_after: StrictInt = Field(ge=0, le=INT64_MAX)
+    scanned_through: StrictInt = Field(ge=0, le=INT64_MAX)
+    events: tuple[ActivityEvent, ...] = Field(max_length=64)
+    has_more: StrictBool
+
+    def position(self, after: int) -> StreamCursor:
+        return StreamCursor(
+            project_id=self.project_id,
+            canonical_root=self.canonical_root,
+            database_epoch=self.database_epoch,
+            retention_generation=self.retention_generation,
+            after=after,
+        )
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        positions = [self.start_after, *(event.sequence for event in self.events)]
+        if not self.start_after <= self.scanned_through <= self.high_water or any(
+            left >= right for left, right in zip(positions, positions[1:], strict=False)
+        ):
+            raise ValueError("Stream pages require increasing committed positions.")
+        if self.events and self.events[-1].sequence > self.scanned_through:
+            raise ValueError("Cannot advance behind a returned event.")
+        if any(
+            (e.project_id, e.canonical_root) != (self.project_id, self.canonical_root)
+            for e in self.events
+        ):
+            raise ValueError("Stream pages require observed project identity.")
+        if self.has_more and (not self.events or self.scanned_through != self.events[-1].sequence):
+            raise ValueError("Cannot advance beyond an unreturned eligible event.")
+        if not self.has_more and self.scanned_through != self.high_water:
+            raise ValueError("Exhausted pages advance through committed coverage.")
+        return self

@@ -6,6 +6,7 @@
 - [test_questions.py](test_questions.py): deterministic routing, unsupported input without Git access/echo, registered targeting/time, protected origin/destination filtering, and safe terminal metadata.
 - [test_projects.py](test_projects.py): absolute roots, stable repeat initialization, inspection without implicit registration, and mismatched roots from a controlled port.
 
+- [test_activity_stream_contracts.py](test_activity_stream_contracts.py): strict distinct activity cursors, finite subscription/frame discriminators/no external drain override, and safe exhausted-interval page positions. No native ownership claim.
 - [test_history_contracts.py](test_history_contracts.py): strict bounded canonical opaque cursors (duplicates/nonfinite/types/positions), finite diagnostic envelopes and unchanged event-replay64 limit; no I/O.
 - [test_runtime_contracts.py](test_runtime_contracts.py): immutable identity/state invariants, strict safe result construction/serialization, fixed inspection roles and protocol/limit declarations; no process ownership claim.
 - [test_runtime_paths.py](test_runtime_paths.py): injected Mac defaults, independent overrides, no cwd/environment fallback, safe invalid-input failures, known system aliases, byte-length bounds and honest unverified-platform refusal. Resolver tests perform no installation I/O.

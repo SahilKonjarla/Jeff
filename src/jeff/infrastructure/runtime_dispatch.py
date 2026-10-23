@@ -1,4 +1,4 @@
-"""Finite worker admission and actual drain; no SQL, transport or per-call executor."""
+"""Finite worker admission and staged actual drain; no SQL/transport/lifetime executor."""
 
 import queue
 import threading
@@ -14,16 +14,21 @@ from jeff.application.dispatch import (
     ProjectDispatcher,
     ReceiptQuery,
     ReceiptReply,
+    StreamQuery,
+    StreamReply,
     dispatch_failure,
 )
 from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS, ControlFault
 
+Call = ProjectCall | ReceiptQuery | EvidenceQuery | StreamQuery
+Reply = DispatchReply | ReceiptReply | EvidenceReply | StreamReply
+
 
 @dataclass
 class _Work:
-    call: ProjectCall | ReceiptQuery | EvidenceQuery
+    call: Call
     deadline: float
-    result: Future[DispatchReply | ReceiptReply | EvidenceReply]
+    result: Future[Reply]
 
 
 class RuntimeDispatcher:
@@ -31,6 +36,8 @@ class RuntimeDispatcher:
         self.dispatch = dispatch
         self._queue: queue.Queue[_Work] = queue.Queue(DEFAULT_RUNTIME_LIMITS.pending_requests)
         self._closing = threading.Event()
+        self._draining = False
+        self._outstanding_actions = 0
         self._mutex = threading.Lock()
         self._threads: list[threading.Thread] = []
         self._ready = False
@@ -40,10 +47,16 @@ class RuntimeDispatcher:
         with self._mutex:
             return (
                 self._ready
+                and not self._draining
                 and not self._closing.is_set()
                 and len(self._threads) == DEFAULT_RUNTIME_LIMITS.active_requests
                 and all(thread.is_alive() for thread in self._threads)
             )
+
+    @property
+    def actions_drained(self) -> bool:
+        with self._mutex:
+            return self._outstanding_actions == 0
 
     @property
     def closed(self) -> bool:
@@ -65,21 +78,31 @@ class RuntimeDispatcher:
                 self._closing.set()
                 raise ControlFault("runtime_start_failed") from None
 
-    def submit(
-        self, call: ProjectCall | ReceiptQuery | EvidenceQuery, deadline: float
-    ) -> Future[DispatchReply | ReceiptReply | EvidenceReply]:
-        result: Future[DispatchReply | ReceiptReply | EvidenceReply] = Future()
+    def submit(self, call: Call, deadline: float) -> Future[Reply]:
+        result: Future[Reply] = Future()
         with self._mutex:
-            if not self._ready or self._closing.is_set():
+            if (
+                not self._ready
+                or self._closing.is_set()
+                or (self._draining and not isinstance(call, StreamQuery))
+            ):
                 raise ControlFault("runtime_busy")
             try:
                 self._queue.put_nowait(_Work(call, deadline, result))
             except queue.Full:
                 raise ControlFault("runtime_busy") from None
+            if not isinstance(call, StreamQuery):
+                self._outstanding_actions += 1
         return result
+
+    def begin_drain(self) -> None:
+        """Seal external work, retain the same workers for admitted stream final reads."""
+        with self._mutex:
+            self._draining = True
 
     def request_close(self) -> None:
         with self._mutex:
+            self._draining = True
             self._closing.set()
             self._ready = False
 
@@ -91,13 +114,7 @@ class RuntimeDispatcher:
         if not self.closed:
             raise ControlFault("runtime_stop_unconfirmed")
 
-    def _refused(
-        self,
-        call: ProjectCall | ReceiptQuery | EvidenceQuery,
-        *,
-        closing: bool = False,
-        unknown: bool = False,
-    ) -> DispatchReply | ReceiptReply | EvidenceReply:
+    def _refused(self, call: Call, *, closing: bool = False, unknown: bool = False) -> Reply:
         error = dispatch_failure(
             "request_outcome_unknown"
             if unknown
@@ -105,6 +122,8 @@ class RuntimeDispatcher:
             if closing
             else "request_timeout"
         )
+        if isinstance(call, StreamQuery):
+            return StreamReply(error=error)
         if isinstance(call, ProjectCall):
             return DispatchReply(
                 request_id=call.request_id,
@@ -130,8 +149,14 @@ class RuntimeDispatcher:
             try:
                 if not work.result.set_running_or_notify_cancel():
                     continue
-                if self._closing.is_set() or time.monotonic() >= work.deadline:
-                    result = self._refused(work.call, closing=self._closing.is_set())
+                if (
+                    self._closing.is_set()
+                    or (self._draining and not isinstance(work.call, StreamQuery))
+                    or time.monotonic() >= work.deadline
+                ):
+                    result = self._refused(work.call, closing=self._draining)
+                elif isinstance(work.call, StreamQuery):
+                    result = self.dispatch.read_stream(work.call, work.deadline)
                 elif isinstance(work.call, ProjectCall):
                     result = self.dispatch.execute(work.call, work.deadline)
                 elif isinstance(work.call, EvidenceQuery):
@@ -140,8 +165,10 @@ class RuntimeDispatcher:
                     result = self.dispatch.inspect_receipt(work.call, work.deadline)
                 work.result.set_result(result)
             except Exception:
-                # No arbitrary driver/input traceback escapes this owned thread.
                 if not work.result.done():
                     work.result.set_result(self._refused(work.call, unknown=True))
             finally:
+                with self._mutex:
+                    if not isinstance(work.call, StreamQuery):
+                        self._outstanding_actions -= 1
                 self._queue.task_done()

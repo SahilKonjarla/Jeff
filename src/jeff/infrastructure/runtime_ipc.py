@@ -4,11 +4,14 @@ import asyncio
 import ctypes
 import hmac
 import json
+import math
 import os
+import select
 import socket
 import stat
 import struct
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -19,6 +22,7 @@ from pydantic import BaseModel, Field, RootModel
 
 from jeff.application.dispatch import (
     PROJECT_OPERATIONS,
+    ActivityFault,
     DispatchReply,
     EvidenceQuery,
     EvidenceReply,
@@ -30,8 +34,13 @@ from jeff.application.dispatch import (
     ReceiptQuery,
     ReceiptReply,
     ReceiptRequest,
+    StreamFrame,
+    StreamReply,
+    SubscriptionQuery,
+    SubscriptionRequest,
     dispatch_failure,
 )
+from jeff.application.history import StreamCursor
 from jeff.application.projects import Failure
 from jeff.application.runtime import (
     DEFAULT_RUNTIME_LIMITS,
@@ -50,13 +59,18 @@ from jeff.application.runtime import (
 from jeff.application.storage import StorageReadiness
 from jeff.domain.runtime import RuntimeState
 from jeff.infrastructure.runtime_dispatch import RuntimeDispatcher
+from jeff.infrastructure.runtime_events import RuntimeEvents
 from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
 
 
 class RpcRequest(
     RootModel[
         Annotated[
-            ControlRequest | ProjectRequest | ReceiptRequest | EvidenceRequest,
+            ControlRequest
+            | ProjectRequest
+            | ReceiptRequest
+            | EvidenceRequest
+            | SubscriptionRequest,
             Field(discriminator="kind"),
         ]
     ]
@@ -300,6 +314,106 @@ class ControlClient:
             return connection.request(operation, expected_instance_id)
 
 
+class OwnedActivityStream:
+    """Caller owns one authenticated socket; one reader, independent idempotent close."""
+
+    def __init__(
+        self, connection: ControlConnection, ready: StreamFrame, query: SubscriptionQuery
+    ) -> None:
+        self.connection, self.ready, self.query = connection, ready, query
+        self._closed = threading.Event()
+        self._reader = threading.Lock()
+        if ready.cursor is None or ready.metadata is None:
+            self.close()
+            raise ControlFault("runtime_protocol_error")
+        try:
+            self._position = StreamCursor.decode(ready.cursor)
+        except ValueError:
+            self.close()
+            raise ControlFault("runtime_protocol_error") from None
+        if (
+            self._position.database_epoch != ready.metadata.database_epoch
+            or self._position.retention_generation != ready.metadata.retention_generation
+            or self._position.after > ready.metadata.high_water
+            or (
+                query.expected_root is not None
+                and query.expected_root != self._position.canonical_root
+            )
+            or (
+                query.expected_project_id is not None
+                and query.expected_project_id != self._position.project_id
+            )
+            or (query.cursor is not None and query.cursor != ready.cursor)
+        ):
+            self.close()
+            raise ControlFault("runtime_protocol_error")
+        self.last_received_cursor = ready.cursor
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if not self._closed.is_set():
+            self._closed.set()
+            try:
+                self.connection.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self.connection.connection.close()
+
+    def receive(self, wait_seconds: float | None = None) -> StreamFrame | None:
+        if wait_seconds is not None and (not math.isfinite(wait_seconds) or wait_seconds < 0):
+            raise ValueError("Idle wait must be finite and nonnegative.")
+        if not self._reader.acquire(blocking=False):
+            raise ControlFault("runtime_protocol_error")
+        try:
+            if self._closed.is_set():
+                raise ControlFault("activity_stream_closed")
+            if not select.select([self.connection.connection], [], [], wait_seconds)[0]:
+                return None
+            frame = receive_message(
+                self.connection.connection,
+                DEFAULT_RUNTIME_LIMITS.event_bytes,
+                time.monotonic() + DEFAULT_RUNTIME_LIMITS.frame_seconds,
+                StreamFrame,
+            )
+            if (
+                frame.request_id != self.query.query_id
+                or frame.identity != self.connection.identity
+                or frame.kind == "ready"
+            ):
+                raise ControlFault("runtime_protocol_error")
+            if frame.cursor is not None:
+                position = StreamCursor.decode(frame.cursor)
+                if (
+                    position.project_id != self._position.project_id
+                    or position.canonical_root != self._position.canonical_root
+                    or position.database_epoch != self._position.database_epoch
+                    or position.retention_generation != self._position.retention_generation
+                    or position.after < self._position.after
+                    or (frame.kind != "closed" and position.after == self._position.after)
+                ):
+                    raise ControlFault("runtime_protocol_error")
+                if frame.event is not None and (
+                    frame.event.sequence != position.after
+                    or frame.event.project_id != position.project_id
+                    or frame.event.canonical_root != position.canonical_root
+                ):
+                    raise ControlFault("runtime_protocol_error")
+                self._position, self.last_received_cursor = position, frame.cursor
+            if frame.kind == "closed":
+                self.close()
+            return frame
+        except (OSError, ValueError, ControlFault):
+            self.close()
+            raise ControlFault("activity_stream_closed") from None
+        finally:
+            self._reader.release()
+
+
 class RuntimeProjectClient:
     """One authenticated unary call; no autostart, response replay or local fallback."""
 
@@ -347,6 +461,46 @@ class RuntimeProjectClient:
         return receive_message(
             connection.connection, DEFAULT_RUNTIME_LIMITS.response_bytes, connection.deadline, model
         )
+
+    def subscribe(self, query: SubscriptionQuery) -> OwnedActivityStream:
+        deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
+        with self._connect(deadline) as preflight:
+            observation = preflight.request("status", preflight.identity.instance_id)
+            if (
+                not observation.application_ready
+                or "activity.subscribe" not in observation.available_operations
+            ):
+                raise ControlFault("runtime_capability_unavailable")
+            identity = preflight.identity
+        connection = self._connect(deadline)
+        try:
+            if connection.identity != identity:
+                raise ControlFault("runtime_ownership_unconfirmed")
+            request = SubscriptionRequest(
+                query=query,
+                expected_instance_id=identity.instance_id,
+                remaining_ms=max(1, int(_remaining(deadline) * 1000)),
+            )
+            connection.used = True
+            connection.connection.settimeout(_remaining(deadline))
+            connection.connection.sendall(
+                encode_message(
+                    request.model_dump(mode="json"), DEFAULT_RUNTIME_LIMITS.request_bytes
+                )
+            )
+            ready = receive_message(
+                connection.connection, DEFAULT_RUNTIME_LIMITS.event_bytes, deadline, StreamFrame
+            )
+            if ready.request_id != query.query_id or ready.identity != identity:
+                raise ControlFault("runtime_ownership_unconfirmed")
+            if ready.kind == "closed" and ready.error is not None:
+                raise ActivityFault(ready.error)
+            if ready.kind != "ready":
+                raise ControlFault("runtime_protocol_error")
+            return OwnedActivityStream(connection, ready, query)
+        except BaseException:
+            connection.connection.close()
+            raise
 
     def execute(self, call: ProjectCall) -> DispatchReply:
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
@@ -432,6 +586,10 @@ async def _async_send(writer: asyncio.StreamWriter, message: BaseModel, maximum:
     await asyncio.wait_for(writer.drain(), timeout=DEFAULT_RUNTIME_LIMITS.frame_seconds)
 
 
+async def _stream_send(writer: asyncio.StreamWriter, frame: StreamFrame) -> None:
+    await _async_send(writer, frame, DEFAULT_RUNTIME_LIMITS.event_bytes)
+
+
 class ControlServer:
     def __init__(
         self,
@@ -447,6 +605,8 @@ class ControlServer:
         self.identity = identity
         self.storage_snapshot = storage_snapshot
         self.dispatcher: RuntimeDispatcher | None = None
+        self.events: RuntimeEvents | None = None
+        self._stop_deadline: float | None = None
         self._project_connections = 0
         self.stopping = False
         self._stop = asyncio.Event()
@@ -513,6 +673,37 @@ class ControlServer:
                     RpcRequest,
                 )
             ).root
+            if isinstance(request, SubscriptionRequest):
+                if (
+                    self.stopping
+                    or self.events is None
+                    or not self.events.ready
+                    or self._project_connections >= DEFAULT_RUNTIME_LIMITS.connections - 1
+                    or request.expected_instance_id != self.identity.instance_id
+                ):
+                    from jeff.application.runtime import control_failure
+
+                    await _stream_send(
+                        writer,
+                        StreamFrame(
+                            kind="closed",
+                            request_id=request.query.query_id,
+                            identity=self.identity,
+                            error=control_failure("runtime_busy"),
+                        ),
+                    )
+                    return
+                project_slot = True
+                self._project_connections += 1
+                writer.transport.set_write_buffer_limits(high=65536, low=32768)
+                await self.events.open(
+                    request.query,
+                    reader,
+                    writer,
+                    began
+                    + min(request.remaining_ms / 1000, DEFAULT_RUNTIME_LIMITS.request_seconds),
+                )
+                return
             if isinstance(request, (ProjectRequest, ReceiptRequest, EvidenceRequest)):
                 if self._project_connections >= DEFAULT_RUNTIME_LIMITS.connections - 1:
                     response = self._project_refusal(request, busy=True)
@@ -534,8 +725,7 @@ class ControlServer:
                 )
             else:
                 if request.operation == "stop":
-                    self.stopping = True
-                    self._stop.set()  # accepted shutdown persists even if reply delivery fails
+                    self.request_stop()  # shutdown persists even if reply delivery fails
                 storage = self.storage_snapshot()
                 observation = ControlObservation(
                     state=RuntimeState.STOPPING if self.stopping else RuntimeState.RUNNING,
@@ -546,13 +736,17 @@ class ControlServer:
                         and storage.state == "ready"
                         and self.dispatcher is not None
                         and self.dispatcher.ready
+                        and self.events is not None
+                        and self.events.ready
                     ),
                     storage=storage,
-                    available_operations=PROJECT_OPERATIONS
+                    available_operations=(*PROJECT_OPERATIONS, "activity.subscribe")
                     if not self.stopping
                     and storage.state == "ready"
                     and self.dispatcher is not None
                     and self.dispatcher.ready
+                    and self.events is not None
+                    and self.events.ready
                     else (),
                 )
                 response = ControlResponse(
@@ -626,15 +820,24 @@ class ControlServer:
         except ControlFault:
             return self._project_refusal(request, busy=True)
         try:
-            return await asyncio.wait_for(
+            reply = await asyncio.wait_for(
                 asyncio.shield(asyncio.wrap_future(future)),
                 timeout=max(0, deadline - time.monotonic()),
             )
+            if isinstance(reply, StreamReply):
+                raise ControlFault("runtime_protocol_error")
+            return reply
         except TimeoutError:
             return self._project_refusal(request, unknown=True)
 
     def request_stop(self) -> None:
+        if self._stop_deadline is None:
+            self._stop_deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.stop_seconds
         self.stopping = True
+        if self.events is not None:
+            self.events.begin_stop()
+        if self.dispatcher is not None:
+            self.dispatcher.begin_drain()
         self._stop.set()
 
     async def serve(self) -> None:
@@ -654,12 +857,27 @@ class ControlServer:
             )
             await self._stop.wait()
             if self.dispatcher is not None:
+                self.dispatcher.begin_drain()
+                while not self.dispatcher.actions_drained:
+                    await asyncio.sleep(0.01)
+            if self.events is not None:
+                await self.events.drain(
+                    min(
+                        time.monotonic() + 5,
+                        self._stop_deadline
+                        if self._stop_deadline is not None
+                        else time.monotonic() + 5,
+                    )
+                )
+            if self.dispatcher is not None:
                 self.dispatcher.request_close()
                 while not self.dispatcher.closed:
                     await asyncio.sleep(0.01)
                 self.dispatcher.close(timeout=0)
         finally:
-            self.stopping = True
+            self.request_stop()
+            if self.events is not None:
+                await self.events.drain(time.monotonic())
             if server is not None:
                 server.close()
                 await server.wait_closed()

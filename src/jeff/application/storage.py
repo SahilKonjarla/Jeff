@@ -16,6 +16,8 @@ from jeff.application.history import (
     HistoryRead,
     HistoryScope,
     ReplayScope,
+    StreamPage,
+    StreamRead,
 )
 from jeff.application.projects import ErrorData, Failure, ProjectService
 from jeff.domain.projects import Project
@@ -196,6 +198,7 @@ class ReceiptClaimResult(_StorageModel):
 
 
 class RequestLedger(Protocol):
+    def stream_page(self, scope: StreamRead, *, deadline: float) -> StreamPage: ...
     def history(self, scope: HistoryRead, *, deadline: float) -> HistoryPage: ...
     def debug(self, scope: HistoryScope, *, deadline: float) -> tuple[Receipt, ActivityTrace]: ...
     def observe(self, record: ActivityRecord, *, deadline: float) -> ActivityEvent: ...

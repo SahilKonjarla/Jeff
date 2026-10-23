@@ -62,9 +62,15 @@ Changes intentionally report `complete: false`, `visible_clean`, protected-path/
 
 `ProjectStatusService` validates local Git/YAML before invoking the lazy runtime-control factory. `ProjectStatusSuccess` preserves ProjectData and explicitly adds `runtime`; it is not a project-action wire result. Config/status/inspection never implicitly index or create activity/access timestamps. `ProjectClient.status` is composed separately from daemon-dependent execution, not a fallback.
 
+## Committed streams — slice5 C
+
+`SubscriptionQuery`, finite ready/event/progress/closed frames and `ActivityClient`/owned `ActivityStream` live alongside project-scope orchestration. `subscribe` can raise fixed `ControlFault` for native/setup capability failures or `ActivityFault` carrying an existing application Failure; a terminal frame is not guaranteed before EOF. One consumer, explicit close/resume, no automatic reconnect/cursor storage/action replay. Scope is revalidated at setup and each bounded `StreamQuery`; no root-only init exception for feeds.
+
+`StreamCursor` is distinct `activity.v1`, epoch/root/UUID/generation/position-bound; `StreamPage` advances exhausted intervals through committed high-water. Observed UUID filtering prevents old null-ID steps appearing behind a forward cursor; raw A replay stays unchanged. Ready does not jump a supplied cursor past its replay backlog. Per-frame cursors represent received positions, not consumer processing ACKs; debug remains the full trace interface. No new schema/dependency or raw archive.
+
 ## Public history/debug — slice 5 checkpoint B
 
-Wire5 recognizes finite future `activity.subscribe` but advertises only the nine actually wired/live operations, including `debug.last`/`history.list`. Full readiness requires the nine shipped capabilities; it can recognize an additional planned capability without claiming it exists now. DB remains3/settings1. Old wire4 is deliberately incompatible, with matching-old shutdown required.
+Wire5's shared control model retains B's nine-capability subset for compatible parsing. C actually composes/advertises the tenth `activity.subscribe` only with live stream/worker/storage/drain wiring; new C start checks that capability instead of treating a B owner's nine-op readiness as complete C. DB remains3/settings1. Old wire4 is deliberately incompatible, with matching-old shutdown required.
 
 `history.py` adds strict immutable history scope/read/item/page and bounded stateless cursor values without storage/dispatch imports. History uses indexed descending acceptance keysets, a fixed snapshot high-water and actual routing establishment as-of that ceiling; a nullable init becoming associated later cannot enter an earlier snapshot. States remain current per read. Exact debug reuses atomic scoped receipt/trace reading; latest selects only scoped instrumented membership. `no_history` is a nonfatal read result, never SQL-owner failure. No diagnostic inserts, access timestamps, replay, legacy backfill or expiry.
 
@@ -74,7 +80,7 @@ Wire5 recognizes finite future `activity.subscribe` but advertises only the nine
 
 Schema 3 atomically appends accepted/running/identity/terminal/interrupted events with receipt transitions. At most 32 events/request with terminal capacity reserved. Earlier init observations keep truthful null known identity while their validated routing identity is associated once. Old schema-2 receipts remain exact-ID legacy metadata, with no invented events/backfill. Duplicate IDs do not create new activity.
 
-`EvidenceClient.inspect_evidence(EvidenceQuery)` is an internal installed-client seam: exact scoped trace+receipt snapshot, or bounded project-root/UUID replay with epoch/sequence checks (max64). V4 evidence requests use the same native/auth/instance/frame/admission/deadline policy and bounded workers. Reads do not index/write timestamps/advance high-water. These were A-only contracts; B now adds `DebugQuery`/`HistoryQuery` through the same typed evidence envelope and bounded workers, not another broker. Public history/debug and opaque history cursors are implemented; live subscriptions/retention remain C/D.
+`EvidenceClient.inspect_evidence(EvidenceQuery)` is an internal installed-client seam: exact scoped trace+receipt snapshot, or bounded project-root/UUID replay with epoch/sequence checks (max64). V4 evidence requests use the same native/auth/instance/frame/admission/deadline policy and bounded workers. Reads do not index/write timestamps/advance high-water. These were A-only contracts; B now adds `DebugQuery`/`HistoryQuery` through the same typed evidence envelope and bounded workers, not another broker. Public history/debug and opaque history cursors are implemented; C subsequently implements installed-client subscriptions; retention remains D.
 
 **Owning milestones:** M01 and M02 public control/storage/project-RPC foundation. [Unit tests](../../../tests/unit/test_projects.py) use controlled ports; real storage/discovery and installed checks are under [integration](../../../tests/integration/README.md) and [acceptance](../../../tests/acceptance/README.md).
 

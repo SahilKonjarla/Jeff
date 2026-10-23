@@ -51,6 +51,7 @@ def test_installed_branch_rpc_receipt_and_target_binding(git_repo: Path, tmp_pat
             "activity.replay",
             "debug.last",
             "history.list",
+            "activity.subscribe",
         )
         client = RuntimeProjectClient(layout)
         call = ProjectCall(

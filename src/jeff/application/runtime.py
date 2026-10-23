@@ -292,6 +292,9 @@ ControlIssueCode = (
         "runtime_start_failed",
         "runtime_start_timeout",
         "runtime_stop_unconfirmed",
+        "runtime_capability_unavailable",
+        "activity_stream_closed",
+        "activity_slow_reader",
     ]
 )
 _CONTROL_MESSAGES: dict[ControlIssueCode, str] = {
@@ -299,6 +302,11 @@ _CONTROL_MESSAGES: dict[ControlIssueCode, str] = {
 }
 _CONTROL_MESSAGES.update(
     {
+        "runtime_capability_unavailable": (
+            "This runtime does not provide the required live capability."
+        ),
+        "activity_stream_closed": "The activity stream ended; resume or resynchronize explicitly.",
+        "activity_slow_reader": "Activity delivery exceeded its bound; resynchronize explicitly.",
         "runtime_absent": "No control runtime ownership or endpoint was found.",
         "daemon_not_running": (
             "The daemon is stopped. Run jeff start explicitly; no action was executed."

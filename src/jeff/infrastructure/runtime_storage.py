@@ -10,6 +10,7 @@ import sqlite3
 import stat
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
@@ -30,6 +31,9 @@ from jeff.application.history import (
     HistoryRead,
     HistoryScope,
     ReplayScope,
+    StreamCursor,
+    StreamPage,
+    StreamRead,
     activity_code,
 )
 from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS, ControlFault
@@ -216,6 +220,7 @@ class _Work:
         "replay",
         "debug",
         "history",
+        "stream",
     ]
     payload: (
         Project
@@ -236,7 +241,16 @@ class SQLiteStorage:
     never the control loop. No SQL/connection/cursor is exposed through this interface.
     """
 
-    def __init__(self, owner: Ownership, *, instance_id: UUID | None = None) -> None:
+    def __init__(
+        self,
+        owner: Ownership,
+        *,
+        instance_id: UUID | None = None,
+        commit_hint: Callable[[], None] | None = None,
+    ) -> None:
+        self._commit_hint = commit_hint
+        self._activity_dirty = False
+        self._notification_failed = threading.Event()
         self.owner = owner
         self.instance_id = instance_id
         self._mutex = threading.Lock()
@@ -247,6 +261,10 @@ class SQLiteStorage:
         self._thread: threading.Thread | None = None
         self._accepting = False
         self._close_fault: StorageFault | None = None
+
+    @property
+    def notification_healthy(self) -> bool:
+        return not self._notification_failed.is_set()
 
     def snapshot(self) -> StorageReadiness:
         with self._mutex:
@@ -327,6 +345,9 @@ class SQLiteStorage:
     def history(self, scope: HistoryRead, *, deadline: float) -> HistoryPage:
         return cast(HistoryPage, self._submit("history", scope, deadline))
 
+    def stream_page(self, scope: StreamRead, *, deadline: float) -> StreamPage:
+        return cast(StreamPage, self._submit("stream", scope, deadline))
+
     def _submit(
         self,
         operation: Literal[
@@ -341,6 +362,7 @@ class SQLiteStorage:
             "replay",
             "debug",
             "history",
+            "stream",
         ],
         payload: Project
         | ReceiptClaim
@@ -525,6 +547,9 @@ class SQLiteStorage:
 
     def _execute(self, connection: sqlite3.Connection, work: _Work, root: int, fd: int) -> object:
         self._check(root, fd)
+        if work.operation == "stream":
+            assert isinstance(work.payload, StreamRead)
+            return self._stream_page(connection, work.payload, root, fd)
         if work.operation == "history":
             assert isinstance(work.payload, HistoryRead)
             return self._history(connection, work.payload, root, fd)
@@ -702,6 +727,7 @@ class SQLiteStorage:
         connection.execute(
             "UPDATE activity_meta SET high_water=? WHERE singleton=1", (event.sequence,)
         )
+        self._activity_dirty = True
         return event
 
     @staticmethod
@@ -723,6 +749,53 @@ class SQLiteStorage:
         ):
             raise StorageFault("receipt_scope_mismatch")
         return receipt
+
+    def _stream_page(
+        self, connection: sqlite3.Connection, scope: StreamRead, root: int, fd: int
+    ) -> StreamPage:
+        meta = self._activity_meta(connection)
+        after = meta.high_water
+        events: tuple[ActivityEvent, ...] = ()
+        more = False
+        if scope.cursor is not None:
+            try:
+                cursor = StreamCursor.decode(scope.cursor)
+            except ValueError:
+                raise StorageFault("activity_invalid_cursor") from None
+            if (
+                cursor.project_id != scope.project_id
+                or cursor.canonical_root != scope.canonical_root
+                or cursor.database_epoch != meta.database_epoch
+                or cursor.retention_generation != meta.retention_generation
+                or cursor.after > meta.high_water
+            ):
+                raise StorageFault("activity_invalid_cursor")
+            after = cursor.after
+            rows = connection.execute(
+                f"SELECT {_EVENT_COLUMNS} FROM activity_events WHERE scope_project_id=? "
+                "AND canonical_root=? AND project_id=? AND event_id>? AND event_id<=? "
+                "ORDER BY event_id LIMIT ?",
+                (
+                    str(scope.project_id),
+                    str(scope.canonical_root),
+                    str(scope.project_id),
+                    after,
+                    meta.high_water,
+                    scope.limit + 1,
+                ),
+            ).fetchall()
+            events = tuple(self._activity_event(row) for row in rows[: scope.limit])
+            more = len(rows) > scope.limit
+        self._check(root, fd)
+        return StreamPage(
+            **meta.model_dump(),
+            project_id=scope.project_id,
+            canonical_root=scope.canonical_root,
+            start_after=after,
+            scanned_through=events[-1].sequence if more else meta.high_water,
+            events=events,
+            has_more=more,
+        )
 
     def _history(
         self, connection: sqlite3.Connection, scope: HistoryRead, root: int, fd: int
@@ -1110,7 +1183,15 @@ class SQLiteStorage:
                                 continue
                             if time.monotonic() >= work.deadline:
                                 raise StorageFault("storage_busy")
-                            work.result.set_result(self._execute(connection, work, root, fd))
+                            self._activity_dirty = False
+                            value = self._execute(connection, work, root, fd)
+                            if self._activity_dirty and self._commit_hint is not None:
+                                try:
+                                    self._commit_hint()
+                                except Exception:
+                                    # COMMIT already happened: delivery failure cannot undo it.
+                                    self._notification_failed.set()
+                            work.result.set_result(value)
                         except Exception as error:  # thread boundary never leaks raw driver facts
                             try:
                                 if connection.in_transaction:
