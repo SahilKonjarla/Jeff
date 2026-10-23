@@ -20,7 +20,7 @@ from jeff.application.projects import ErrorData, Failure
 from jeff.application.storage import StorageIssueCode, StorageReadiness, storage_failure
 from jeff.domain.runtime import RuntimeIdentity, RuntimeSnapshot, RuntimeState
 
-PROTOCOL_REVISION = 4
+PROTOCOL_REVISION = 5
 MAC_SOCKET_PATH_BYTES = 103
 MAC_PATH_BYTES = 1023  # Darwin PATH_MAX=1024, reserving the terminator.
 MAC_NAME_BYTES = 255
@@ -207,6 +207,9 @@ ProjectCapability = Literal[
     "receipt.inspect",
     "activity.trace",
     "activity.replay",
+    "debug.last",
+    "history.list",
+    "activity.subscribe",
 ]
 
 
@@ -236,7 +239,7 @@ class ControlObservation(_RuntimeModel):
             self.control_ready
             and self.storage.state == "ready"
             and set(self.available_operations)
-            == {
+            >= {
                 "ask.branch",
                 "ask.changes",
                 "init",
@@ -244,6 +247,8 @@ class ControlObservation(_RuntimeModel):
                 "receipt.inspect",
                 "activity.trace",
                 "activity.replay",
+                "debug.last",
+                "history.list",
             }
         ):
             raise ValueError(

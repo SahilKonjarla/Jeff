@@ -2,7 +2,7 @@
 
 A local developer assistant for macOS and Linux: one text and hold-to-talk voice control surface for your projects, coding sessions, and development tools.
 
-> **Status: M01 macOS automated and manual checks passed; formal handoff pending.** Packaging, project registration/configuration inspection, two read-only Git questions, and reproducible demos work locally. Clean-environment tests and bounded technical probes passed, and the supplied test-branch transcript matched the manual checklist. Linux validation is deferred; no hosted CI run is claimed. M02 now has an internal macOS authenticated control lifecycle, strict private settings and a versioned SQLite project registry. M02 slice 4 adds authenticated daemon-routed init/config and both Git questions, minimal request receipts and guarded identity/partial-write handling. Slice-5 checkpoint A implements internal scoped durable evidence/trace replay tied to actual Git observations, but its final source/installed validation was interrupted and remains unconfirmed. Public history/debug, live subscriptions and expiry are not yet implemented. Public `start`/`stop` and runtime-aware `status` are implemented; startup requires complete dispatcher/storage readiness. No autostart or in-process fallback. Public history/debug, live event subscriptions/retention expiry, doctor/stale recovery and later product behavior remain unimplemented; full M02 acceptance is pending.
+> **Status: M01 macOS automated and manual checks passed; formal handoff pending.** Packaging, project registration/configuration inspection, two read-only Git questions, and reproducible demos work locally. Clean-environment tests and bounded technical probes passed, and the supplied test-branch transcript matched the manual checklist. Linux validation is deferred; no hosted CI run is claimed. M02 now has an internal macOS authenticated control lifecycle, strict private settings and a versioned SQLite project registry. M02 slice 4 adds authenticated daemon-routed init/config and both Git questions, minimal request receipts and guarded identity/partial-write handling. Slice-5 checkpoint A implements internal scoped durable evidence/trace replay tied to actual Git observations, and its interrupted validation has since passed against the frozen A commit (261 source-selected tests and 22 installed checks); the historical timeout cause remains unknown. Checkpoint B implements public scoped history/debug (wire5/schema3); B's focused validation is separate from the explicit frozen-A resumption. Public `start`/`stop` and runtime-aware `status` are implemented; startup requires complete dispatcher/storage readiness. No autostart or in-process fallback. Live event subscriptions/retention expiry, doctor/stale recovery and later product behavior remain unimplemented; full M02 acceptance is pending.
 
 ## What Jeff is being built to do
 
@@ -77,7 +77,7 @@ jeff --help
 python -m jeff --help
 ```
 
-Both help entry points exit successfully without project I/O or runtime-location selection. No arguments displays usage with exit code 2; unimplemented commands such as `run` are rejected. The public daemon currently runs on macOS; Linux execution remains deferred. There is no desktop app yet. Internal protocol v4 and DB schema 3 are incompatible with older control clients/DB readers; stop an older instance with its matching older environment before upgrading. Do not use internal entry points against normal user state as a smoke test.
+Both help entry points exit successfully without project I/O or runtime-location selection. No arguments displays usage with exit code 2; unimplemented commands such as `run` are rejected. The public daemon currently runs on macOS; Linux execution remains deferred. There is no desktop app yet. Internal protocol v5 and DB schema 3 are incompatible with older control clients/DB readers; stop an older instance with its matching older environment before upgrading. Do not use internal entry points against normal user state as a smoke test.
 
 To use an existing project, **activate Jeff's venv before changing directories**, then replace the example path below with your target Git repository:
 
@@ -141,9 +141,24 @@ Init creates a stable project ID and canonical root in private `jeff.local.yaml`
 
 Config exposes **identity fields only**, never arbitrary settings or branch information. Status preserves these identity fields and adds explicit `runtime` control/storage/application readiness; it validates local registration before selecting runtime locations and never starts the daemon or indexes a project. Unregistered repositories return an actionable error; inspection never initializes them implicitly.
 
-Success exits 0 with `{ok: true, data, error: null}`. Init/config data includes `project_id`, `root`, `config_path`, `registered`, and `created`; status additionally includes `runtime`. Start/stop return their own typed control result. Transport fields do not contaminate init/config/ask bodies; duplicate or uncertain requests emit only `Request: <uuid>` on stderr, including with `--json`. This is metadata correlation, not a public receipt-browsing/history command. A missing receipt does not authorize retry. Recognized command failures exit 1 with `{ok: false, data: null, error: {code, message}}`. Without `--json`, errors go to stderr. CLI syntax/unknown-command errors use Typer's usage output and exit 2.
+Success exits 0 with `{ok: true, data, error: null}`. Init/config data includes `project_id`, `root`, `config_path`, `registered`, and `created`; status additionally includes `runtime`. Start/stop return their own typed control result. Transport fields do not contaminate init/config/ask bodies; duplicate or uncertain requests emit only `Request: <uuid>` on stderr, including with `--json`. This is metadata correlation, not retry permission; use scoped debug/history for inspection. A missing receipt does not authorize retry. Recognized command failures exit 1 with `{ok: false, data: null, error: {code, message}}`. Without `--json`, errors go to stderr. CLI syntax/unknown-command errors use Typer's usage output and exit 2.
 
 Initialization rejects malformed/unsupported configuration, unsafe links/special files, tracked private configuration, and mismatched stored roots. Moved-project rebind is not implemented; Jeff will not silently replace the ID. Config creation is atomic and refuses overwrite, but ignore/config changes are **not a cross-file transaction**: a failed config write can leave added ignore rules, which the error reports. Static checks and these safe storage operations are not an OS execution sandbox.
+
+### Inspect project history and debug evidence
+
+With the daemon explicitly started, inside the registered target repository:
+
+```bash
+jeff debug last --json
+jeff debug last --request-id <request-uuid> --json
+jeff history --limit 50 --json
+jeff history --cursor <opaque-cursor> --json
+```
+
+Debug selects the latest **accepted init/ask**, not latest completion; config/status/diagnostics do not displace it. Exact IDs are scoped, never answer replay or identity recovery. Unknown/running states remain honest; legacy receipts contain metadata only. Default debug with no instrumented request returns `no_history` (exit1); empty history succeeds. Coverage starts at instrumentation/migration, not the beginning of repository history.
+
+History defaults to50, maximum100 summaries. Cursors bind database epoch/project/root, snapshot acceptance ceiling and retention generation; new requests do not shift pages. Summary states are current per read, not a long-held transaction. Invalid/foreign/stale cursors fail safely; obtain a new first page explicitly. Reads never index, store access timestamps, advance evidence high-water or trigger cleanup. No autostart/local fallback, live follow, raw question/answer archive or expiry. Missing evidence is not proof of nonexecution or permission to retry.
 
 ### Ask a read-only Git question
 

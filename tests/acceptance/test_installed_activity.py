@@ -1,4 +1,4 @@
-"""Internal installed-client evidence tracer; no public history or subscription feature."""
+"""Installed trace/replay regression; public B diagnostics are exercised separately."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-from jeff.application.dispatch import EvidenceClient, EvidenceQuery, ProjectCall
+from jeff.application.dispatch import DebugQuery, EvidenceClient, EvidenceQuery, ProjectCall
 from jeff.application.questions import QuestionSuccess
 from jeff.application.runtime import ControlSuccess, RuntimeLayout
 from jeff.infrastructure.runtime_ipc import RuntimeProjectClient
@@ -74,7 +74,7 @@ def test_installed_real_git_trace_scoped_replay_restart_and_no_raw_archive(
         layout.credential.unlink(missing_ok=True)
 
 
-def test_owned_v3_v4_refuse_without_rekey_then_preserve_legacy_metadata(
+def test_owned_v3_v5_refuse_without_rekey_then_preserve_legacy_metadata(
     git_repo: Path, tmp_path: Path
 ) -> None:
     old = os.environ.get("JEFF_TEST_V3_PYTHON")
@@ -140,6 +140,12 @@ print(result.model_dump_json())
         assert (
             traced.receipt is not None
             and str(traced.receipt.project_id) == initialized["result"]["data"]["project_id"]
+        )
+        debug = RuntimeProjectClient(layout).inspect_evidence(
+            DebugQuery(directory=git_repo, request_id=request)
+        )
+        assert (
+            debug.error is None and debug.trace == traced.trace and debug.receipt == traced.receipt
         )
         rejected = legacy("status")
         assert not rejected["ok"] and rejected["error"]["code"] == "runtime_protocol_incompatible"

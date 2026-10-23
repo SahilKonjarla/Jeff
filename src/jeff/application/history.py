@@ -1,7 +1,10 @@
 """Allowlisted durable evidence and scoped reads; no raw log or dispatch dependencies."""
 
+import base64
+import binascii
+import json
 from pathlib import Path
-from typing import Literal, Protocol, Self, cast
+from typing import Any, Literal, Protocol, Self, cast
 from uuid import UUID
 
 from pydantic import (
@@ -171,6 +174,116 @@ class ReplayScope(_ActivityModel):
         if not root.is_absolute() or "\0" in str(root) or ".." in root.parts:
             raise ValueError("A validated canonical root is required.")
         return root
+
+
+class HistoryScope(_ActivityModel):
+    project_id: UUID
+    canonical_root: Path
+
+    @field_validator("canonical_root")
+    @classmethod
+    def absolute(cls, root: Path) -> Path:
+        if not root.is_absolute() or "\0" in str(root) or ".." in root.parts:
+            raise ValueError("A validated canonical root is required.")
+        return root
+
+
+class HistoryRead(HistoryScope):
+    limit: StrictInt = Field(default=50, gt=0, le=100)
+    cursor: str | None = Field(default=None, max_length=8192)
+
+
+class HistoryCursor(HistoryScope):
+    kind: Literal["history.v1"] = "history.v1"
+    database_epoch: UUID
+    retention_generation: StrictInt = Field(ge=0, le=INT64_MAX)
+    snapshot_high_water: StrictInt = Field(gt=0, le=INT64_MAX)
+    before: StrictInt = Field(gt=0, le=INT64_MAX)
+
+    @model_validator(mode="after")
+    def ordered(self) -> Self:
+        if self.before > self.snapshot_high_water:
+            raise ValueError("Invalid cursor position.")
+        return self
+
+    def encode(self) -> str:
+        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode().rstrip("=")
+
+    @classmethod
+    def decode(cls, token: str) -> Self:
+        def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("Invalid history cursor.")
+                result[key] = value
+            return result
+
+        def invalid(value: str) -> None:
+            raise ValueError("Invalid history cursor.")
+
+        try:
+            if not token or len(token) > 8192:
+                raise ValueError("Invalid history cursor.")
+            data = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
+            raw = json.loads(data.decode("utf-8"), object_pairs_hook=unique, parse_constant=invalid)
+            result = cls.model_validate(raw)
+            if result.encode() != token:
+                raise ValueError("Invalid history cursor.")
+            return result
+        except (ValueError, TypeError, binascii.Error, RecursionError):
+            raise ValueError("Invalid history cursor.") from None
+
+
+class HistoryItem(_ActivityModel):
+    request_id: UUID
+    canonical_root: Path
+    project_id: UUID
+    operation: Literal["init", "ask.branch", "ask.changes"]
+    state: Literal["accepted", "running", "succeeded", "failed", "unknown"]
+    accepted_sequence: StrictInt = Field(gt=0, le=INT64_MAX)
+    accepted_at_ms: StrictInt = Field(ge=0, le=INT64_MAX)
+    finished_at_ms: StrictInt | None = Field(default=None, ge=0, le=INT64_MAX)
+    outcome_code: (
+        Literal["ok", "operation_failed", "timeout", "interrupted", "partial", "target_mismatch"]
+        | None
+    ) = None
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        terminal = self.state in ("succeeded", "failed", "unknown")
+        if terminal != (self.finished_at_ms is not None and self.outcome_code is not None):
+            raise ValueError("Only terminal summaries have complete outcome facts.")
+        if not terminal and (self.finished_at_ms is not None or self.outcome_code is not None):
+            raise ValueError("Unfinished summaries cannot claim an outcome.")
+        return self
+
+
+class HistoryPage(ActivityMeta):
+    snapshot_high_water: StrictInt = Field(ge=0, le=INT64_MAX)
+    items: tuple[HistoryItem, ...] = Field(max_length=100)
+    next_cursor: str | None = Field(default=None, max_length=8192)
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        if self.snapshot_high_water > self.high_water:
+            raise ValueError("A history snapshot cannot exceed committed coverage.")
+        if (not self.items and self.next_cursor is not None) or any(
+            item.accepted_sequence > self.snapshot_high_water for item in self.items
+        ):
+            raise ValueError("A history page requires actual bounded membership.")
+        if any(
+            left.accepted_sequence <= right.accepted_sequence
+            for left, right in zip(self.items, self.items[1:], strict=False)
+        ):
+            raise ValueError("A history page requires descending acceptance order.")
+        if self.items and any(
+            (item.project_id, item.canonical_root)
+            != (self.items[0].project_id, self.items[0].canonical_root)
+            for item in self.items
+        ):
+            raise ValueError("A history page cannot mix project scopes.")
+        return self
 
 
 class ActivityPage(ActivityMeta):

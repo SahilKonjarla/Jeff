@@ -21,6 +21,9 @@ from jeff.application.history import (
     ActivityRecord,
     ActivityTrace,
     GitObservation,
+    HistoryPage,
+    HistoryRead,
+    HistoryScope,
     ReplayScope,
     activity_code,
 )
@@ -55,6 +58,8 @@ PROJECT_OPERATIONS: tuple[ProjectCapability, ...] = (
     "receipt.inspect",
     "activity.trace",
     "activity.replay",
+    "debug.last",
+    "history.list",
 )
 
 
@@ -102,14 +107,23 @@ class ReceiptQuery(ProjectScope):
 
 class EvidenceQuery(ProjectScope):
     query_id: UUID = Field(default_factory=uuid4)
-    operation: Literal["trace", "replay"]
+    operation: Literal["trace", "replay", "debug", "history"]
     request_id: UUID | None = None
     after: StrictInt = Field(default=0, ge=0, le=9223372036854775807)
-    limit: StrictInt = Field(default=64, gt=0, le=64)
+    limit: StrictInt = Field(default=64, gt=0, le=100)
     expected_epoch: UUID | None = None
+    cursor: str | None = Field(default=None, max_length=8192)
 
     @model_validator(mode="after")
     def coherent(self) -> Self:
+        if self.operation != "history" and self.cursor is not None:
+            raise ValueError("Only history accepts a history cursor.")
+        if self.operation == "history" and (
+            self.request_id is not None or self.after != 0 or self.expected_epoch is not None
+        ):
+            raise ValueError("History accepts only a limit and history cursor.")
+        if self.operation == "replay" and self.limit > 64:
+            raise ValueError("Event replay remains bounded to 64 events.")
         if self.operation == "trace":
             if (
                 self.request_id is None
@@ -118,9 +132,33 @@ class EvidenceQuery(ProjectScope):
                 or self.expected_epoch is not None
             ):
                 raise ValueError("Trace accepts one scoped request ID only.")
-        elif self.request_id is not None:
+        elif self.operation == "replay" and self.request_id is not None:
             raise ValueError("Replay uses an epoch/sequence, not a request ID.")
+        if self.operation == "debug" and (
+            self.after != 0 or self.limit != 64 or self.expected_epoch is not None
+        ):
+            raise ValueError("Debug accepts only an optional exact request ID.")
         return self
+
+
+class DebugQuery(EvidenceQuery):
+    operation: Literal["debug"] = "debug"
+
+
+class HistoryQuery(EvidenceQuery):
+    operation: Literal["history"] = "history"
+    limit: StrictInt = Field(default=50, gt=0, le=100)
+
+
+class DebugData(_DispatchModel):
+    receipt: Receipt
+    trace: ActivityTrace
+
+
+class DiagnosticSuccess(_DispatchModel):
+    ok: Literal[True] = True
+    data: DebugData | HistoryPage
+    error: None = None
 
 
 class EvidenceRequest(_DispatchModel):
@@ -130,7 +168,7 @@ class EvidenceRequest(_DispatchModel):
     kind: Literal["evidence"] = "evidence"
     expected_instance_id: UUID
     remaining_ms: StrictInt = Field(default=30000, gt=0, le=30000)
-    query: EvidenceQuery
+    query: DebugQuery | HistoryQuery | EvidenceQuery
 
 
 class EvidenceReply(_DispatchModel):
@@ -139,7 +177,8 @@ class EvidenceReply(_DispatchModel):
     )
     request_id: UUID
     identity: RuntimeIdentityData
-    operation: Literal["trace", "replay"]
+    operation: Literal["trace", "replay", "debug", "history"]
+    history: HistoryPage | None = None
     receipt: Receipt | None = None
     trace: ActivityTrace | None = None
     page: ActivityPage | None = None
@@ -149,12 +188,19 @@ class EvidenceReply(_DispatchModel):
     @model_validator(mode="after")
     def coherent(self) -> Self:
         if self.error is not None and any(
-            x is not None for x in (self.receipt, self.trace, self.page)
+            x is not None for x in (self.receipt, self.trace, self.page, self.history)
         ):
             raise ValueError("An error cannot carry evidence.")
+        if self.operation == "history":
+            if any(x is not None for x in (self.receipt, self.trace, self.page)):
+                raise ValueError("History carries only a summary page.")
+            if self.error is None and self.history is None:
+                raise ValueError("History requires a page or fixed error.")
+        elif self.history is not None:
+            raise ValueError("Only history carries a summary page.")
         if (self.receipt is None) != (self.trace is None):
             raise ValueError("Trace and receipt are one owner-thread snapshot.")
-        if self.operation == "trace" and self.page is not None:
+        if self.operation in ("trace", "debug") and self.page is not None:
             raise ValueError("Trace cannot carry a replay page.")
         if self.operation == "replay" and (self.receipt is not None or self.trace is not None):
             raise ValueError("Replay cannot carry a trace snapshot.")
@@ -517,7 +563,11 @@ class ProjectDispatcher:
 
         bound = self._bind(query, absolute_deadline)
         if isinstance(bound, Failure):
-            if query.operation != "trace" or bound.error.code != "project_not_initialized":
+            if (
+                query.operation not in ("trace", "debug")
+                or query.request_id is None
+                or bound.error.code != "project_not_initialized"
+            ):
                 return failed(bound)
             root_result = self.projects.resolve_root(query.directory, deadline=absolute_deadline)
             if isinstance(root_result, Failure):
@@ -529,8 +579,40 @@ class ProjectDispatcher:
             root, project_id = root_result, None
         else:
             root, project_id = bound.root, bound.project_id
+        receipt: Receipt | None
+        trace: ActivityTrace | None
         try:
-            if query.operation == "trace":
+            if query.operation == "history":
+                assert project_id is not None
+                history = self.store.history(
+                    HistoryRead(
+                        project_id=project_id,
+                        canonical_root=root,
+                        limit=query.limit,
+                        cursor=query.cursor,
+                    ),
+                    deadline=absolute_deadline,
+                )
+                return EvidenceReply(
+                    request_id=query.query_id,
+                    identity=self.identity,
+                    operation=query.operation,
+                    history=history,
+                )
+            if query.operation == "debug" and query.request_id is None:
+                assert project_id is not None
+                receipt, trace = self.store.debug(
+                    HistoryScope(project_id=project_id, canonical_root=root),
+                    deadline=absolute_deadline,
+                )
+                return EvidenceReply(
+                    request_id=query.query_id,
+                    identity=self.identity,
+                    operation=query.operation,
+                    receipt=receipt,
+                    trace=trace,
+                )
+            if query.operation in ("trace", "debug"):
                 assert query.request_id is not None
                 receipt, trace = self.store.trace(
                     ReceiptScope(
@@ -647,7 +729,7 @@ class EvidenceClient(Protocol):
     def inspect_evidence(self, query: EvidenceQuery) -> EvidenceReply: ...
 
 
-class ProjectClient(Protocol):
+class ProjectClient(EvidenceClient, Protocol):
     def execute(self, call: ProjectCall) -> DispatchReply: ...
     def inspect_receipt(self, query: ReceiptQuery) -> ReceiptReply: ...
     def status(self, directory: Path) -> ProjectStatusSuccess | Failure: ...

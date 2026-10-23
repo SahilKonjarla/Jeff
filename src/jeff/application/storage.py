@@ -12,6 +12,9 @@ from jeff.application.history import (
     ActivityPage,
     ActivityRecord,
     ActivityTrace,
+    HistoryPage,
+    HistoryRead,
+    HistoryScope,
     ReplayScope,
 )
 from jeff.application.projects import ErrorData, Failure, ProjectService
@@ -37,8 +40,10 @@ StorageIssueCode = Literal[
     "receipt_scope_mismatch",
     "activity_invalid_cursor",
     "activity_budget_exceeded",
+    "no_history",
 ]
 _MESSAGES: dict[StorageIssueCode, str] = {
+    "no_history": "No instrumented request history is available in this project scope.",
     "settings_invalid": "Private settings are invalid or unsafe; existing bytes were not replaced.",
     "storage_unsafe": "Private storage paths or observed ownership are unsafe.",
     "storage_unrecognized": "The database is not recognized as Jeff storage; it was not reset.",
@@ -191,6 +196,8 @@ class ReceiptClaimResult(_StorageModel):
 
 
 class RequestLedger(Protocol):
+    def history(self, scope: HistoryRead, *, deadline: float) -> HistoryPage: ...
+    def debug(self, scope: HistoryScope, *, deadline: float) -> tuple[Receipt, ActivityTrace]: ...
     def observe(self, record: ActivityRecord, *, deadline: float) -> ActivityEvent: ...
     def trace(
         self, scope: ReceiptScope, *, deadline: float

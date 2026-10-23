@@ -7,7 +7,14 @@ from uuid import uuid4
 import pytest
 from typer.testing import CliRunner
 
-from jeff.application.dispatch import DispatchReply, ProjectCall, ReceiptQuery, ReceiptReply
+from jeff.application.dispatch import (
+    DispatchReply,
+    EvidenceQuery,
+    EvidenceReply,
+    ProjectCall,
+    ReceiptQuery,
+    ReceiptReply,
+)
 from jeff.application.history import GitObserver
 from jeff.application.projects import Failure, ProjectService
 from jeff.application.questions import BranchAnswer, ChangesAnswer, QuestionService
@@ -126,6 +133,9 @@ def test_hidden_rename_side_and_display_characters_are_filtered(
 
         def status(self, directory: Path) -> Failure:
             raise AssertionError("Not a status test")
+
+        def inspect_evidence(self, query: EvidenceQuery) -> EvidenceReply:
+            raise AssertionError("Not a diagnostic test")
 
         def inspect_receipt(self, query: ReceiptQuery) -> ReceiptReply:
             raise AssertionError("No receipt command")

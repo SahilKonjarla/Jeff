@@ -40,7 +40,7 @@ Changes intentionally report `complete: false`, `visible_clean`, protected-path/
 
 `RuntimePathInputs` carries trusted explicit platform/home/temp/UID values and independent optional `data_dir`/`runtime_dir` strings. The pure contracts do not read the environment. The bootstrap selects these fields lazily from `JEFF_DATA_DIR`/`JEFF_RUNTIME_DIR`; public help/syntax does not invoke location selection. `RuntimeLayout` derives fixed filenames from its roots. The expected UID is trusted host input, not client-selected authority.
 
-`PROTOCOL_REVISION = 3` and `DEFAULT_RUNTIME_LIMITS` declare the reviewed framing/admission/deadline/history budgets; they implement no codec, deadline, readiness or authentication. Mac preflight constants reserve terminators: socket 103 bytes, pathname 1023 bytes, component 255 bytes. Linux selection/verification is deferred. See [contract tests](../../../tests/unit/test_runtime_contracts.py) and [path tests](../../../tests/unit/test_runtime_paths.py).
+`PROTOCOL_REVISION = 5` and `DEFAULT_RUNTIME_LIMITS` declare the reviewed framing/admission/deadline/history budgets; they implement no codec, deadline, readiness or authentication. Mac preflight constants reserve terminators: socket 103 bytes, pathname 1023 bytes, component 255 bytes. Linux selection/verification is deferred. See [contract tests](../../../tests/unit/test_runtime_contracts.py) and [path tests](../../../tests/unit/test_runtime_paths.py).
 
 ## Authenticated control contracts — M02 slice 2
 
@@ -62,13 +62,19 @@ Changes intentionally report `complete: false`, `visible_clean`, protected-path/
 
 `ProjectStatusService` validates local Git/YAML before invoking the lazy runtime-control factory. `ProjectStatusSuccess` preserves ProjectData and explicitly adds `runtime`; it is not a project-action wire result. Config/status/inspection never implicitly index or create activity/access timestamps. `ProjectClient.status` is composed separately from daemon-dependent execution, not a fallback.
 
+## Public history/debug — slice 5 checkpoint B
+
+Wire5 recognizes finite future `activity.subscribe` but advertises only the nine actually wired/live operations, including `debug.last`/`history.list`. Full readiness requires the nine shipped capabilities; it can recognize an additional planned capability without claiming it exists now. DB remains3/settings1. Old wire4 is deliberately incompatible, with matching-old shutdown required.
+
+`history.py` adds strict immutable history scope/read/item/page and bounded stateless cursor values without storage/dispatch imports. History uses indexed descending acceptance keysets, a fixed snapshot high-water and actual routing establishment as-of that ceiling; a nullable init becoming associated later cannot enter an earlier snapshot. States remain current per read. Exact debug reuses atomic scoped receipt/trace reading; latest selects only scoped instrumented membership. `no_history` is a nonfatal read result, never SQL-owner failure. No diagnostic inserts, access timestamps, replay, legacy backfill or expiry.
+
 ## Internal durable evidence — slice 5 checkpoint A
 
 `history.py` owns immutable finite observation/event/trace/replay values without runtime/storage/dispatch imports. Actual Git completion emits only fixed category/code, process-start fact, monotonic duration and observed byte count after cleanup; prelaunch refusal cannot pretend a process started. Per-request sinks are explicit, never shared mutable request context. Evidence failure does not turn a partial request into ordinary success.
 
 Schema 3 atomically appends accepted/running/identity/terminal/interrupted events with receipt transitions. At most 32 events/request with terminal capacity reserved. Earlier init observations keep truthful null known identity while their validated routing identity is associated once. Old schema-2 receipts remain exact-ID legacy metadata, with no invented events/backfill. Duplicate IDs do not create new activity.
 
-`EvidenceClient.inspect_evidence(EvidenceQuery)` is an internal installed-client seam: exact scoped trace+receipt snapshot, or bounded project-root/UUID replay with epoch/sequence checks (max64). V4 evidence requests use the same native/auth/instance/frame/admission/deadline policy and bounded workers. Reads do not index/write timestamps/advance high-water. Public history/debug CLI, opaque public cursors, live subscriptions and retention remain B–D, not delivered A features.
+`EvidenceClient.inspect_evidence(EvidenceQuery)` is an internal installed-client seam: exact scoped trace+receipt snapshot, or bounded project-root/UUID replay with epoch/sequence checks (max64). V4 evidence requests use the same native/auth/instance/frame/admission/deadline policy and bounded workers. Reads do not index/write timestamps/advance high-water. These were A-only contracts; B now adds `DebugQuery`/`HistoryQuery` through the same typed evidence envelope and bounded workers, not another broker. Public history/debug and opaque history cursors are implemented; live subscriptions/retention remain C/D.
 
 **Owning milestones:** M01 and M02 public control/storage/project-RPC foundation. [Unit tests](../../../tests/unit/test_projects.py) use controlled ports; real storage/discovery and installed checks are under [integration](../../../tests/integration/README.md) and [acceptance](../../../tests/acceptance/README.md).
 

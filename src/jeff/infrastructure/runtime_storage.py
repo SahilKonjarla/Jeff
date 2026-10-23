@@ -24,6 +24,11 @@ from jeff.application.history import (
     ActivityPage,
     ActivityRecord,
     ActivityTrace,
+    HistoryCursor,
+    HistoryItem,
+    HistoryPage,
+    HistoryRead,
+    HistoryScope,
     ReplayScope,
     activity_code,
 )
@@ -209,6 +214,8 @@ class _Work:
         "observe",
         "trace",
         "replay",
+        "debug",
+        "history",
     ]
     payload: (
         Project
@@ -218,6 +225,7 @@ class _Work:
         | Path
         | ActivityRecord
         | ReplayScope
+        | HistoryScope
     )
     deadline: float
     result: Future[object]
@@ -313,6 +321,12 @@ class SQLiteStorage:
     def replay(self, scope: ReplayScope, *, deadline: float) -> ActivityPage:
         return cast(ActivityPage, self._submit("replay", scope, deadline))
 
+    def debug(self, scope: HistoryScope, *, deadline: float) -> tuple[Receipt, ActivityTrace]:
+        return cast(tuple[Receipt, ActivityTrace], self._submit("debug", scope, deadline))
+
+    def history(self, scope: HistoryRead, *, deadline: float) -> HistoryPage:
+        return cast(HistoryPage, self._submit("history", scope, deadline))
+
     def _submit(
         self,
         operation: Literal[
@@ -325,6 +339,8 @@ class SQLiteStorage:
             "observe",
             "trace",
             "replay",
+            "debug",
+            "history",
         ],
         payload: Project
         | ReceiptClaim
@@ -332,7 +348,8 @@ class SQLiteStorage:
         | ReceiptScope
         | Path
         | ActivityRecord
-        | ReplayScope,
+        | ReplayScope
+        | HistoryScope,
         deadline: float | None,
     ) -> object:
         if isinstance(payload, Project) and (
@@ -508,7 +525,10 @@ class SQLiteStorage:
 
     def _execute(self, connection: sqlite3.Connection, work: _Work, root: int, fd: int) -> object:
         self._check(root, fd)
-        if work.operation in ("observe", "trace", "replay"):
+        if work.operation == "history":
+            assert isinstance(work.payload, HistoryRead)
+            return self._history(connection, work.payload, root, fd)
+        if work.operation in ("observe", "trace", "replay", "debug"):
             return self._activity_work(connection, work, root, fd)
         if work.operation == "root_claimed":
             assert isinstance(work.payload, Path)
@@ -704,11 +724,94 @@ class SQLiteStorage:
             raise StorageFault("receipt_scope_mismatch")
         return receipt
 
+    def _history(
+        self, connection: sqlite3.Connection, scope: HistoryRead, root: int, fd: int
+    ) -> HistoryPage:
+        meta = self._activity_meta(connection)
+        ceiling, before = meta.high_water, meta.high_water
+        seek = "<=" if scope.cursor is None else "<"
+        if scope.cursor is not None:
+            try:
+                cursor = HistoryCursor.decode(scope.cursor)
+            except ValueError:
+                raise StorageFault("activity_invalid_cursor") from None
+            if (
+                cursor.project_id != scope.project_id
+                or cursor.canonical_root != scope.canonical_root
+                or cursor.database_epoch != meta.database_epoch
+                or cursor.retention_generation != meta.retention_generation
+                or cursor.snapshot_high_water > meta.high_water
+            ):
+                raise StorageFault("activity_invalid_cursor")
+            ceiling, before = cursor.snapshot_high_water, cursor.before
+            if (
+                connection.execute(
+                    "SELECT 1 FROM activity_requests WHERE project_id=? AND canonical_root=? "
+                    "AND accepted_sequence=?",
+                    (str(scope.project_id), str(scope.canonical_root), before),
+                ).fetchone()
+                is None
+            ):
+                raise StorageFault("activity_invalid_cursor")
+        columns = ",".join("r." + name for name in _COLUMNS.split(","))
+        rows = connection.execute(
+            f"SELECT {columns},a.accepted_sequence FROM activity_requests a "
+            "JOIN request_receipts r ON r.request_id=a.request_id "
+            "WHERE a.project_id=? AND a.canonical_root=? AND a.accepted_sequence<=? "
+            f"AND a.accepted_sequence{seek}? "
+            "AND NOT EXISTS (SELECT 1 FROM activity_events e WHERE e.request_id=a.request_id "
+            "AND e.kind='identity.established' AND e.event_id>?) "
+            "ORDER BY a.accepted_sequence DESC LIMIT ?",
+            (
+                str(scope.project_id),
+                str(scope.canonical_root),
+                ceiling,
+                before,
+                ceiling,
+                scope.limit + 1,
+            ),
+        ).fetchall()
+        items = tuple(
+            HistoryItem(
+                accepted_sequence=row[-1],
+                **self._receipt(row[:-1]).model_dump(exclude={"owner_instance_id"}),
+            )
+            for row in rows[: scope.limit]
+        )
+        next_cursor = None
+        if len(rows) > scope.limit:
+            next_cursor = HistoryCursor(
+                project_id=scope.project_id,
+                canonical_root=scope.canonical_root,
+                database_epoch=meta.database_epoch,
+                retention_generation=meta.retention_generation,
+                snapshot_high_water=ceiling,
+                before=items[-1].accepted_sequence,
+            ).encode()
+        self._check(root, fd)
+        return HistoryPage(
+            **meta.model_dump(), snapshot_high_water=ceiling, items=items, next_cursor=next_cursor
+        )
+
     def _activity_work(
         self, connection: sqlite3.Connection, work: _Work, root: int, fd: int
     ) -> object:
         payload = work.payload
-        if work.operation == "trace":
+        if work.operation == "debug":
+            assert isinstance(payload, HistoryScope)
+            row = connection.execute(
+                "SELECT request_id FROM activity_requests WHERE project_id=? "
+                "AND canonical_root=? ORDER BY accepted_sequence DESC LIMIT 1",
+                (str(payload.project_id), str(payload.canonical_root)),
+            ).fetchone()
+            if row is None:
+                raise StorageFault("no_history")
+            payload = ReceiptScope(
+                request_id=row[0],
+                canonical_root=payload.canonical_root,
+                project_id=payload.project_id,
+            )
+        if work.operation in ("trace", "debug"):
             assert isinstance(payload, ReceiptScope)
             receipt = self._scoped_receipt(connection, payload)
             if receipt is None:
@@ -1025,6 +1128,7 @@ class SQLiteStorage:
                                 "receipt_scope_mismatch",
                                 "activity_invalid_cursor",
                                 "activity_budget_exceeded",
+                                "no_history",
                             ):
                                 self._failed(fault)
                                 self._closing.set()

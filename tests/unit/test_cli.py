@@ -10,6 +10,8 @@ from typer.testing import CliRunner
 
 from jeff.application.dispatch import (
     DispatchReply,
+    EvidenceQuery,
+    EvidenceReply,
     ProjectCall,
     ReceiptQuery,
     ReceiptReply,
@@ -41,6 +43,9 @@ class Client:
 
     def status(self, directory: Path) -> Failure:
         return dispatch_failure("project_target_mismatch")
+
+    def inspect_evidence(self, query: EvidenceQuery) -> EvidenceReply:
+        raise AssertionError("Not a diagnostic test")
 
     def inspect_receipt(self, query: ReceiptQuery) -> ReceiptReply:
         raise AssertionError("No public receipt-browsing verb in this slice")

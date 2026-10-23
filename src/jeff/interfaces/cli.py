@@ -3,12 +3,23 @@
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import UUID
 
 import typer
 from pydantic import ValidationError
 
-from jeff.application.dispatch import ProjectCall, ProjectClient, ProjectStatusSuccess
+from jeff.application.dispatch import (
+    DebugData,
+    DebugQuery,
+    DiagnosticSuccess,
+    HistoryQuery,
+    ProjectCall,
+    ProjectClient,
+    ProjectStatusSuccess,
+    dispatch_failure,
+)
+from jeff.application.history import HistoryPage
 from jeff.application.projects import ErrorData, Failure, Success
 from jeff.application.questions import BranchAnswer, ChangesAnswer, QuestionSuccess
 from jeff.application.runtime import ControlFault, ControlSuccess, RuntimeControl, control_failure
@@ -34,12 +45,46 @@ def create_app(
     def cli() -> None:
         """Register a project and ask the two supported Git metadata questions."""
 
+    debug_app = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
+    app.add_typer(debug_app, name="debug", help="Inspect bounded durable request metadata.")
+
     def render(
-        result: Success | QuestionSuccess | ProjectStatusSuccess | ControlSuccess | Failure,
+        result: Success
+        | QuestionSuccess
+        | ProjectStatusSuccess
+        | ControlSuccess
+        | DiagnosticSuccess
+        | Failure,
         json_output: bool,
     ) -> None:
         if json_output:
             typer.echo(json.dumps(result.model_dump(mode="json"), ensure_ascii=True))
+        elif isinstance(result, DiagnosticSuccess):
+            diagnostic_data = result.data
+            if isinstance(diagnostic_data, HistoryPage):
+                typer.echo(f"History coverage starts: {diagnostic_data.coverage_started_at_ms}ms")
+                for item in diagnostic_data.items:
+                    typer.echo(f"{item.request_id} {item.operation} {item.state}")
+                if not diagnostic_data.items:
+                    typer.echo("No instrumented request history.")
+                if diagnostic_data.next_cursor is not None:
+                    typer.echo(f"Next cursor: {diagnostic_data.next_cursor}")
+                return
+            typer.echo(f"Request: {diagnostic_data.receipt.request_id}")
+            typer.echo(f"Root: {escape_metadata(str(diagnostic_data.receipt.canonical_root))}")
+            typer.echo(
+                f"Operation: {diagnostic_data.receipt.operation}\n"
+                f"State: {diagnostic_data.receipt.state}"
+            )
+            if diagnostic_data.trace.legacy_metadata_only:
+                typer.echo("Legacy metadata only; no recorded steps.")
+            for event in diagnostic_data.trace.events:
+                typer.echo(f"{event.sequence}: {event.kind} ({event.code or 'pending'})")
+                if event.git is not None:
+                    typer.echo(
+                        f"  {event.git.category}: {event.git.elapsed_ms}ms, "
+                        f"{event.git.output_bytes} bytes, started={event.git.process_started}"
+                    )
         elif isinstance(result, ControlSuccess):
             typer.echo(f"Runtime: {result.data.state.value}")
             typer.echo(f"Application ready: {'yes' if result.data.application_ready else 'no'}")
@@ -85,7 +130,9 @@ def create_app(
             raise typer.Exit(code=1)
 
     def invoke(
-        call: Callable[[Path], Success | QuestionSuccess | ProjectStatusSuccess | Failure],
+        call: Callable[
+            [Path], Success | QuestionSuccess | ProjectStatusSuccess | DiagnosticSuccess | Failure
+        ],
         json_output: bool,
     ) -> None:
         try:
@@ -186,5 +233,44 @@ def create_app(
     ) -> None:
         """Answer branch/change questions deterministically, without models or Git writes."""
         execute("ask", json_output, question)
+
+    @app.command("history")
+    def history(
+        limit: int = typer.Option(50, "--limit", min=1, max=100, clamp=False),
+        cursor: str | None = typer.Option(None, "--cursor"),
+        json_output: bool = typer.Option(False, "--json"),
+    ) -> None:
+        """List scoped instrumented requests in stable acceptance order; never writes."""
+
+        def diagnostic(directory: Path) -> DiagnosticSuccess | Failure:
+            reply = client().inspect_evidence(
+                HistoryQuery(directory=directory, limit=limit, cursor=cursor)
+            )
+            if reply.error is not None:
+                return reply.error
+            if reply.history is None:
+                return dispatch_failure("receipt_unavailable")
+            return DiagnosticSuccess(data=reply.history)
+
+        invoke(diagnostic, json_output)
+
+    @debug_app.command("last")
+    def debug_last(
+        request_id: Annotated[UUID | None, typer.Option("--request-id")] = None,
+        json_output: bool = typer.Option(False, "--json"),
+    ) -> None:
+        """Inspect the last accepted project request or one exact scoped request ID."""
+
+        def diagnostic(directory: Path) -> DiagnosticSuccess | Failure:
+            reply = client().inspect_evidence(
+                DebugQuery(directory=directory, request_id=request_id)
+            )
+            if reply.error is not None:
+                return reply.error
+            if reply.receipt is None or reply.trace is None:
+                return dispatch_failure("receipt_unavailable")
+            return DiagnosticSuccess(data=DebugData(receipt=reply.receipt, trace=reply.trace))
+
+        invoke(diagnostic, json_output)
 
     return app
