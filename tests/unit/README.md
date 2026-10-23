@@ -1,6 +1,6 @@
 # Unit tests
 
-**Status:** M01 CLI/domain/application tests and M02 runtime/control contracts, pure paths and strict codec tests implemented.
+**Status:** M01 CLI/domain/application tests and M02 runtime/control contracts, pure paths, strict v2 codec and private settings/storage contracts implemented.
 
 - [test_demo_safety.py](test_demo_safety.py): generator preflight/refusal, symlinks/traversal/markers, no writes or Git on preserved repos, missing Git, partial-state refusal, and prevention of parent-repository Git fallback.
 - [test_cli.py](test_cli.py): help/no-argument behavior, unavailable commands, and help without adapter calls or files.
@@ -11,6 +11,9 @@
 - [test_runtime_paths.py](test_runtime_paths.py): injected Mac defaults, independent overrides, no cwd/environment fallback, safe invalid-input failures, known system aliases, byte-length bounds and honest unverified-platform refusal. Resolver tests perform no installation I/O.
 
 - [test_runtime_control_protocol.py](test_runtime_control_protocol.py): strict framed control requests, duplicate keys/non-finite/UTF-8/version/type/nesting rejection, length limits before body receive, truncated frames and bounded output. Socketpair cases use owned descriptors only.
+
+- [test_runtime_storage_contracts.py](test_runtime_storage_contracts.py): strict immutable settings/readiness, no invented schema/application success and hidden validation inputs.
+- [test_runtime_settings.py](test_runtime_settings.py): bounded strict YAML, tags/anchors/aliases/duplicates/unknowns, defaults, byte preservation and no-follow/type/link/mode/size refusal under actual fixture ownership.
 
 **Dependencies:** pytest, Typer test runner, Pydantic result contracts, domain/application/interfaces, pure path selection and control codec. Controlled discovery/storage doubles exercise the same public interface as adapters without invoking Git or storage. Real filesystem/process checks belong under integration/acceptance.
 

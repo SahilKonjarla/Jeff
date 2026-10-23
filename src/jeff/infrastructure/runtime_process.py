@@ -2,6 +2,7 @@
 
 import os
 import select
+import struct
 import subprocess
 import sys
 import time
@@ -16,10 +17,11 @@ from jeff.application.runtime import (
     ControlOperation,
     ControlSuccess,
     RuntimeLayout,
+    StartupResult,
     control_failure,
 )
 from jeff.domain.runtime import RuntimeState
-from jeff.infrastructure.runtime_ipc import ControlClient
+from jeff.infrastructure.runtime_ipc import ControlClient, decode_message
 from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
 
 
@@ -74,6 +76,9 @@ class RuntimeController:
         owner: Ownership | None = None
         spawned: subprocess.Popen[bytes] | None = None
         expected: UUID | None = None
+        result_read = result_write = -1
+        result_bytes = bytearray()
+        result: StartupResult | None = None
         try:
             self._reap()
             # Concurrent legitimate preparation can invalidate a read-only snapshot
@@ -89,11 +94,33 @@ class RuntimeController:
                     ):
                         raise
                     time.sleep(0.02)
-            owner = store.acquire(create=True)
+            while time.monotonic() < ready_deadline:
+                owner = store.acquire(create=True)
+                if owner is not None:
+                    break
+                try:
+                    observed = self._ready(store, ready_deadline)
+                    if observed.storage.error is not None:
+                        raise ControlFault(observed.storage.error)
+                    if observed.storage.state == "ready":
+                        return ControlSuccess(data=observed)
+                except ControlFault as error:
+                    if error.code not in (
+                        "runtime_unreachable",
+                        "runtime_credentials_invalid",
+                        "runtime_absent",
+                        "runtime_inspection_failed",
+                    ):
+                        raise
+                time.sleep(min(0.02, max(0, ready_deadline - time.monotonic())))
+            if owner is None:
+                raise ControlFault("runtime_start_timeout")
             if owner is not None:
                 owner.require_no_endpoint()
                 store.credential(owner)
                 expected = uuid4()
+                result_read, result_write = os.pipe()
+                os.set_blocking(result_read, False)
                 spawned = subprocess.Popen(
                     [
                         sys.executable,
@@ -105,8 +132,10 @@ class RuntimeController:
                         str(owner.fd),
                         "--instance-id",
                         str(expected),
+                        "--startup-fd",
+                        str(result_write),
                     ],
-                    pass_fds=(owner.fd,),
+                    pass_fds=(owner.fd, result_write),
                     start_new_session=True,
                     close_fds=True,
                     stdin=subprocess.DEVNULL,
@@ -116,10 +145,27 @@ class RuntimeController:
                     env=child_environment(self.layout),
                 )
                 self._child = spawned
+                os.close(result_write)
+                result_write = -1
                 # close only; LOCK_UN would also unlock the child's inherited description.
                 owner.close()
                 owner = None
             while time.monotonic() < ready_deadline:
+                if result_read >= 0 and result is None:
+                    try:
+                        result_bytes.extend(os.read(result_read, 517))
+                    except BlockingIOError:
+                        pass
+                    if len(result_bytes) >= 4:
+                        size = struct.unpack("!I", result_bytes[:4])[0]
+                        if not 0 < size <= 512 or len(result_bytes) > size + 4:
+                            raise ControlFault("runtime_protocol_error")
+                        if len(result_bytes) == size + 4:
+                            result = decode_message(bytes(result_bytes[4:]), StartupResult)
+                            if result.instance_id != expected:
+                                raise ControlFault("runtime_ownership_unconfirmed")
+                            if result.error is not None:
+                                raise ControlFault(result.error)
                 if spawned is not None and spawned.poll() is not None:
                     raise ControlFault("runtime_start_failed")
                 try:
@@ -131,13 +177,24 @@ class RuntimeController:
                         or observation.identity.pid != spawned.pid
                     ):
                         raise ControlFault("runtime_ownership_unconfirmed")
-                    return ControlSuccess(data=observation)
+                    if observation.storage.error is not None:
+                        raise ControlFault(observation.storage.error)
+                    if observation.storage.state == "ready":
+                        return ControlSuccess(data=observation)
+                    time.sleep(min(0.02, max(0, ready_deadline - time.monotonic())))
                 except ControlFault as error:
                     # Only idempotent readiness reads are retried, never an action.
                     if error.code not in (
                         "runtime_unreachable",
                         "runtime_credentials_invalid",
                         "runtime_absent",
+                    ) and not (
+                        spawned is not None
+                        and error.code
+                        in (
+                            "runtime_handshake_unconfirmed",
+                            "runtime_inspection_failed",
+                        )
                     ):
                         raise
                     time.sleep(min(0.02, max(0, ready_deadline - time.monotonic())))
@@ -146,12 +203,15 @@ class RuntimeController:
             # Genuine Popen ownership, NOT a stored/native-peer PID used as kill authority.
             if spawned is not None and spawned.poll() is None:
                 try:
-                    spawned.terminate()
                     try:
-                        spawned.wait(timeout=max(0, deadline - time.monotonic()))
+                        spawned.wait(timeout=min(0.3, max(0, deadline - time.monotonic())))
                     except subprocess.TimeoutExpired:
-                        spawned.kill()
-                        spawned.wait(timeout=max(0, deadline - time.monotonic()))
+                        spawned.terminate()
+                        try:
+                            spawned.wait(timeout=max(0, deadline - time.monotonic()))
+                        except subprocess.TimeoutExpired:
+                            spawned.kill()
+                            spawned.wait(timeout=max(0, deadline - time.monotonic()))
                 except (OSError, subprocess.TimeoutExpired):
                     # Keep the genuine handle for later poll/reconciliation. A deadline
                     # cannot justify claiming exit or silently launching a replacement.
@@ -160,6 +220,9 @@ class RuntimeController:
                 error.code if isinstance(error, ControlFault) else "runtime_start_failed"
             )
         finally:
+            for descriptor in (result_read, result_write):
+                if descriptor >= 0:
+                    os.close(descriptor)
             if owner is not None:
                 owner.close()
 

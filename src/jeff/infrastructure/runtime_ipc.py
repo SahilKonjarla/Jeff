@@ -1,4 +1,4 @@
-"""Strict bounded control framing. No project dispatch or storage readiness."""
+"""Strict bounded control framing and injected cached facts; no SQL/project dispatch."""
 
 import asyncio
 import ctypes
@@ -10,6 +10,7 @@ import stat
 import struct
 import sys
 import time
+from collections.abc import Callable
 from typing import Self, cast
 from uuid import UUID, uuid4
 
@@ -29,6 +30,7 @@ from jeff.application.runtime import (
     RuntimeIdentityData,
     RuntimeLayout,
 )
+from jeff.application.storage import StorageReadiness
 from jeff.domain.runtime import RuntimeState
 from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
 
@@ -178,14 +180,19 @@ class ControlConnection:
                     DEFAULT_RUNTIME_LIMITS.auth_bytes,
                 )
             )
-            receive_message(
+            reply = receive_message(
                 self.connection, DEFAULT_RUNTIME_LIMITS.auth_bytes, auth_deadline, AuthAccepted
             )
+            if reply.error is not None:
+                raise ControlFault(reply.error)
         except (OSError, ControlFault) as error:
             self.connection.close()
-            if isinstance(error, ControlFault) and error.code == "runtime_protocol_incompatible":
+            if isinstance(error, ControlFault) and error.code in (
+                "runtime_protocol_incompatible",
+                "runtime_authentication_failed",
+            ):
                 raise
-            raise ControlFault("runtime_authentication_failed") from None
+            raise ControlFault("runtime_handshake_unconfirmed") from None
         self.used = False
 
     def __enter__(self) -> Self:
@@ -277,12 +284,19 @@ async def _async_send(writer: asyncio.StreamWriter, message: BaseModel, maximum:
 
 
 class ControlServer:
-    def __init__(self, owner: Ownership, token: bytes, identity: RuntimeIdentityData) -> None:
+    def __init__(
+        self,
+        owner: Ownership,
+        token: bytes,
+        identity: RuntimeIdentityData,
+        storage_snapshot: Callable[[], StorageReadiness] = StorageReadiness,
+    ) -> None:
         if len(token) != 32 or identity.pid != os.getpid():
             raise ControlFault("runtime_ownership_unconfirmed")
         self.owner = owner
         self._token = token
         self.identity = identity
+        self.storage_snapshot = storage_snapshot
         self.stopping = False
         self._stop = asyncio.Event()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -300,14 +314,36 @@ class ControlServer:
             uid, _ = peer_identity(cast(socket.socket, writer.get_extra_info("socket")))
             if uid != self.owner.store.layout.uid:
                 raise ControlFault("runtime_peer_unverified")
-            auth = await _async_receive(
-                reader,
-                DEFAULT_RUNTIME_LIMITS.auth_bytes,
-                DEFAULT_RUNTIME_LIMITS.auth_seconds,
-                AuthRequest,
-            )
+            try:
+                auth = await _async_receive(
+                    reader,
+                    DEFAULT_RUNTIME_LIMITS.auth_bytes,
+                    DEFAULT_RUNTIME_LIMITS.auth_seconds,
+                    AuthRequest,
+                )
+            except ControlFault as fault:
+                if fault.code == "runtime_protocol_incompatible":
+                    await _async_send(
+                        writer,
+                        AuthAccepted(
+                            revision=PROTOCOL_REVISION,
+                            authenticated=False,
+                            error="runtime_protocol_incompatible",
+                        ),
+                        DEFAULT_RUNTIME_LIMITS.auth_bytes,
+                    )
+                return
             if not hmac.compare_digest(auth.token.get_secret_value(), self._token.hex()):
-                raise ControlFault("runtime_authentication_failed")
+                await _async_send(
+                    writer,
+                    AuthAccepted(
+                        revision=PROTOCOL_REVISION,
+                        authenticated=False,
+                        error="runtime_authentication_failed",
+                    ),
+                    DEFAULT_RUNTIME_LIMITS.auth_bytes,
+                )
+                return
             await _async_send(
                 writer,
                 AuthAccepted(revision=PROTOCOL_REVISION, authenticated=True),
@@ -339,6 +375,7 @@ class ControlServer:
                     state=RuntimeState.STOPPING if self.stopping else RuntimeState.RUNNING,
                     identity=self.identity,
                     control_ready=not self.stopping,
+                    storage=self.storage_snapshot(),
                 )
                 response = ControlResponse(
                     revision=PROTOCOL_REVISION,
@@ -356,6 +393,10 @@ class ControlServer:
                 )
             except (OSError, TimeoutError):
                 pass
+
+    def request_stop(self) -> None:
+        self.stopping = True
+        self._stop.set()
 
     async def serve(self) -> None:
         self.owner.require_no_endpoint()

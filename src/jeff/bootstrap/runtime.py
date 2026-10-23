@@ -2,7 +2,9 @@
 
 import argparse
 import asyncio
+import fcntl
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import cast
@@ -10,17 +12,21 @@ from uuid import UUID
 
 from jeff.application.projects import Failure
 from jeff.application.runtime import (
+    PROTOCOL_REVISION,
     ControlFault,
     ControlIssueCode,
     RuntimeControl,
     RuntimeIdentityData,
     RuntimeLayout,
     RuntimePathInputs,
+    StartupResult,
 )
-from jeff.infrastructure.runtime_ipc import ControlServer
+from jeff.application.storage import StorageFault
+from jeff.infrastructure.runtime_ipc import ControlServer, encode_message
 from jeff.infrastructure.runtime_paths import resolve_layout
 from jeff.infrastructure.runtime_process import RuntimeController
-from jeff.infrastructure.runtime_state import RuntimeStateStore
+from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
+from jeff.infrastructure.runtime_storage import SQLiteStorage
 
 
 def _selected_layout() -> RuntimeLayout:
@@ -53,35 +59,91 @@ def create_runtime_controller() -> RuntimeControl:
     return RuntimeController(_selected_layout())
 
 
+async def _serve(
+    owner: Ownership, token: bytes, identity: RuntimeIdentityData, result_fd: int
+) -> None:
+    storage = SQLiteStorage(owner)
+    server = ControlServer(owner, token, identity, storage.snapshot)
+    serving = asyncio.create_task(server.serve())
+    try:
+        storage.start()
+        while storage.snapshot().state == "initializing":
+            if serving.done():
+                await serving
+            await asyncio.sleep(0.01)
+        state = storage.snapshot()
+        packet = encode_message(
+            StartupResult(
+                revision=PROTOCOL_REVISION, instance_id=identity.instance_id, error=state.error
+            ).model_dump(mode="json"),
+            512,
+        )
+        try:
+            if os.write(result_fd, packet) != len(packet):
+                raise ControlFault("runtime_start_failed")
+        except BrokenPipeError:
+            pass  # authenticated readiness can precede this diagnostic-only result
+        finally:
+            os.close(result_fd)
+            result_fd = -1
+        if state.state != "ready":
+            server.request_stop()
+        await serving
+    finally:
+        if result_fd >= 0:
+            os.close(result_fd)
+        server.request_stop()
+        try:
+            await serving
+        finally:
+            # Cooperative observation, not an executor/cancelled wait mistaken for SQL exit.
+            storage.request_close()
+            while not storage.closed:
+                await asyncio.sleep(0.01)
+            storage.close(timeout=0)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Internal owned control child; no application readiness."
     )
     parser.add_argument("--lock-fd", type=int, required=True)
     parser.add_argument("--instance-id", type=UUID, required=True)
+    parser.add_argument("--startup-fd", type=int)
     arguments = parser.parse_args()
     # Fail before location discovery/state access for absent/invalid inherited authority.
-    if arguments.lock_fd < 3:
+    if (
+        arguments.lock_fd < 3
+        or arguments.startup_fd is None
+        or arguments.startup_fd < 3
+        or arguments.startup_fd == arguments.lock_fd
+    ):
         return 1
     try:
         os.fstat(arguments.lock_fd)
+        if (
+            not stat.S_ISFIFO(os.fstat(arguments.startup_fd).st_mode)
+            or fcntl.fcntl(arguments.startup_fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_WRONLY
+        ):
+            return 1
         os.umask(0o177)
         store = RuntimeStateStore(_selected_layout())
         owner = store.adopt(arguments.lock_fd)
         asyncio.run(
-            ControlServer(
+            _serve(
                 owner,
                 store.read_credential(),
                 RuntimeIdentityData(
                     instance_id=arguments.instance_id,
                     pid=os.getpid(),
                 ),
-            ).serve()
+                arguments.startup_fd,
+            )
         )
         # Intentionally hold the raw inherited lock FD until kernel process exit, not just
         # until the socket closes. No Python finalizer closes/unlocks the lock description.
         return 0
-    except (ControlFault, OSError, ValueError):
+    except (ControlFault, StorageFault, OSError, ValueError):
         return 1  # no raw exceptions/credentials/frames on stderr
 
 

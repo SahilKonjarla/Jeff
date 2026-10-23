@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, Self
+from typing import Literal, Protocol, Self, cast
 from uuid import UUID
 
 from pydantic import (
@@ -17,9 +17,10 @@ from pydantic import (
 )
 
 from jeff.application.projects import ErrorData, Failure
+from jeff.application.storage import StorageIssueCode, StorageReadiness, storage_failure
 from jeff.domain.runtime import RuntimeIdentity, RuntimeSnapshot, RuntimeState
 
-PROTOCOL_REVISION = 1
+PROTOCOL_REVISION = 2
 MAC_SOCKET_PATH_BYTES = 103
 MAC_PATH_BYTES = 1023  # Darwin PATH_MAX=1024, reserving the terminator.
 MAC_NAME_BYTES = 255
@@ -199,13 +200,13 @@ DEFAULT_RUNTIME_LIMITS = RuntimeLimits()
 
 
 class ControlObservation(_RuntimeModel):
-    """Process/control facts only. Storage and full application readiness are not checked."""
+    """Separate cached storage facts; full application readiness remains unestablished."""
 
     state: RuntimeState
     identity: RuntimeIdentityData | None = None
     control_ready: StrictBool = False
     application_ready: Literal[False] = False
-    storage_check: Literal["not_performed"] = "not_performed"
+    storage: StorageReadiness = Field(default_factory=StorageReadiness)
 
     @field_validator("application_ready", mode="before")
     @classmethod
@@ -224,6 +225,8 @@ class ControlObservation(_RuntimeModel):
             raise ValueError("Unconfirmed lifecycle observations require a failure result.")
         if self.control_ready != (self.state == RuntimeState.RUNNING):
             raise ValueError("Only running control state may be control-ready.")
+        if self.state == RuntimeState.STOPPED and self.storage.state != "not_checked":
+            raise ValueError("Stopped status does not establish storage readiness.")
         return self
 
 
@@ -241,6 +244,7 @@ class RuntimeControl(Protocol):
 
 ControlIssueCode = (
     RuntimeIssueCode
+    | StorageIssueCode
     | Literal[
         "runtime_absent",
         "runtime_credentials_invalid",
@@ -249,6 +253,7 @@ ControlIssueCode = (
         "runtime_protocol_error",
         "runtime_protocol_incompatible",
         "runtime_authentication_failed",
+        "runtime_handshake_unconfirmed",
         "runtime_peer_unverified",
         "runtime_unreachable",
         "runtime_busy",
@@ -269,6 +274,9 @@ _CONTROL_MESSAGES.update(
         "runtime_protocol_error": "The control message is invalid or exceeds its bounds.",
         "runtime_protocol_incompatible": "The control protocol revision is incompatible.",
         "runtime_authentication_failed": "Control authentication was not established.",
+        "runtime_handshake_unconfirmed": (
+            "Control handshake unconfirmed; compatibility/authentication was not established."
+        ),
         "runtime_peer_unverified": "Native control peer identity could not be verified.",
         "runtime_unreachable": "The control runtime is not reachable.",
         "runtime_busy": "Control connection capacity is exhausted.",
@@ -284,15 +292,17 @@ class ControlFault(Exception):
 
     def __init__(self, code: ControlIssueCode) -> None:
         self.code = code
-        super().__init__(_CONTROL_MESSAGES[code])
+        super().__init__(control_failure(code).error.message)
 
 
 def control_failure(code: ControlIssueCode) -> Failure:
+    if code not in _CONTROL_MESSAGES:
+        return storage_failure(cast(StorageIssueCode, code))
     return Failure(error=ErrorData(code=code, message=_CONTROL_MESSAGES[code]))
 
 
 class AuthRequest(_RuntimeModel):
-    revision: StrictInt = Field(ge=1, le=1)
+    revision: StrictInt = Field(ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION)
     token: SecretStr
 
     @field_validator("token", mode="before")
@@ -308,13 +318,14 @@ class AuthRequest(_RuntimeModel):
 
 
 class AuthAccepted(_RuntimeModel):
-    revision: StrictInt = Field(ge=1, le=1)
+    revision: StrictInt = Field(ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION)
     authenticated: StrictBool
+    error: Literal["runtime_authentication_failed", "runtime_protocol_incompatible"] | None = None
 
     @model_validator(mode="after")
     def accepted(self) -> Self:
-        if not self.authenticated:
-            raise ValueError("Authentication was not established.")
+        if self.authenticated != (self.error is None):
+            raise ValueError("Authentication requires exactly one bounded outcome.")
         return self
 
 
@@ -322,7 +333,7 @@ ControlOperation = Literal["hello", "status", "stop"]
 
 
 class ControlRequest(_RuntimeModel):
-    revision: StrictInt = Field(ge=1, le=1)
+    revision: StrictInt = Field(ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION)
     request_id: UUID
     operation: ControlOperation
     expected_instance_id: UUID | None = None
@@ -335,7 +346,7 @@ class ControlRequest(_RuntimeModel):
 
 
 class ControlResponse(_RuntimeModel):
-    revision: StrictInt = Field(ge=1, le=1)
+    revision: StrictInt = Field(ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION)
     request_id: UUID
     observation: ControlObservation | None = None
     error: ControlIssueCode | None = None
@@ -345,3 +356,11 @@ class ControlResponse(_RuntimeModel):
         if (self.observation is None) == (self.error is None):
             raise ValueError("Exactly one bounded control outcome is required.")
         return self
+
+
+class StartupResult(_RuntimeModel):
+    """Transient child diagnostic only; never authority for control readiness."""
+
+    revision: StrictInt = Field(ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION)
+    instance_id: UUID
+    error: StorageIssueCode | None = None

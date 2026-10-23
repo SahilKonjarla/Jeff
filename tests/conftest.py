@@ -3,10 +3,37 @@
 import os
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+
+@pytest.fixture
+def owned_runtime_launches(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Capture genuine handles; emergency cleanup is evidence of a failing fixture."""
+    original = subprocess.Popen
+    children: list[subprocess.Popen[bytes]] = []
+
+    def tracked(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        child = original(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", tracked)
+    yield
+    forced = False
+    for child in children:
+        if child.poll() is None:
+            forced = True
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+    assert not forced, "Owned runtime fixture required forced child cleanup"
 
 
 @pytest.fixture

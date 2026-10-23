@@ -114,7 +114,7 @@ def test_control_readiness_never_claims_storage_or_application_readiness() -> No
         control_ready=True,
     )
     assert observation.application_ready is False
-    assert observation.storage_check == "not_performed"
+    assert observation.storage.state == "not_checked"
     for value in (True, 0, "false"):
         with pytest.raises(ValidationError):
             ControlObservation.model_validate(
@@ -130,7 +130,7 @@ def test_control_readiness_never_claims_storage_or_application_readiness() -> No
 
 
 def test_limits_match_reviewed_budget_and_reject_invalid_configurations() -> None:
-    assert PROTOCOL_REVISION == 1
+    assert PROTOCOL_REVISION == 2
     assert DEFAULT_RUNTIME_LIMITS.request_bytes == 65536
     assert DEFAULT_RUNTIME_LIMITS.response_bytes == 16777216
     assert DEFAULT_RUNTIME_LIMITS.active_requests == 4

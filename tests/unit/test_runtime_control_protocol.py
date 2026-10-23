@@ -7,14 +7,14 @@ from uuid import UUID
 
 import pytest
 
-from jeff.application.runtime import ControlFault, ControlRequest
+from jeff.application.runtime import AuthAccepted, ControlFault, ControlRequest
 from jeff.infrastructure.runtime_ipc import decode_message, encode_message, receive_message
 
 REQUEST = "00000000-0000-4000-8000-000000000001"
 
 
 def test_control_frame_roundtrip_has_big_endian_length_and_typed_request() -> None:
-    framed = encode_message({"revision": 1, "request_id": REQUEST, "operation": "hello"}, 65536)
+    framed = encode_message({"revision": 2, "request_id": REQUEST, "operation": "hello"}, 65536)
     assert struct.unpack("!I", framed[:4])[0] == len(framed) - 4
     request = decode_message(framed[4:], ControlRequest)
     assert request.request_id == UUID(REQUEST)
@@ -62,6 +62,20 @@ def test_truncated_frame_is_rejected_without_partial_success() -> None:
         caller.shutdown(socket.SHUT_WR)
         with pytest.raises(ControlFault):
             receive_message(receiver, 4096, time.monotonic() + 1, ControlRequest)
+
+
+def test_v2_can_refuse_old_revision_explicitly_without_accepting_old_commands() -> None:
+    refused = decode_message(
+        b'{"revision":2,"authenticated":false,"error":"runtime_protocol_incompatible"}',
+        AuthAccepted,
+    )
+    assert refused.error == "runtime_protocol_incompatible" and not refused.authenticated
+    with pytest.raises(ControlFault) as caught:
+        decode_message(
+            b'{"revision":1,"request_id":"00000000-0000-4000-8000-000000000001","operation":"hello"}',
+            ControlRequest,
+        )
+    assert caught.value.code == "runtime_protocol_incompatible"
 
 
 def test_output_budget_is_checked_before_a_frame_is_published() -> None:

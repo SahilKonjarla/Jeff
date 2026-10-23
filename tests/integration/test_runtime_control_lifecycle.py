@@ -94,7 +94,8 @@ def test_controller_start_status_stop_and_repeat_start_use_one_real_owner(
         assert not layout.socket.exists()
         repeat = controller.stop()
         assert isinstance(repeat, ControlSuccess)
-        assert not layout.database.exists() and not layout.settings.exists()
+        assert layout.database.exists() and layout.settings.exists()
+        assert stopped.data.storage.state == "not_checked"
     finally:
         result = controller.stop()
         if isinstance(result, Failure):
@@ -162,7 +163,7 @@ def test_oversized_and_unauthenticated_shutdown_frames_never_dispatch(
         b"\xff\xff\xff\xff",
         encode_message(
             {
-                "revision": 1,
+                "revision": 2,
                 "request_id": "00000000-0000-4000-8000-000000000001",
                 "operation": "stop",
             },

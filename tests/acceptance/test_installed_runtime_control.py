@@ -77,8 +77,8 @@ finally:
         assert receipt["control_ready"] is True and receipt["application_ready"] is False
         assert receipt["pid_matches_owned_child"] is True
         assert not (root / "r/daemon.sock").exists()
-        assert not (root / "d/state.sqlite3").exists()
-        assert not (root / "d/settings.yaml").exists()
+        assert (root / "d/state.sqlite3").exists()
+        assert (root / "d/settings.yaml").exists()
         command = subprocess.run(
             [sys.executable, "-I", "-B", "-m", "jeff", "start"],
             cwd=root,

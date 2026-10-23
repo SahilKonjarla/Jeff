@@ -2,7 +2,7 @@
 
 A local developer assistant for macOS and Linux: one text and hold-to-talk voice control surface for your projects, coding sessions, and development tools.
 
-> **Status: M01 macOS automated and manual checks passed; formal handoff pending.** Packaging, project registration/configuration inspection, two read-only Git questions, and reproducible demos work locally. Clean-environment tests and bounded technical probes passed, and the supplied test-branch transcript matched the manual checklist. Linux validation is deferred; no hosted CI run is claimed. Daemon and later product behavior remain unimplemented.
+> **Status: M01 macOS automated and manual checks passed; formal handoff pending.** Packaging, project registration/configuration inspection, two read-only Git questions, and reproducible demos work locally. Clean-environment tests and bounded technical probes passed, and the supplied test-branch transcript matched the manual checklist. Linux validation is deferred; no hosted CI run is claimed. M02 now has an internal macOS authenticated control lifecycle, strict private settings and a versioned SQLite project registry. Public daemon commands/project RPC and later product behavior remain unimplemented.
 
 ## What Jeff is being built to do
 
@@ -36,7 +36,7 @@ The planned implementation is one Python package with a local asyncio daemon, SQ
 | Interfaces | CLI, desktop, voice interaction, and MCP server clients of the application API |
 | Bootstrap | Dependency wiring and lifecycle composition |
 
-Inner layers do not import outer layers. Clients do not execute commands or access storage directly. The current foundation uses Python 3.12+, Typer, Pydantic, PyYAML, pytest, Ruff, and mypy; direct versions are pinned. PySide6 and the daemon/runtime stack remain planned, and broader platform validation is still required.
+Inner layers do not import outer layers. Clients do not execute commands or access storage directly. The current foundation uses Python 3.12+, Typer, Pydantic, PyYAML, pytest, Ruff, and mypy; direct versions are pinned. The internal macOS control/storage foundation uses stdlib asyncio/SQLite; PySide6, application dispatch and broader platform validation remain planned.
 
 ## Getting started
 
@@ -77,7 +77,7 @@ jeff --help
 python -m jeff --help
 ```
 
-Both help entry points exit successfully without project I/O. No arguments displays usage with exit code 2; unimplemented commands such as `start` and `run` are rejected. There is no daemon or desktop app to start yet.
+Both help entry points exit successfully without project I/O. No arguments displays usage with exit code 2; unimplemented commands such as `start` and `run` are rejected. There is no public daemon-start command or desktop app yet. Internal control protocol v2 is incompatible with v1; stop an older instance with its matching older environment before upgrading. Do not use internal entry points against normal user state as a smoke test.
 
 To use an existing project, **activate Jeff's venv before changing directories**, then replace the example path below with your target Git repository:
 
