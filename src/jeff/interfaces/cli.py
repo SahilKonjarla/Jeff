@@ -9,6 +9,7 @@ from uuid import UUID
 import typer
 from pydantic import ValidationError
 
+from jeff.application.diagnostics import DoctorResult, RuntimeDiagnostics, unavailable_doctor
 from jeff.application.dispatch import (
     DebugData,
     DebugQuery,
@@ -27,7 +28,9 @@ from jeff.domain.repository import escape_metadata
 
 
 def create_app(
-    client: Callable[[], ProjectClient], control: Callable[[], RuntimeControl]
+    client: Callable[[], ProjectClient],
+    control: Callable[[], RuntimeControl],
+    diagnostics: Callable[[], RuntimeDiagnostics] | None = None,
 ) -> typer.Typer:
     """Build a CLI around injected application use cases, not concrete adapters."""
     app = typer.Typer(
@@ -54,11 +57,19 @@ def create_app(
         | ProjectStatusSuccess
         | ControlSuccess
         | DiagnosticSuccess
+        | DoctorResult
         | Failure,
         json_output: bool,
     ) -> None:
         if json_output:
             typer.echo(json.dumps(result.model_dump(mode="json"), ensure_ascii=True))
+        elif isinstance(result, DoctorResult):
+            typer.echo(f"Doctor: {result.data.summary}")
+            for check in result.data.checks:
+                suffix = f" ({check.code})" if check.code is not None else ""
+                typer.echo(f"{check.name}: {check.status}{suffix}")
+            if result.error is not None:
+                typer.echo(f"{result.error.code}: {result.error.message}", err=True)
         elif isinstance(result, DiagnosticSuccess):
             diagnostic_data = result.data
             if isinstance(diagnostic_data, HistoryPage):
@@ -181,6 +192,16 @@ def create_app(
             result = runtime.start() if operation == "start" else runtime.stop()
         except ControlFault as error:
             result = control_failure(error.code)
+        render(result, json_output)
+
+    @app.command("doctor")
+    def doctor(
+        json_output: bool = typer.Option(
+            False, "--json", help="Print bounded read-only diagnostics."
+        ),
+    ) -> None:
+        """Inspect the selected installation without starting, writing or repairing it."""
+        result = diagnostics().inspect() if diagnostics is not None else unavailable_doctor()
         render(result, json_output)
 
     @app.command("start")

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
+from jeff.application.diagnostics import RuntimeDiagnostics
 from jeff.application.dispatch import (
     ActivityClient,
     ProjectClient,
@@ -68,6 +69,13 @@ def _selected_layout() -> RuntimeLayout:
     if isinstance(layout, Failure):
         raise ControlFault(cast(ControlIssueCode, layout.error.code))
     return layout
+
+
+def create_runtime_diagnostics() -> RuntimeDiagnostics:
+    """Lazy doctor composition; selection/inspection creates no installation state."""
+    from jeff.infrastructure.runtime_diagnostics import RuntimeDiagnosticsAdapter
+
+    return RuntimeDiagnosticsAdapter(_selected_layout)
 
 
 def create_runtime_controller() -> RuntimeControl:
