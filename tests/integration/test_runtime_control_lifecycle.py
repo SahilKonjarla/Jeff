@@ -163,7 +163,7 @@ def test_oversized_and_unauthenticated_shutdown_frames_never_dispatch(
         b"\xff\xff\xff\xff",
         encode_message(
             {
-                "revision": 5,
+                "revision": 6,
                 "request_id": "00000000-0000-4000-8000-000000000001",
                 "operation": "stop",
             },
@@ -179,7 +179,8 @@ def test_oversized_and_unauthenticated_shutdown_frames_never_dispatch(
                 assert caller.recv(1) == b""
             except ConnectionResetError:
                 pass
-        assert isinstance(controller.status(), ControlSuccess)
+        status = controller.status()
+        assert isinstance(status, ControlSuccess) and status.data.state.value == "running"
 
 
 def test_capacity_is_bounded_and_excess_connections_are_closed(installation: RuntimeLayout) -> None:

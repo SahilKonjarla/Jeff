@@ -402,10 +402,12 @@ def test_retirement_batch_is_bounded_and_tombstones_store_only_uuid(tmp_path: Pa
             assert all(len(row) == 1 for row in rows)
 
 
+@pytest.mark.parametrize("migration_fault", ["index", "lost_ack", "busy"])
 def test_actual_checkpoint_c_schema_three_migration_is_atomic_then_retirable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     owned_runtime_launches: None,
+    migration_fault: str,
 ) -> None:
     old = os.environ.get("JEFF_TEST_C_PYTHON")
     assert old is not None, "Requires an explicitly verified owned checkpoint-C package"
@@ -467,10 +469,16 @@ with owner:
     original = sqlite3.connect
 
     class FailedMigration(sqlite3.Connection):
+        schema_four = False
+
         def execute(self, sql: str, parameters: Any = ()) -> sqlite3.Cursor:
             result = super().execute(sql, parameters)
-            if sql.startswith("CREATE INDEX receipts_expirable"):
+            if sql == "PRAGMA user_version=4":
+                self.schema_four = True
+            if migration_fault == "index" and sql.startswith("CREATE INDEX receipts_expirable"):
                 raise sqlite3.OperationalError("SYNTHETIC_PRIVATE_SCHEMA_FOUR")
+            if migration_fault == "lost_ack" and self.schema_four and sql == "COMMIT":
+                raise sqlite3.OperationalError("SYNTHETIC_PRIVATE_SCHEMA_FOUR_ACK")
             return result
 
     def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
@@ -478,15 +486,30 @@ with owner:
 
     with owner:
         before = layout.database.read_bytes()
-        with monkeypatch.context() as patch:
+        with (
+            monkeypatch.context() as patch,
+            closing(original(layout.database, isolation_level=None)) as holder,
+        ):
+            if migration_fault == "busy":
+                holder.execute("BEGIN IMMEDIATE")  # real two-second SQLite contention
             patch.setattr(sqlite3, "connect", connect)
             failing = SQLiteStorage(owner, instance_id=instance)
             failing.start()
             try:
-                assert failing.wait_ready(5).error == "storage_failed"
-                assert layout.database.read_bytes() == before
+                expected = {
+                    "index": "storage_failed",
+                    "lost_ack": "storage_outcome_unconfirmed",
+                    "busy": "storage_busy",
+                }
+                assert failing.wait_ready(5).error == expected[migration_fault]
+                if migration_fault != "lost_ack":
+                    assert layout.database.read_bytes() == before
+                else:
+                    assert layout.database.read_bytes() != before  # actual schema4 COMMIT happened
             finally:
                 failing.close()
+                if holder.in_transaction:
+                    holder.execute("ROLLBACK")
         store = SQLiteStorage(
             owner,
             instance_id=instance,
@@ -506,6 +529,256 @@ with owner:
             assert [item.request_id for item in page.items] == [request]
             assert store.retire(deadline=time.monotonic() + 5).retired_count == 1
             assert store.lookup(project) == project
+        finally:
+            store.close()
+
+
+def test_actual_schema_two_legacy_only_expiry_keeps_unknown_and_never_backfills(
+    tmp_path: Path,
+    owned_runtime_launches: None,
+) -> None:
+    old = os.environ.get("JEFF_TEST_V3_PYTHON")
+    assert old is not None, "Requires verified retained wire3/schema2 package"
+    layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
+    old_instance, project_id = uuid4(), uuid4()
+    project = Project(project_id, tmp_path / "p")
+    requests = [uuid4() for _ in range(5)]
+    code = """
+import json,os,sys,time
+from pathlib import Path
+from uuid import UUID
+from jeff.application.runtime import PROTOCOL_REVISION,RuntimeLayout
+from jeff.application.storage import ReceiptClaim,ReceiptTransition
+from jeff.domain.projects import Project
+from jeff.infrastructure.runtime_state import RuntimeStateStore
+from jeff.infrastructure.runtime_storage import SQLiteStorage
+assert PROTOCOL_REVISION==3
+layout=RuntimeLayout(data_dir=Path(sys.argv[1]),runtime_dir=Path(sys.argv[2]),uid=os.geteuid())
+instance,project=UUID(sys.argv[3]),UUID(sys.argv[4]);root=Path(sys.argv[5])
+owner=RuntimeStateStore(layout).acquire(create=True)
+assert owner is not None
+with owner:
+    store=SQLiteStorage(owner,instance_id=instance);store.start()
+    try:
+        assert store.wait_ready(5).schema_version==2
+        store.index(Project(project,root));finished=[]
+        states=('succeeded','failed','unknown','accepted','running')
+        for request,state in zip(map(UUID,sys.argv[6:]),states):
+            store.claim(ReceiptClaim(request_id=request,owner_instance_id=instance,project_id=project,
+                        canonical_root=root,operation='ask.branch'),deadline=time.monotonic()+5)
+            if state!='accepted':
+                outcome=None if state=='running' else 'ok' if state=='succeeded' else 'partial'
+                receipt=store.finish(ReceiptTransition(request_id=request,owner_instance_id=instance,
+                    state=state,outcome_code=outcome),deadline=time.monotonic()+5)
+                if receipt.finished_at_ms is not None:finished.append(receipt.finished_at_ms)
+        print(json.dumps({'finished':max(finished)}))
+    finally:store.close()
+"""
+    result = subprocess.run(
+        [
+            old,
+            "-I",
+            "-B",
+            "-c",
+            code,
+            str(layout.data_dir),
+            str(layout.runtime_dir),
+            str(old_instance),
+            str(project_id),
+            str(project.root),
+            *map(str, requests),
+        ],
+        env={"PATH": os.defpath, "HOME": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, "Owned legacy-only fixture failed; raw output suppressed"
+    clock = json.loads(result.stdout)["finished"] + 30 * 86400000 + 1
+    owner = RuntimeStateStore(layout).acquire(create=False)
+    assert owner is not None
+    instance = uuid4()
+    with owner:
+        store = SQLiteStorage(owner, instance_id=instance, retention_clock=lambda: clock)
+        store.start()
+        try:
+            assert store.wait_ready(5).schema_version == 4
+            read = HistoryRead(project_id=project_id, canonical_root=project.root)
+            before = store.history(read, deadline=time.monotonic() + 5)
+            assert before.high_water == 0 and not before.items
+            assert store.lookup(project) == project
+            batch = store.retire(deadline=time.monotonic() + 5)
+            assert batch.retired_count == 2 and batch.replay_floor == batch.high_water == 0
+            assert batch.database_epoch == before.database_epoch
+            assert batch.retention_generation == before.retention_generation + 1
+            for index, request in enumerate(requests):
+                scope = ReceiptScope(
+                    request_id=request, canonical_root=project.root, project_id=project_id
+                )
+                receipt, trace = store.trace(scope, deadline=time.monotonic() + 5)
+                if index < 2:
+                    assert receipt is None and trace is None
+                    with pytest.raises(StorageFault) as retired:
+                        store.claim(
+                            ReceiptClaim(
+                                request_id=request,
+                                owner_instance_id=instance,
+                                operation="ask.branch",
+                                canonical_root=project.root,
+                                project_id=project_id,
+                            ),
+                            deadline=time.monotonic() + 5,
+                        )
+                    assert retired.value.code == "request_retired"
+                else:
+                    assert receipt is not None and receipt.state == "unknown"
+                    assert trace is not None and trace.legacy_metadata_only and not trace.events
+            assert not store.history(read, deadline=time.monotonic() + 5).items
+            assert store.lookup(project) == project and store.snapshot().state == "ready"
+        finally:
+            store.close()
+
+
+@pytest.mark.parametrize("corruption", ["excess_events", "uuid_overlap", "generation_limit"])
+def test_retirement_refuses_corrupt_or_exhausted_metadata_without_partial_deletion(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
+    owner = RuntimeStateStore(layout).acquire(create=True)
+    assert owner is not None
+    instance, project = uuid4(), uuid4()
+    claim = ReceiptClaim(
+        request_id=uuid4(),
+        owner_instance_id=instance,
+        operation="ask.branch",
+        canonical_root=tmp_path / "p",
+        project_id=project,
+    )
+    with owner:
+        initial = SQLiteStorage(owner, instance_id=instance)
+        initial.start()
+        try:
+            assert initial.wait_ready(5).state == "ready"
+            initial.claim(claim, deadline=time.monotonic() + 5)
+            done = initial.finish(
+                ReceiptTransition(
+                    request_id=claim.request_id,
+                    owner_instance_id=instance,
+                    state="succeeded",
+                    outcome_code="ok",
+                ),
+                deadline=time.monotonic() + 5,
+            )
+            assert done.finished_at_ms is not None
+        finally:
+            initial.close()
+        # Explicit owned structural/corruption fixture, not a functional SQL inspection oracle.
+        with closing(sqlite3.connect(layout.database, isolation_level=None)) as fixture:
+            if corruption == "excess_events":
+                for sequence in range(3, 34):
+                    fixture.execute(
+                        "INSERT INTO activity_events(event_id,request_id,owner_instance_id,"
+                        "canonical_root,project_id,scope_project_id,kind,recorded_at_ms) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (
+                            sequence,
+                            str(claim.request_id),
+                            str(instance),
+                            str(claim.canonical_root),
+                            str(project),
+                            str(project),
+                            "request.running",
+                            done.finished_at_ms,
+                        ),
+                    )
+                fixture.execute("UPDATE activity_meta SET high_water=33")
+            elif corruption == "uuid_overlap":
+                fixture.execute(
+                    "INSERT INTO request_tombstones VALUES (?)", (str(claim.request_id),)
+                )
+            else:
+                fixture.execute("UPDATE activity_meta SET generation=9223372036854775807")
+        before = layout.database.read_bytes()
+        store = SQLiteStorage(
+            owner,
+            instance_id=instance,
+            retention_clock=lambda: cast(int, done.finished_at_ms) + 30 * 86400000 + 1,
+        )
+        store.start()
+        try:
+            assert store.wait_ready(5).state == "ready"
+            with pytest.raises(StorageFault) as refused:
+                if corruption == "uuid_overlap":
+                    store.claim(claim, deadline=time.monotonic() + 5)
+                else:
+                    store.retire(deadline=time.monotonic() + 5)
+            assert refused.value.code == (
+                "storage_unrecognized" if corruption == "uuid_overlap" else "storage_failed"
+            )
+            assert store.snapshot().state == "failed" and store.retention_position() is None
+            assert layout.database.read_bytes() == before
+        finally:
+            store.close()
+
+
+def test_concurrent_expiry_and_duplicate_claim_never_reopens_request_admission(
+    tmp_path: Path,
+) -> None:
+    layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
+    owner = RuntimeStateStore(layout).acquire(create=True)
+    assert owner is not None
+    instance, project = uuid4(), uuid4()
+    wall = [0]
+    with owner:
+        store = SQLiteStorage(owner, instance_id=instance, retention_clock=lambda: wall[0])
+        store.start()
+        try:
+            assert store.wait_ready(5).state == "ready"
+            claim = ReceiptClaim(
+                request_id=uuid4(),
+                owner_instance_id=instance,
+                operation="ask.branch",
+                canonical_root=tmp_path / "p",
+                project_id=project,
+            )
+            store.claim(claim, deadline=time.monotonic() + 5)
+            done = store.finish(
+                ReceiptTransition(
+                    request_id=claim.request_id,
+                    owner_instance_id=instance,
+                    state="succeeded",
+                    outcome_code="ok",
+                ),
+                deadline=time.monotonic() + 5,
+            )
+            assert done.finished_at_ms is not None
+            wall[0] = done.finished_at_ms + 30 * 86400000 + 1
+            gate = threading.Barrier(5)
+
+            def retire() -> int:
+                gate.wait(timeout=3)
+                return store.retire(deadline=time.monotonic() + 5).retired_count
+
+            def duplicate() -> str:
+                gate.wait(timeout=3)
+                try:
+                    result = store.claim(claim, deadline=time.monotonic() + 5)
+                except StorageFault as fault:
+                    assert fault.code == "request_retired"
+                    return "retired"
+                assert not result.created and result.receipt == done
+                return "duplicate"
+
+            with ThreadPoolExecutor(max_workers=5) as callers:
+                expired = callers.submit(retire)
+                claims = [callers.submit(duplicate) for _ in range(4)]
+                assert expired.result(timeout=5) == 1
+                assert all(
+                    future.result(timeout=5) in ("retired", "duplicate") for future in claims
+                )
+            with pytest.raises(StorageFault) as retired:
+                store.claim(claim, deadline=time.monotonic() + 5)
+            assert retired.value.code == "request_retired" and store.snapshot().state == "ready"
         finally:
             store.close()
 

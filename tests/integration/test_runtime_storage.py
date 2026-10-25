@@ -32,7 +32,7 @@ def test_real_registry_commit_reopen_and_readonly_lookup(tmp_path: Path) -> None
         try:
             ready = storage.wait_ready(5)
             assert ready.state == "ready", ready
-            assert ready.schema_version == 3 and ready.retention_days == 30
+            assert ready.schema_version == 4 and ready.retention_days == 30
             assert storage.lookup(project) is None
             assert storage.index(project) == (project, True)
             assert storage.index(project) == (project, False)
@@ -83,7 +83,7 @@ def test_conservative_adoption_preserves_existing_database_and_sidecars(
                 fixture.execute("CREATE TABLE foreign_data(value TEXT)")
                 if kind == "newer":
                     fixture.execute(f"PRAGMA application_id={DATABASE_APPLICATION_ID}")
-                    fixture.execute("PRAGMA user_version=4")
+                    fixture.execute("PRAGMA user_version=5")
             layout.database.chmod(0o600)
         if kind in ("journal", "wal", "shm"):
             sidecar = layout.data_dir / ("state.sqlite3-" + kind)
@@ -292,7 +292,15 @@ def test_running_timeout_retains_slot_queue_is_bounded_and_close_waits_for_real_
         assert threading.get_ident() not in threads
 
 
-@pytest.mark.parametrize("alteration", ["unknown_object", "ledger_mismatch"])
+@pytest.mark.parametrize(
+    "alteration",
+    [
+        "unknown_object",
+        "ledger_mismatch",
+        "extra_ledger",
+        "floor_ddl",
+    ],
+)
 def test_recognized_marker_does_not_bless_unknown_objects_or_mismatched_ledger(
     tmp_path: Path, alteration: str
 ) -> None:
@@ -307,11 +315,15 @@ def test_recognized_marker_does_not_bless_unknown_objects_or_mismatched_ledger(
         finally:
             storage.close()
         with closing(sqlite3.connect(layout.database, isolation_level=None)) as fixture:
-            fixture.execute(
-                "CREATE TABLE sqliteXforeign(value TEXT)"
-                if alteration == "unknown_object"
-                else "UPDATE schema_migrations SET name='unknown_migration' WHERE version=1"
-            )
+            statements = {
+                "unknown_object": "CREATE TABLE sqliteXforeign(value TEXT)",
+                "ledger_mismatch": (
+                    "UPDATE schema_migrations SET name='unknown_migration' WHERE version=1"
+                ),
+                "extra_ledger": "INSERT INTO schema_migrations VALUES (5,'unknown_migration')",
+                "floor_ddl": "ALTER TABLE activity_meta RENAME COLUMN replay_floor TO erased_floor",
+            }
+            fixture.execute(statements[alteration])
         before = layout.database.read_bytes()
         refused = SQLiteStorage(owner)
         refused.start()

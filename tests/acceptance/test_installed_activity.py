@@ -29,7 +29,7 @@ def test_installed_real_git_trace_scoped_replay_restart_and_no_raw_archive(
     evidence: EvidenceClient = client
     try:
         started = control.start()
-        assert isinstance(started, ControlSuccess) and started.data.storage.schema_version == 3
+        assert isinstance(started, ControlSuccess) and started.data.storage.schema_version == 4
         initialized = client.execute(ProjectCall(operation="init", directory=git_repo))
         assert initialized.result.ok
         call = ProjectCall(operation="ask", directory=git_repo, question="what branch am I on?")
