@@ -5,11 +5,13 @@ import os
 import secrets
 import stat
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Self, cast
+from typing import Literal, Self, cast
 
+from jeff.application.diagnostics import DiagnosticDeadlineExceeded
 from jeff.application.projects import Failure
 from jeff.application.runtime import ControlFault, ControlIssueCode, RuntimeLayout
 from jeff.infrastructure.runtime_paths import inspect_layout
@@ -35,6 +37,116 @@ def _stable(chain: list[tuple[int, str, os.stat_result]]) -> None:
     for fd, name, before in chain:
         if _identity(before) != _identity(os.stat(name, dir_fd=fd, follow_symlinks=False)):
             raise ControlFault("runtime_ownership_unconfirmed")
+
+
+def _diagnostic_signature(info: os.stat_result) -> tuple[int, ...]:
+    return (*_identity(info), info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+class DiagnosticLease:
+    """Read-only shared lock, fixed-file reads and revalidation; no mutable Ownership."""
+
+    def __init__(self, store: "RuntimeStateStore", fd: int, root: int, deadline: float) -> None:
+        self._store = store
+        self._fd = fd
+        self._root = root
+        self._deadline = deadline
+        self._data_identity: tuple[int, ...] | None = None
+        self._observed: dict[Literal["settings", "database"], tuple[int, ...]] = {}
+
+    @property
+    def layout(self) -> RuntimeLayout:
+        return self._store.layout
+
+    def check(self) -> None:
+        if time.monotonic() >= self._deadline:
+            raise DiagnosticDeadlineExceeded
+        if self._fd < 0:
+            raise ControlFault("runtime_ownership_unconfirmed")
+        try:
+            with self._store.directory(self.layout.runtime_dir, create=False) as root:
+                if _identity(os.fstat(root)) != _identity(os.fstat(self._root)):
+                    raise ControlFault("runtime_ownership_unconfirmed")
+                held = os.fstat(self._fd)
+                current = os.stat("daemon.lock", dir_fd=root, follow_symlinks=False)
+                if not (
+                    _private_file(held, self.layout.uid, 0)
+                    and _private_file(current, self.layout.uid, 0)
+                    and _identity(held) == _identity(current)
+                ):
+                    raise ControlFault("runtime_ownership_unconfirmed")
+                try:
+                    os.stat("daemon.sock", dir_fd=root, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise ControlFault("runtime_endpoint_collision")
+            if self._data_identity is not None:
+                with self._store.directory(self.layout.data_dir, create=False) as root:
+                    if _identity(os.fstat(root)) != self._data_identity:
+                        raise ControlFault("runtime_ownership_unconfirmed")
+                    credential = os.stat("ipc.key", dir_fd=root, follow_symlinks=False)
+                    if not _private_file(credential, self.layout.uid, 32):
+                        raise ControlFault("runtime_credentials_invalid")
+                    for role, before in self._observed.items():
+                        name = "settings.yaml" if role == "settings" else "state.sqlite3"
+                        after = os.stat(name, dir_fd=root, follow_symlinks=False)
+                        if before != _diagnostic_signature(after):
+                            raise ControlFault("runtime_ownership_unconfirmed")
+        except OSError:
+            raise ControlFault("runtime_ownership_unconfirmed") from None
+        if time.monotonic() >= self._deadline:
+            raise DiagnosticDeadlineExceeded
+
+    @contextmanager
+    def data_directory(self) -> Iterator[int]:
+        self.check()
+        with self._store.directory(self.layout.data_dir, create=False) as root:
+            identity = _identity(os.fstat(root))
+            if self._data_identity is not None and self._data_identity != identity:
+                raise ControlFault("runtime_ownership_unconfirmed")
+            self._data_identity = identity
+            self.check()
+            yield root
+            self.check()
+
+    @contextmanager
+    def open_file(self, role: Literal["settings", "database"]) -> Iterator[int]:
+        """Only declared files, O_RDONLY; observed identities remain checked until lease exit."""
+        self.check()
+        if role not in ("settings", "database"):
+            raise ControlFault("invalid_runtime_path")
+        name = "settings.yaml" if role == "settings" else "state.sqlite3"
+        try:
+            with self._store.directory(self.layout.data_dir, create=False) as root:
+                identity = _identity(os.fstat(root))
+                if self._data_identity is not None and self._data_identity != identity:
+                    raise ControlFault("runtime_ownership_unconfirmed")
+                self._data_identity = identity
+                self.check()
+                fd = os.open(name, os.O_RDONLY | _FILE_FLAGS, dir_fd=root)
+                try:
+                    before = os.fstat(fd)
+                    if not (
+                        stat.S_ISREG(before.st_mode)
+                        and before.st_uid == self.layout.uid
+                        and stat.S_IMODE(before.st_mode) == 0o600
+                        and before.st_nlink == 1
+                    ):
+                        raise ControlFault("unsafe_runtime_path")
+                    signature = _diagnostic_signature(before)
+                    if role in self._observed and self._observed[role] != signature:
+                        raise ControlFault("runtime_ownership_unconfirmed")
+                    self._observed[role] = signature
+                    self.check()
+                    yield fd
+                    if _diagnostic_signature(os.fstat(fd)) != signature:
+                        raise ControlFault("runtime_ownership_unconfirmed")
+                    self.check()
+                finally:
+                    os.close(fd)
+        except OSError:
+            raise ControlFault("runtime_inspection_failed") from None
 
 
 class Ownership:
@@ -183,6 +295,36 @@ class RuntimeStateStore:
                 _stable(chain)
         except OSError:
             raise ControlFault("runtime_inspection_failed") from None
+
+    @contextmanager
+    def diagnostic_lease(self, deadline: float) -> Iterator[DiagnosticLease]:
+        """Non-creating O_RDONLY shared flock; never start, mint authority or unlink."""
+        if time.monotonic() >= deadline:
+            raise DiagnosticDeadlineExceeded
+        with self.directory(self.layout.runtime_dir, create=False) as root:
+            try:
+                fd = os.open("daemon.lock", os.O_RDONLY | _FILE_FLAGS, dir_fd=root)
+            except FileNotFoundError:
+                raise ControlFault("runtime_absent") from None
+            except OSError:
+                raise ControlFault("runtime_inspection_failed") from None
+            lease = DiagnosticLease(self, fd, root, deadline)
+            try:
+                info = os.fstat(fd)
+                if not _private_file(info, self.layout.uid, 0):
+                    raise ControlFault("unsafe_runtime_path")
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise ControlFault("runtime_ownership_unconfirmed") from None
+                lease.check()
+                yield lease
+                lease.check()
+            except OSError:
+                raise ControlFault("runtime_inspection_failed") from None
+            finally:
+                lease._fd = -1
+                os.close(fd)
 
     def acquire(self, *, create: bool) -> Ownership | None:
         """None means a real conflicting flock; absence is a separate safe fault."""

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from jeff.application.runtime import ControlFault
 from jeff.application.storage import SETTINGS_LIMIT, RuntimeSettings, StorageFault
-from jeff.infrastructure.runtime_state import Ownership
+from jeff.infrastructure.runtime_state import DiagnosticLease, Ownership
 
 _DEFAULT_BYTES = b"schema_version: 1\nhistory:\n  retention_days: 30\n"
 _FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -48,6 +48,26 @@ def parse_settings(payload: bytes) -> RuntimeSettings:
                 depth -= 1
         return RuntimeSettings.model_validate(yaml.load(text, Loader=_UniqueLoader))
     except (ValueError, TypeError, RecursionError, yaml.YAMLError, ValidationError):
+        raise StorageFault("settings_invalid") from None
+
+
+def read_existing_settings(lease: DiagnosticLease) -> RuntimeSettings:
+    """Bounded strict read under a diagnostic lease; never default or rewrite."""
+    try:
+        with lease.open_file("settings") as fd:
+            if os.fstat(fd).st_size > SETTINGS_LIMIT:
+                raise StorageFault("settings_invalid")
+            chunks = bytearray()
+            while len(chunks) <= SETTINGS_LIMIT:
+                lease.check()
+                part = os.read(fd, SETTINGS_LIMIT + 1 - len(chunks))
+                if not part:
+                    break
+                chunks.extend(part)
+            result = parse_settings(bytes(chunks))
+            lease.check()
+            return result
+    except OSError:
         raise StorageFault("settings_invalid") from None
 
 

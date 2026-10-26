@@ -1,8 +1,8 @@
 """Bounded read-only installation diagnostics; no concrete I/O or repair authority."""
 
-from typing import Literal, Protocol, Self
+from typing import Annotated, Literal, Protocol, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
 from jeff.application.runtime import ControlObservation, RuntimePathInspection
 
@@ -28,7 +28,22 @@ DoctorReason = Literal[
     "unsafe_runtime_path",
     "runtime_path_too_long",
     "runtime_inspection_failed",
+    "installation_incomplete",
+    "runtime_ownership_unconfirmed",
+    "runtime_endpoint_collision",
+    "runtime_credentials_invalid",
+    "settings_invalid",
+    "storage_unsafe",
+    "storage_unrecognized",
+    "storage_schema_unsupported",
+    "storage_upgrade_required",
+    "storage_recovery_required",
+    "storage_busy",
+    "storage_failed",
 ]
+ConfiguredRetentionDays = (
+    Annotated[StrictInt, Field(gt=0, le=9223372036854775807)] | Literal["above_report_limit"]
+)
 
 
 class _DoctorModel(BaseModel):
@@ -57,6 +72,9 @@ class DoctorReport(_DoctorModel):
     checks: tuple[DoctorCheck, ...] = Field(min_length=7, max_length=7)
     runtime: ControlObservation | None = None
     paths: RuntimePathInspection | None = None
+    settings_schema_version: StrictInt | None = Field(default=None, ge=1, le=1)
+    configured_retention_days: ConfiguredRetentionDays | None = None
+    database_schema_version: StrictInt | None = Field(default=None, ge=0, le=4)
     python_version: str | None = Field(
         default=None, min_length=1, max_length=32, pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$"
     )
@@ -71,6 +89,19 @@ class DoctorReport(_DoctorModel):
         failed = any(check.required and check.status != "ok" for check in self.checks)
         if (self.summary in ("healthy", "stopped", "uninitialized")) == failed:
             raise ValueError("Summary must reflect all required checks.")
+        if (self.settings_schema_version is None) != (self.configured_retention_days is None):
+            raise ValueError("Configured settings facts must be complete.")
+        if self.settings_schema_version is not None and self.checks[5].status != "ok":
+            raise ValueError("Only validated settings expose configuration facts.")
+        if self.summary == "stopped" and (
+            self.runtime is not None
+            or self.settings_schema_version != 1
+            or self.configured_retention_days is None
+            or self.database_schema_version != 4
+        ):
+            raise ValueError(
+                "Stopped health requires current validated facts without live identity."
+            )
         return self
 
 
@@ -138,6 +169,10 @@ def unavailable_doctor() -> DoctorResult:
             ),
         )
     )
+
+
+class DiagnosticDeadlineExceeded(Exception):
+    """The shared diagnostic budget expired; carries no raw I/O details."""
 
 
 class RuntimeDiagnostics(Protocol):

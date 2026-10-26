@@ -1,7 +1,7 @@
 """Public doctor value and CLI seams; no concrete runtime/SQL collaborators."""
 
 import json
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import pytest
 from pydantic import ValidationError
@@ -110,6 +110,51 @@ def test_reports_are_frozen_and_failure_keeps_bounded_data() -> None:
     assert result.data.summary == "unavailable" and len(result.data.checks) == 7
     with pytest.raises(ValidationError):
         result.data.summary = "healthy"
+
+
+def stopped_payload() -> dict[str, Any]:
+    value = report().model_dump(mode="json")
+    value.update(
+        summary="stopped",
+        settings_schema_version=1,
+        configured_retention_days=17,
+        database_schema_version=4,
+    )
+    value["checks"] = [
+        {"name": name, "status": "ok", "code": None, "required": True}
+        for name in ("platform", "python", "git", "paths", "runtime", "settings", "storage")
+    ]
+    return value
+
+
+@pytest.mark.parametrize("value", [0, -1, 2**63, "17", 17.0, "unbounded private text"])
+def test_configured_retention_summary_is_bounded_and_strict(value: object) -> None:
+    payload = stopped_payload()
+    payload["configured_retention_days"] = value
+    with pytest.raises(ValidationError):
+        DoctorReport.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"configured_retention_days": None},
+        {"settings_schema_version": None},
+        {"database_schema_version": 3},
+        {"runtime": {"state": "stopped"}},
+    ],
+)
+def test_stopped_health_requires_complete_current_nonlive_facts(changes: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        DoctorReport.model_validate({**stopped_payload(), **changes})
+
+
+def test_valid_oversized_configuration_uses_finite_marker_not_active_retention() -> None:
+    payload = stopped_payload()
+    payload["configured_retention_days"] = "above_report_limit"
+    result = doctor_result(DoctorReport.model_validate(payload))
+    assert result.ok and result.data.runtime is None
+    assert result.data.configured_retention_days == "above_report_limit"
 
 
 def forbidden() -> NoReturn:

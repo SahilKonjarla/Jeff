@@ -1,11 +1,16 @@
 """Actual read-only doctor entry point; selected absent installation stays absent."""
 
+import hashlib
 import json
 import os
 import stat
 import subprocess
 import sys
 from pathlib import Path
+
+from jeff.application.runtime import RuntimeLayout
+from jeff.infrastructure.runtime_state import RuntimeStateStore
+from jeff.infrastructure.runtime_storage import SQLiteStorage
 
 
 def test_doctor_absent_installation_is_read_only_outside_git(tmp_path: Path) -> None:
@@ -113,3 +118,107 @@ def test_doctor_absent_installation_is_read_only_outside_git(tmp_path: Path) -> 
     assert isinstance(report["git_version"], str) and 0 < len(report["git_version"]) <= 64
     assert not data.exists() and not runtime.exists()
     assert snapshot() == before
+
+
+def test_doctor_stopped_installation_is_read_only_outside_git(tmp_path: Path) -> None:
+    homes = [tmp_path / name for name in ("home", "tmp", "config", "cache", "data", "foreign")]
+    for path in homes:
+        path.mkdir(mode=0o700)
+    layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
+    layout.data_dir.mkdir(mode=0o700)
+    # Synthetic fixed fixture key; neither doctor nor this test reads its body.
+    layout.credential.write_bytes(b"\x00" * 32)
+    layout.credential.chmod(0o600)
+    owner = RuntimeStateStore(layout).acquire(create=True)
+    assert owner is not None
+    with owner:
+        storage = SQLiteStorage(owner)
+        storage.start()
+        try:
+            assert storage.wait_ready(5).state == "ready"
+        finally:
+            storage.close()
+    layout.settings.write_text("schema_version: 1\nhistory:\n  retention_days: 17\n")
+    env = {
+        "PATH": os.defpath,
+        "HOME": str(homes[0]),
+        "TMPDIR": str(homes[1]),
+        "XDG_CONFIG_HOME": str(homes[2]),
+        "XDG_CACHE_HOME": str(homes[3]),
+        "XDG_DATA_HOME": str(homes[4]),
+        "JEFF_DATA_DIR": str(layout.data_dir),
+        "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "LC_ALL": "C",
+        "NO_COLOR": "1",
+    }
+    negative = subprocess.run(
+        ["/usr/bin/git", "-C", str(homes[-1]), "rev-parse", "--show-toplevel"],
+        env=env,
+        capture_output=True,
+        timeout=5,
+    )
+    assert negative.returncode == 128 and b"not a git repository" in negative.stderr
+    profile = tmp_path / "readonly.sb"
+    profile.write_text(
+        "(version 1)\n(allow default)\n(deny file-write*)\n(deny network*)\n"
+        '(allow file-write* (literal "/dev/null"))\n'
+        f"(deny file-read-data (literal {json.dumps(str(layout.credential))}))\n"
+    )
+    prefix = ["/usr/bin/sandbox-exec", "-f", str(profile), sys.executable, "-I", "-B"]
+    control = subprocess.run(
+        [
+            *prefix,
+            "-c",
+            "import errno,sys\n"
+            'for path,mode in ((sys.argv[1],"x"),(sys.argv[2],"rb")):\n'
+            " try:open(path,mode).close()\n"
+            " except OSError as e:assert e.errno in (errno.EPERM,errno.EACCES)\n"
+            ' else:raise SystemExit("read-only control failed")',
+            str(homes[0] / "blocked"),
+            str(layout.credential),
+        ],
+        cwd=homes[-1],
+        env=env,
+        capture_output=True,
+        timeout=5,
+    )
+    assert control.returncode == 0, control.stderr.decode(errors="replace")
+
+    def snapshot() -> dict[str, tuple[int, int, int, int, str | None]]:
+        return {
+            str(path.relative_to(tmp_path)): (
+                path.lstat().st_ino,
+                stat.S_IMODE(path.lstat().st_mode),
+                path.lstat().st_mtime_ns,
+                path.lstat().st_nlink,
+                hashlib.sha256(path.read_bytes()).hexdigest()
+                if path.is_file() and path != layout.credential
+                else None,
+            )
+            for path in (tmp_path, *tmp_path.rglob("*"))
+        }
+
+    before = snapshot()
+    result = subprocess.run(
+        [*prefix, "-m", "jeff", "doctor", "--json"],
+        cwd=homes[-1],
+        env=env,
+        capture_output=True,
+        timeout=10,
+    )
+    assert snapshot() == before
+    payload = json.loads(result.stdout)
+    report = payload["data"]
+    assert report["summary"] == "stopped"
+    assert result.returncode == 0 and payload["ok"] is True and payload["error"] is None
+    assert report["runtime"] is None
+    assert len(report["checks"]) == 7
+    assert all(check["status"] == "ok" and check["required"] for check in report["checks"])
+    assert report["settings_schema_version"] == 1
+    assert report["configured_retention_days"] == 17
+    assert report["database_schema_version"] == 4
+    assert not layout.socket.exists() and not list(layout.data_dir.glob("state.sqlite3-*"))
