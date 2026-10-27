@@ -16,12 +16,13 @@ from jeff.application.runtime import (
     ControlObservation,
     ControlOperation,
     ControlSuccess,
+    RuntimeIdentityData,
     RuntimeLayout,
     StartupResult,
     control_failure,
 )
 from jeff.domain.runtime import RuntimeState
-from jeff.infrastructure.runtime_ipc import ControlClient, decode_message
+from jeff.infrastructure.runtime_ipc import ControlClient, _PeerDisconnected, decode_message
 from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
 
 
@@ -38,6 +39,48 @@ def child_environment(layout: RuntimeLayout) -> dict[str, str]:
         "LC_ALL": "C",
         "NO_COLOR": "1",
     }
+
+
+class _ReadinessReleased(ControlFault):
+    """Authenticated peer observed before its valid lifetime anchor became free."""
+
+    def __init__(self, identity: RuntimeIdentityData | None) -> None:
+        super().__init__("runtime_ownership_unconfirmed")
+        self.identity = identity
+
+
+def _read_startup_result(
+    descriptor: int, buffered: bytearray, expected: UUID | None
+) -> StartupResult | None:
+    """One nonblocking bounded read; diagnostic only, never readiness authority."""
+    try:
+        buffered.extend(os.read(descriptor, 517))
+    except BlockingIOError:
+        pass
+    if len(buffered) < 4:
+        return None
+    size = struct.unpack("!I", buffered[:4])[0]
+    if not 0 < size <= 512 or len(buffered) > size + 4:
+        raise ControlFault("runtime_protocol_error")
+    if len(buffered) != size + 4:
+        return None
+    result = decode_message(bytes(buffered[4:]), StartupResult)
+    if result.instance_id != expected:
+        raise ControlFault("runtime_ownership_unconfirmed")
+    return result
+
+
+def _stop_store(layout: RuntimeLayout, deadline: float) -> RuntimeStateStore:
+    """Retry only transient metadata snapshots before any stop connection/action."""
+    while time.monotonic() < deadline:
+        try:
+            return RuntimeStateStore(layout)
+        except ControlFault as error:
+            remaining = deadline - time.monotonic()
+            if error.code != "runtime_inspection_failed" or remaining <= 0:
+                raise
+            time.sleep(min(0.02, remaining))
+    raise ControlFault("runtime_stop_unconfirmed")
 
 
 def _stopped() -> ControlSuccess:
@@ -67,7 +110,7 @@ class RuntimeController:
         probe = store.acquire(create=False)
         if probe is not None:
             probe.close()
-            raise ControlFault("runtime_ownership_unconfirmed")
+            raise _ReadinessReleased(observation.identity)
         return observation
 
     def start(self) -> ControlSuccess | Failure:
@@ -154,20 +197,9 @@ class RuntimeController:
                 owner = None
             while time.monotonic() < ready_deadline:
                 if result_read >= 0 and result is None:
-                    try:
-                        result_bytes.extend(os.read(result_read, 517))
-                    except BlockingIOError:
-                        pass
-                    if len(result_bytes) >= 4:
-                        size = struct.unpack("!I", result_bytes[:4])[0]
-                        if not 0 < size <= 512 or len(result_bytes) > size + 4:
-                            raise ControlFault("runtime_protocol_error")
-                        if len(result_bytes) == size + 4:
-                            result = decode_message(bytes(result_bytes[4:]), StartupResult)
-                            if result.instance_id != expected:
-                                raise ControlFault("runtime_ownership_unconfirmed")
-                            if result.error is not None:
-                                raise ControlFault(result.error)
+                    result = _read_startup_result(result_read, result_bytes, expected)
+                    if result is not None and result.error is not None:
+                        raise ControlFault(result.error)
                 if spawned is not None and spawned.poll() is not None:
                     raise ControlFault("runtime_start_failed")
                 try:
@@ -220,6 +252,35 @@ class RuntimeController:
                     # Keep the genuine handle for later poll/reconciliation. A deadline
                     # cannot justify claiming exit or silently launching a replacement.
                     return control_failure("runtime_ownership_unconfirmed")
+            if (
+                spawned is not None
+                and spawned.poll() is not None
+                and (
+                    isinstance(error, _PeerDisconnected)
+                    or (
+                        isinstance(error, _ReadinessReleased)
+                        and error.identity is not None
+                        and error.identity.instance_id == expected
+                        and error.identity.pid == spawned.pid
+                    )
+                )
+                and result_read >= 0
+                and result is None
+            ):
+                # Reconcile only our exited launch, never an unknown/mismatched peer.
+                # Fresh namespace proof must exclude another owner or any endpoint.
+                diagnostic = None
+                try:
+                    terminal_store = RuntimeStateStore(self.layout)
+                    terminal_owner = terminal_store.acquire(create=False)
+                    if terminal_owner is not None:
+                        with terminal_owner:
+                            terminal_owner.require_no_endpoint()
+                            diagnostic = _read_startup_result(result_read, result_bytes, expected)
+                except (ControlFault, OSError):
+                    pass
+                if diagnostic is not None and diagnostic.error is not None:
+                    return control_failure(diagnostic.error)
             return control_failure(
                 error.code if isinstance(error, ControlFault) else "runtime_start_failed"
             )
@@ -263,7 +324,7 @@ class RuntimeController:
         if identity is None:
             return control_failure("runtime_stop_unconfirmed")
         try:
-            store = RuntimeStateStore(self.layout)
+            store = _stop_store(self.layout, deadline)
             client = ControlClient(self.layout, store.read_credential())
             with client.connect(deadline) as connection:
                 if connection.peer_pid != identity.pid:

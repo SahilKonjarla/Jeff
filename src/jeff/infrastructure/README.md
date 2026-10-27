@@ -1,10 +1,14 @@
 # Infrastructure — tier 2
 
-**Status:** M01 storage plus M02 paths/private state, lifetime ownership and real authenticated control IPC/process adapters implemented. Private settings and SQLite registry/schema readiness are implemented in M02 slice 3. Checkpoints A/B add internal init/config/both-question RPC, receipts and guarded identity/partial-write handling. Public lifecycle/routing and full dispatcher readiness are now wired at C. General execution isolation and stale recovery remain unimplemented.
+**Status:** M01 storage plus M02 paths/private state, lifetime ownership and real authenticated control IPC/process adapters implemented. Private settings and SQLite registry/schema readiness are implemented in M02 slice 3. Checkpoints A/B add internal init/config/both-question RPC, receipts and guarded identity/partial-write handling. Public lifecycle/routing and full dispatcher readiness are now wired at C. Read-only doctor now covers absent/stopped and authenticated cached live diagnostics. General execution isolation and stale/crash recovery remain unimplemented.
 
 **Ownership:** `project_files.py` provides `FileProjectStore.initialize(Project) -> (Project, created)` and `read(root) -> Project` for the application storage port. Policy decisions belong in application; Git discovery belongs in integrations.
 
 **Dependencies:** application contracts/domain, standard library, and PyYAML. No clients, bootstrap, or sibling integration implementations.
+
+## Read-only diagnostics
+
+`runtime_diagnostics` owns one5s deadline and finite fact/error projection, never lifecycle mutation. `RuntimeStateStore.diagnostic_observation` pins a non-creating O_RDONLY anchor/namespace; free observations retain a shared lock, held observations must remain genuinely conflicting around native/authenticated control. Its stopped lease retains checked read-only settings/database observations and invalidates them on exit. Existing strict parsing and immutable header/catalog/ledger inspection run only stopped, under that lease and without sidecars. Live diagnostics use `runtime_ipc.inspect_control` and the existing checked credential/native client to read cached status; no client SQLite/settings-content read, second SQL owner, retention work, key minting or action replay. Namespace/owner changes discard live facts. Pathname/ACL/hostile-same-user and OS syscall real-time limitations remain explicit.
 
 ## Configuration and flow
 

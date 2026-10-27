@@ -149,6 +149,82 @@ class DiagnosticLease:
             raise ControlFault("runtime_inspection_failed") from None
 
 
+class DiagnosticObservation:
+    """Pinned existing lock namespace; free holds SH, held never impersonates ownership."""
+
+    def __init__(
+        self, store: "RuntimeStateStore", fd: int, root: int, deadline: float, held: bool
+    ) -> None:
+        self._store, self._fd, self._root = store, fd, root
+        self._deadline, self._held = deadline, held
+        self._issued_lease: DiagnosticLease | None = None
+        self._endpoint = self._endpoint_identity()
+
+    @property
+    def held(self) -> bool:
+        return self._held
+
+    @property
+    def has_endpoint(self) -> bool:
+        return self._endpoint is not None
+
+    def _endpoint_identity(self) -> tuple[int, ...] | None:
+        try:
+            info = os.stat("daemon.sock", dir_fd=self._root, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not (
+            stat.S_ISSOCK(info.st_mode)
+            and info.st_uid == self._store.layout.uid
+            and stat.S_IMODE(info.st_mode) == 0o600
+            and info.st_nlink == 1
+        ):
+            raise ControlFault("unsafe_runtime_path")
+        return _identity(info)
+
+    def check(self) -> None:
+        if time.monotonic() >= self._deadline:
+            raise DiagnosticDeadlineExceeded
+        if self._fd < 0:
+            raise ControlFault("runtime_ownership_unconfirmed")
+        try:
+            with self._store.directory(self._store.layout.runtime_dir, create=False) as root:
+                if _identity(os.fstat(root)) != _identity(os.fstat(self._root)):
+                    raise ControlFault("runtime_ownership_unconfirmed")
+                held = os.fstat(self._fd)
+                current = os.stat("daemon.lock", dir_fd=root, follow_symlinks=False)
+                if not (
+                    _private_file(held, self._store.layout.uid, 0)
+                    and _private_file(current, self._store.layout.uid, 0)
+                    and _identity(held) == _identity(current)
+                ):
+                    raise ControlFault("runtime_ownership_unconfirmed")
+                if self._endpoint_identity() != self._endpoint:
+                    raise ControlFault("runtime_ownership_unconfirmed")
+                if self.held:
+                    try:
+                        fcntl.flock(self._fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass
+                    else:
+                        # This description now holds SH; context close releases ONLY our copy.
+                        raise ControlFault("runtime_ownership_unconfirmed")
+        except OSError:
+            raise ControlFault("runtime_ownership_unconfirmed") from None
+        if time.monotonic() >= self._deadline:
+            raise DiagnosticDeadlineExceeded
+
+    def stopped_lease(self) -> DiagnosticLease:
+        self.check()
+        if self.held:
+            raise ControlFault("runtime_ownership_unconfirmed")
+        if self._endpoint is not None:
+            raise ControlFault("runtime_endpoint_collision")
+        if self._issued_lease is None:
+            self._issued_lease = DiagnosticLease(self._store, self._fd, self._root, self._deadline)
+        return self._issued_lease
+
+
 class Ownership:
     """An actual acquired descriptor; close duplicates, NEVER unlock the shared description."""
 
@@ -297,8 +373,8 @@ class RuntimeStateStore:
             raise ControlFault("runtime_inspection_failed") from None
 
     @contextmanager
-    def diagnostic_lease(self, deadline: float) -> Iterator[DiagnosticLease]:
-        """Non-creating O_RDONLY shared flock; never start, mint authority or unlink."""
+    def diagnostic_observation(self, deadline: float) -> Iterator[DiagnosticObservation]:
+        """Non-creating O_RDONLY held/free observation; not mutable lifetime authority."""
         if time.monotonic() >= deadline:
             raise DiagnosticDeadlineExceeded
         with self.directory(self.layout.runtime_dir, create=False) as root:
@@ -308,23 +384,39 @@ class RuntimeStateStore:
                 raise ControlFault("runtime_absent") from None
             except OSError:
                 raise ControlFault("runtime_inspection_failed") from None
-            lease = DiagnosticLease(self, fd, root, deadline)
+            observation: DiagnosticObservation | None = None
             try:
                 info = os.fstat(fd)
                 if not _private_file(info, self.layout.uid, 0):
                     raise ControlFault("unsafe_runtime_path")
+                held = False
                 try:
                     fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 except BlockingIOError:
-                    raise ControlFault("runtime_ownership_unconfirmed") from None
-                lease.check()
-                yield lease
-                lease.check()
+                    held = True
+                observation = DiagnosticObservation(self, fd, root, deadline, held)
+                observation.check()
+                yield observation
+                observation.check()
             except OSError:
                 raise ControlFault("runtime_inspection_failed") from None
             finally:
-                lease._fd = -1
+                if observation is not None:
+                    observation._fd = -1
+                    if observation._issued_lease is not None:
+                        observation._issued_lease._fd = -1
                 os.close(fd)
+
+    @contextmanager
+    def diagnostic_lease(self, deadline: float) -> Iterator[DiagnosticLease]:
+        """Non-creating shared lease retained continuously through stopped reads."""
+        with self.diagnostic_observation(deadline) as observation:
+            lease = observation.stopped_lease()
+            try:
+                yield lease
+                lease.check()
+            finally:
+                lease._fd = -1
 
     def acquire(self, *, create: bool) -> Ownership | None:
         """None means a real conflicting flock; absence is a separate safe fault."""

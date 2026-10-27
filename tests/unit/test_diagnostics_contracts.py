@@ -11,6 +11,7 @@ from jeff.application.diagnostics import (
     DoctorCheck,
     DoctorReport,
     DoctorResult,
+    DoctorRuntimeData,
     doctor_result,
     unavailable_doctor,
 )
@@ -155,6 +156,92 @@ def test_valid_oversized_configuration_uses_finite_marker_not_active_retention()
     result = doctor_result(DoctorReport.model_validate(payload))
     assert result.ok and result.data.runtime is None
     assert result.data.configured_retention_days == "above_report_limit"
+
+
+def live_payload() -> dict[str, Any]:
+    return {
+        "state": "running",
+        "identity": {"instance_id": "00000000-0000-4000-8000-000000000001", "pid": 1},
+        "control_ready": True,
+        "application_ready": True,
+        "available_operations": [
+            "ask.branch",
+            "ask.changes",
+            "init",
+            "config",
+            "receipt.inspect",
+            "activity.trace",
+            "activity.replay",
+            "debug.last",
+            "history.list",
+            "activity.subscribe",
+        ],
+        "storage_state": "ready",
+        "storage_error": None,
+        "active_retention_days": 30,
+        "settings_source": "existing_file",
+    }
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"active_retention_days": 2**63},
+        {"active_retention_days": 0},
+        {"active_retention_days": None},
+        {"settings_source": None},
+        {"state": "stopped"},
+        {"control_ready": False},
+        {"storage_error": "storage_failed"},
+        {"raw_config": "SYNTHETIC_PRIVATE"},
+        {"available_operations": ["ask.branch"]},
+        {"available_operations": ["ask.branch"] * 10},
+    ],
+)
+def test_live_projection_is_bounded_and_coherent(change: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        DoctorRuntimeData.model_validate({**live_payload(), **change})
+
+
+@pytest.mark.parametrize("change", ["absent", "not_ready", "schema", "configured", "capability"])
+def test_healthy_summary_requires_verified_current_full_readiness(change: str) -> None:
+    value = stopped_payload()
+    value.update(
+        summary="healthy",
+        settings_schema_version=None,
+        configured_retention_days=None,
+        runtime=live_payload(),
+    )
+    if change == "absent":
+        value["runtime"] = None
+    elif change == "not_ready":
+        value["runtime"]["application_ready"] = False
+    elif change == "schema":
+        value["database_schema_version"] = 3
+    elif change == "configured":
+        value.update(settings_schema_version=1, configured_retention_days=17)
+    else:
+        value["runtime"]["available_operations"].remove("activity.subscribe")
+    with pytest.raises(ValidationError):
+        DoctorReport.model_validate(value)
+
+
+def test_stopping_cache_can_be_retained_only_as_unavailable_not_healthy() -> None:
+    value = unavailable_doctor().data.model_dump(mode="json")
+    value["runtime"] = {
+        **live_payload(),
+        "state": "stopping",
+        "control_ready": False,
+        "application_ready": False,
+        "available_operations": [],
+        "storage_state": "closing",
+        "active_retention_days": None,
+        "settings_source": None,
+    }
+    result = doctor_result(DoctorReport.model_validate(value))
+    assert not result.ok and result.data.runtime is not None
+    assert result.data.runtime.state.value == "stopping"
+    assert len(result.model_dump_json().encode()) < 8192
 
 
 def forbidden() -> NoReturn:

@@ -1,8 +1,8 @@
 # Interfaces — tier 3
 
-**Status:** public CLI start/stop, runtime-aware status and authenticated daemon-dependent init/config/both Git questions are implemented in M02 slice 4 C. Slice5 B adds scoped read-only `history` and `debug last` over authenticated wire5/schema3. Slice5 C adds installed-client subscriptions without changing this CLI or adding follow/watch verbs. Desktop, voice, MCP, general execution, expiry and doctor remain unimplemented.
+**Status:** public CLI start/stop, runtime-aware status and authenticated daemon-dependent init/config/both Git questions are implemented in M02 slice 4 C. Slice5 B adds scoped read-only `history` and `debug last` over authenticated wire5/schema3. Slice5 C adds installed-client subscriptions without changing this CLI or adding follow/watch verbs. Current wire6/schema4/settings1 also has bounded retention and read-only doctor; desktop, voice, MCP, general execution and stale/crash recovery remain unimplemented.
 
-**Ownership:** `cli.py` renders application results. `create_app(client_factory, control_factory)` accepts lazy application-owned `ProjectClient`/`RuntimeControl` factories; no concrete adapters, Git/storage imports, autostart or local action fallback.
+**Ownership:** `cli.py` renders application results. `create_app(client_factory, control_factory, diagnostics_factory=None)` accepts lazy application-owned project/control/diagnostics factories (two-argument callers remain supported); no concrete adapters, Git/storage imports, autostart or local action fallback.
 
 After [installation](../../../README.md):
 
@@ -20,7 +20,7 @@ jeff history --limit 50 --json
 jeff stop --json
 ```
 
-Start/stop work outside Git. Help, command help and syntax do not invoke factories or select runtime paths. While stopped, init/config/ask fail with `daemon_not_running` without project/ignore/registry writes. Status locally validates registration, then obtains read-only runtime facts; it works stopped and never implicitly indexes/initializes. Invalid/unregistered projects retain their errors before runtime selection.
+Start/stop/doctor work outside Git. `doctor [--json]` renders the seven-check bounded application report with exit0 for healthy/stopped/uninitialized,1 for required fault/uncertainty and2 for syntax. Live output labels cached active retention; stopped output labels configured retention inactive. No lifecycle/repair action, raw paths/settings/keys, direct SQL or Git execution is added to presentation. Missing optional diagnostics composition returns explicit unavailable rather than fabricated health. Help, command help and syntax do not invoke factories or select runtime paths. While stopped, init/config/ask fail with `daemon_not_running` without project/ignore/registry writes. Status locally validates registration, then obtains read-only runtime facts; it works stopped and never implicitly indexes/initializes. Invalid/unregistered projects retain their errors before runtime selection.
 
 Init/config/ask keep their existing result bodies. Status adds `data.runtime` to the identity fields. Lifecycle uses its own typed control result; start waits for full authenticated dispatcher/storage readiness, stop confirms actual native exit and released ownership. Acknowledgement/caller cancellation alone is not completion.
 

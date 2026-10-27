@@ -1,10 +1,14 @@
 # Application — tier 1
 
-**Status:** M01 project/Git use cases and M02 runtime/control contracts implemented. Actual internal control lifecycle exists in adapters; public CLI routing, arbitrary execution and approvals remain later work. M02 slice 3 adds separate storage readiness and validated registry use cases.
+**Status:** M01 project/Git use cases and M02 runtime/control contracts implemented. Public CLI lifecycle/project routing, scoped history/debug/subscriptions/retention and read-only doctor contracts are implemented. Arbitrary execution and approvals remain later work. Runtime values distinguish control/storage/full readiness and validated registry use cases.
 
 **Ownership:** `projects.py` contains `ProjectService`, discovery/storage protocols, and Pydantic result contracts. Filesystem operations, YAML, Git subprocesses, and presentation belong elsewhere.
 
 **Dependencies:** domain, application-owned contracts, standard library, and Pydantic. No concrete adapters, SDKs, subprocesses, clients, or bootstrap imports.
+
+## Read-only doctor interface
+
+`diagnostics.RuntimeDiagnostics.inspect() -> DoctorResult` exposes seven ordered checks, bounded finite reasons, coherent summary/error data and optional authenticated `DoctorRuntimeData`. The command-specific failure retains its report; generic Failure/control/project envelopes are unchanged. Healthy requires current full readiness including all ten operations; stopped requires validated current settings/schema without invented live identity. Configured inactive and cached active retention are distinct, positive int64 or `above_report_limit`; the result is capped at8KiB. Concrete ownership/credential/SQLite/IPC behavior stays in infrastructure and is composed lazily by bootstrap. Doctor is not recovery or arbitrary integrity inspection.
 
 ## Public interface
 
@@ -18,7 +22,7 @@
 
 **Flow:** bind root through discovery → initialize or inspect through storage → reject a mismatched identity/root → return typed public fields. Initialization generates an ID only for new registration. Config/status return an actionable error for unregistered projects; they do not register them implicitly.
 
-JSON results contain `ok`, `data`, and `error`. Success data includes `project_id`, canonical `root`, `config_path`, `registered: true`, and `created`. Failures contain only a stable error code and safe message. Unknown settings and raw adapter failures never enter the public result. Models forbid extra result fields; no runtime events are emitted yet.
+JSON results contain `ok`, `data`, and `error`. Success data includes `project_id`, canonical `root`, `config_path`, `registered: true`, and `created`. Failures contain only a stable error code and safe message. Unknown settings and raw adapter failures never enter the public result. Models forbid extra result fields; request activity is emitted through the dispatcher journal, not by direct ProjectService calls.
 
 ## Repository question interface
 

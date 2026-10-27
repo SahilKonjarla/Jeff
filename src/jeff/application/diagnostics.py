@@ -4,7 +4,9 @@ from typing import Annotated, Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
-from jeff.application.runtime import ControlObservation, RuntimePathInspection
+from jeff.application.runtime import ProjectCapability, RuntimeIdentityData, RuntimePathInspection
+from jeff.application.storage import StorageIssueCode
+from jeff.domain.runtime import RuntimeState
 
 DoctorName = Literal["platform", "python", "git", "paths", "runtime", "settings", "storage"]
 DOCTOR_CHECKS: tuple[DoctorName, ...] = (
@@ -40,6 +42,19 @@ DoctorReason = Literal[
     "storage_recovery_required",
     "storage_busy",
     "storage_failed",
+    "runtime_authentication_failed",
+    "runtime_protocol_incompatible",
+    "runtime_protocol_error",
+    "runtime_peer_unverified",
+    "runtime_handshake_unconfirmed",
+    "runtime_unreachable",
+    "runtime_busy",
+    "runtime_capability_unavailable",
+    "runtime_not_ready",
+    "runtime_stopping",
+    "storage_not_ready",
+    "storage_closing",
+    "storage_outcome_unconfirmed",
 ]
 ConfiguredRetentionDays = (
     Annotated[StrictInt, Field(gt=0, le=9223372036854775807)] | Literal["above_report_limit"]
@@ -65,12 +80,62 @@ class DoctorCheck(_DoctorModel):
         return self
 
 
+class DoctorRuntimeData(_DoctorModel):
+    """Authenticated cached facts only; bounded independently of wire readiness values."""
+
+    state: Literal[RuntimeState.RUNNING, RuntimeState.STOPPING]
+    identity: RuntimeIdentityData
+    control_ready: StrictBool
+    application_ready: StrictBool
+    available_operations: tuple[ProjectCapability, ...] = Field(max_length=10)
+    storage_state: Literal["not_checked", "initializing", "ready", "failed", "closing"]
+    storage_error: StorageIssueCode | None = None
+    active_retention_days: ConfiguredRetentionDays | None = None
+    settings_source: Literal["default_file", "existing_file"] | None = None
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        if self.control_ready != (self.state == RuntimeState.RUNNING):
+            raise ValueError("Only running control is ready.")
+        if len(set(self.available_operations)) != len(self.available_operations):
+            raise ValueError("Capabilities cannot be duplicated.")
+        has_facts = self.active_retention_days is not None and self.settings_source is not None
+        any_facts = self.active_retention_days is not None or self.settings_source is not None
+        if (self.storage_state == "ready" and not has_facts) or (
+            self.storage_state != "ready" and any_facts
+        ):
+            raise ValueError("Only ready cached storage has complete active facts.")
+        if (self.storage_state == "failed") != (self.storage_error is not None):
+            raise ValueError("Only failed storage carries an error.")
+        if self.available_operations and not (self.control_ready and self.storage_state == "ready"):
+            raise ValueError("Capabilities require ready control and storage.")
+        if self.application_ready and not (
+            self.control_ready
+            and self.storage_state == "ready"
+            and set(self.available_operations)
+            == {
+                "ask.branch",
+                "ask.changes",
+                "init",
+                "config",
+                "receipt.inspect",
+                "activity.trace",
+                "activity.replay",
+                "debug.last",
+                "history.list",
+                "activity.subscribe",
+            }
+        ):
+            raise ValueError("Full doctor readiness requires all supported operations.")
+        return self
+
+
 class DoctorReport(_DoctorModel):
     summary: Literal[
         "healthy", "stopped", "uninitialized", "unhealthy", "unavailable", "unsupported"
     ]
     checks: tuple[DoctorCheck, ...] = Field(min_length=7, max_length=7)
-    runtime: ControlObservation | None = None
+    runtime: DoctorRuntimeData | None = None
     paths: RuntimePathInspection | None = None
     settings_schema_version: StrictInt | None = Field(default=None, ge=1, le=1)
     configured_retention_days: ConfiguredRetentionDays | None = None
@@ -102,6 +167,16 @@ class DoctorReport(_DoctorModel):
             raise ValueError(
                 "Stopped health requires current validated facts without live identity."
             )
+        if self.runtime is not None and (
+            self.settings_schema_version is not None or self.configured_retention_days is not None
+        ):
+            raise ValueError("Live cached facts cannot claim on-disk configured settings.")
+        if self.summary == "healthy" and (
+            self.runtime is None
+            or not self.runtime.application_ready
+            or self.database_schema_version != 4
+        ):
+            raise ValueError("Healthy requires authenticated full cached readiness.")
         return self
 
 
@@ -135,6 +210,8 @@ class DoctorResult(_DoctorModel):
             unavailable = self.data.summary == "unavailable"
             if unavailable != (self.error.code == "doctor_unavailable"):
                 raise ValueError("Diagnostic error must match the report summary.")
+        if len(self.model_dump_json().encode("utf-8")) > 8192:
+            raise ValueError("Diagnostic report exceeds its public output budget.")
         return self
 
 

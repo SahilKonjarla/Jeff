@@ -62,9 +62,24 @@ def create_app(
         json_output: bool,
     ) -> None:
         if json_output:
-            typer.echo(json.dumps(result.model_dump(mode="json"), ensure_ascii=True))
+            typer.echo(
+                json.dumps(
+                    result.model_dump(mode="json"),
+                    ensure_ascii=True,
+                    separators=(",", ":") if isinstance(result, DoctorResult) else None,
+                )
+            )
         elif isinstance(result, DoctorResult):
             typer.echo(f"Doctor: {result.data.summary}")
+            if result.data.runtime is not None:
+                runtime_data = result.data.runtime
+                typer.echo(f"Runtime: {runtime_data.state.value}")
+                if runtime_data.active_retention_days is not None:
+                    typer.echo(f"Active retention days: {runtime_data.active_retention_days}")
+            if result.data.configured_retention_days is not None:
+                typer.echo(
+                    f"Configured retention days (inactive): {result.data.configured_retention_days}"
+                )
             for check in result.data.checks:
                 suffix = f" ({check.code})" if check.code is not None else ""
                 typer.echo(f"{check.name}: {check.status}{suffix}")

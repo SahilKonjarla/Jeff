@@ -16,11 +16,18 @@ import pytest
 from jeff.application.projects import Failure
 from jeff.application.runtime import (
     ControlFault,
+    ControlObservation,
     ControlSuccess,
     RuntimeIdentityData,
     RuntimeLayout,
 )
-from jeff.infrastructure.runtime_ipc import ControlClient, encode_message, peer_identity
+from jeff.infrastructure import runtime_paths, runtime_process
+from jeff.infrastructure.runtime_ipc import (
+    ControlClient,
+    ControlConnection,
+    encode_message,
+    peer_identity,
+)
 from jeff.infrastructure.runtime_process import RuntimeController
 from jeff.infrastructure.runtime_state import RuntimeStateStore
 
@@ -67,6 +74,113 @@ def installation(
         )
     layout.credential.unlink(missing_ok=True)
     layout.socket.unlink(missing_ok=True)
+
+
+def test_stop_retries_real_directory_entry_churn_without_resending_stop(
+    installation: RuntimeLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller = RuntimeController(installation)
+    assert isinstance(controller.start(), ControlSuccess)
+    original_status = RuntimeController.status
+    original_chain = runtime_paths._chain_stable
+    original_request = ControlConnection.request
+    after_status = False
+    injected = False
+    rejected = False
+    stop_requests = 0
+
+    def status(self: RuntimeController) -> ControlSuccess | Failure:
+        nonlocal after_status
+        result = original_status(self)
+        after_status = True
+        return result
+
+    def chain(entries: list[tuple[int, str, os.stat_result]]) -> bool:
+        nonlocal injected, rejected
+        if after_status and not injected and entries[-1][1] == installation.data_dir.name:
+            parent, name, before = entries[-1]
+            directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                actual = os.fstat(directory)
+                assert (actual.st_dev, actual.st_ino) == (before.st_dev, before.st_ino)
+                marker = os.open(
+                    "metadata-churn",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory,
+                )
+                os.close(marker)
+                injected = True
+            finally:
+                os.close(directory)
+            result = original_chain(entries)
+            rejected = not result
+            return result
+        return original_chain(entries)
+
+    def request(
+        self: ControlConnection, operation: Any, expected_instance_id: UUID | None = None
+    ) -> ControlObservation:
+        nonlocal stop_requests
+        if operation == "stop":
+            stop_requests += 1
+        return original_request(self, operation, expected_instance_id)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(RuntimeController, "status", status)
+        patch.setattr(runtime_paths, "_chain_stable", chain)
+        patch.setattr(ControlConnection, "request", request)
+        result = controller.stop()
+    assert injected and rejected, "Actual benign entry churn must reject the first snapshot"
+    assert isinstance(result, ControlSuccess), result
+    assert stop_requests == 1
+    assert controller._child is not None and controller._child.poll() == 0
+
+
+@pytest.mark.parametrize("code", ["runtime_inspection_failed", "unsafe_runtime_path"])
+def test_stop_preparation_bounds_transient_retry_and_preserves_unsafe_failure(
+    installation: RuntimeLayout, monkeypatch: pytest.MonkeyPatch, code: Any
+) -> None:
+    now = 0.0
+    attempts = 0
+
+    def clock() -> float:
+        return now
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        assert 0 < seconds <= 0.02
+        now += seconds
+
+    def refused(layout: RuntimeLayout) -> RuntimeStateStore:
+        nonlocal attempts
+        attempts += 1
+        raise ControlFault(code)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime_process, "RuntimeStateStore", refused)
+        patch.setattr(time, "monotonic", clock)
+        patch.setattr(time, "sleep", sleep)
+        with pytest.raises(ControlFault) as failed:
+            runtime_process._stop_store(installation, 0.05)
+    if code == "unsafe_runtime_path":
+        assert failed.value.code == code and attempts == 1 and now == 0
+    else:
+        assert failed.value.code == "runtime_stop_unconfirmed"
+        assert attempts == 3 and now == 0.05
+
+
+def test_expired_stop_preparation_does_not_attempt_metadata(
+    installation: RuntimeLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(layout: RuntimeLayout) -> RuntimeStateStore:
+        raise AssertionError("Expired preparation must not touch the namespace")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime_process, "RuntimeStateStore", forbidden)
+        with pytest.raises(ControlFault) as failed:
+            runtime_process._stop_store(installation, time.monotonic() - 1)
+    assert failed.value.code == "runtime_stop_unconfirmed"
 
 
 def test_controller_start_status_stop_and_repeat_start_use_one_real_owner(

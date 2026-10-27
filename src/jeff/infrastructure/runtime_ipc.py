@@ -2,6 +2,7 @@
 
 import asyncio
 import ctypes
+import errno
 import hmac
 import json
 import math
@@ -78,6 +79,13 @@ class RpcRequest(
     pass
 
 
+class _PeerDisconnected(ControlFault):
+    """Kernel reports a gone connection, not a verified or mismatched identity."""
+
+    def __init__(self) -> None:
+        super().__init__("runtime_peer_unverified")
+
+
 def peer_identity(connection: socket.socket) -> tuple[int, int]:
     """Darwin getpeereid(int, uint32_t*, uint32_t*) and LOCAL_PEERPID=2 (SDK sys/un.h).
 
@@ -95,12 +103,18 @@ def peer_identity(connection: socket.socket) -> tuple[int, int]:
         function.restype = ctypes.c_int
         uid, gid = ctypes.c_uint32(), ctypes.c_uint32()
         if function(connection.fileno(), ctypes.byref(uid), ctypes.byref(gid)) != 0:
+            if ctypes.get_errno() == errno.ENOTCONN:
+                raise _PeerDisconnected()
             raise ControlFault("runtime_peer_unverified")
         pid = connection.getsockopt(0, 2)
         if pid <= 0:
             raise ControlFault("runtime_peer_unverified")
         return uid.value, pid
-    except (AttributeError, OSError):
+    except OSError as error:
+        if error.errno == errno.ENOTCONN:
+            raise _PeerDisconnected() from None
+        raise ControlFault("runtime_peer_unverified") from None
+    except AttributeError:
         raise ControlFault("runtime_peer_unverified") from None
 
 
@@ -312,6 +326,15 @@ class ControlClient:
     ) -> ControlObservation:
         with self.connect(deadline) as connection:
             return connection.request(operation, expected_instance_id)
+
+
+def inspect_control(layout: RuntimeLayout, deadline: float) -> ControlObservation:
+    """Diagnostic status via existing safe credential/native client; no lifecycle/SQL I/O."""
+    _remaining(deadline)
+    store = RuntimeStateStore(layout)
+    client = ControlClient(layout, store.read_credential())
+    _remaining(deadline)
+    return client.request("status", deadline=deadline)
 
 
 class OwnedActivityStream:

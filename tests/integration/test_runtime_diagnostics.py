@@ -12,6 +12,7 @@ from typing import Literal
 
 import pytest
 
+from jeff.application.diagnostics import DiagnosticDeadlineExceeded
 from jeff.application.runtime import ControlFault, RuntimeLayout
 from jeff.infrastructure.runtime_diagnostics import RuntimeDiagnosticsAdapter
 from jeff.infrastructure.runtime_state import RuntimeStateStore
@@ -288,3 +289,98 @@ def test_boundary_race_or_deadline_discards_stopped_facts(
     assert str(stopped.data_dir) not in result.model_dump_json()
     assert hashlib.sha256(stopped.database.read_bytes()).hexdigest() == database_before
     assert not list(stopped.data_dir.glob("state.sqlite3-*"))
+
+
+@pytest.mark.parametrize("fault", ["missing", "invalid", "timeout"])
+def test_git_process_boundary_failures_are_bounded_and_private(
+    stopped: RuntimeLayout,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    import subprocess
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if fault == "missing":
+            raise FileNotFoundError("SYNTHETIC_PRIVATE_TOOL")
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired("SYNTHETIC_PRIVATE_TOOL", 5)
+        return subprocess.CompletedProcess(["git"], 0, b"SYNTHETIC_PRIVATE_TOOL", b"PRIVATE_STDERR")
+
+    before = snapshot(stopped)
+    with monkeypatch.context() as seam:
+        seam.setattr(subprocess, "run", run)
+        result = RuntimeDiagnosticsAdapter(lambda: stopped).inspect()
+    assert not result.ok
+    assert result.data.summary == ("unavailable" if fault == "timeout" else "unhealthy")
+    assert (
+        result.data.checks[2].code
+        == {
+            "missing": "git_unavailable",
+            "invalid": "git_probe_failed",
+            "timeout": "diagnostic_deadline_exceeded",
+        }[fault]
+    )
+    assert "PRIVATE" not in result.model_dump_json()
+    assert snapshot(stopped) == before
+
+
+@pytest.mark.parametrize("fault", ["platform", "python"])
+def test_unsupported_host_inputs_are_not_platform_validation(
+    stopped: RuntimeLayout,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    import sys
+
+    with monkeypatch.context() as seam:
+        if fault == "platform":
+            seam.setattr(sys, "platform", "linux")
+        else:
+            seam.setattr(sys, "version_info", (3, 11, 0))
+        result = RuntimeDiagnosticsAdapter(lambda: stopped).inspect()
+    assert not result.ok and result.data.summary == "unsupported"
+    assert result.data.checks[0 if fault == "platform" else 1].code == (
+        "unsupported_runtime_platform" if fault == "platform" else "python_unsupported"
+    )
+
+
+def test_readonly_observer_does_not_confuse_owner_exit_with_a_held_lock(
+    stopped: RuntimeLayout,
+) -> None:
+    store = RuntimeStateStore(stopped)
+    owner = store.acquire(create=False)
+    assert owner is not None
+    try:
+        with pytest.raises(ControlFault) as changed:
+            with store.diagnostic_observation(time.monotonic() + 5) as observed:
+                assert observed.held and not observed.has_endpoint
+                owner.close()
+                observed.check()
+        assert changed.value.code == "runtime_ownership_unconfirmed"
+    finally:
+        owner.close()
+    again = store.acquire(create=False)
+    assert again is not None
+    again.close()
+
+
+def test_issued_stopped_lease_is_invalidated_when_observation_exits(stopped: RuntimeLayout) -> None:
+    store = RuntimeStateStore(stopped)
+    with store.diagnostic_observation(time.monotonic() + 5) as observation:
+        assert not observation.held
+        lease = observation.stopped_lease()
+        lease.check()
+    with pytest.raises(ControlFault) as closed:
+        lease.check()
+    assert closed.value.code == "runtime_ownership_unconfirmed"
+    owner = store.acquire(create=False)
+    assert owner is not None
+    owner.close()
+
+
+def test_observer_honors_expired_shared_deadline_without_creating(stopped: RuntimeLayout) -> None:
+    before = snapshot(stopped)
+    with pytest.raises(DiagnosticDeadlineExceeded):
+        with RuntimeStateStore(stopped).diagnostic_observation(time.monotonic() - 1):
+            pytest.fail("Expired operation must not obtain a lease")
+    assert snapshot(stopped) == before
