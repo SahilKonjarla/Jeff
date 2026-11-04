@@ -41,8 +41,8 @@ def child_environment(layout: RuntimeLayout) -> dict[str, str]:
     }
 
 
-class _ReadinessReleased(ControlFault):
-    """Authenticated peer observed before its valid lifetime anchor became free."""
+class _ReadinessEnded(ControlFault):
+    """Authenticated peer is stopping, or its valid lifetime anchor became free."""
 
     def __init__(self, identity: RuntimeIdentityData | None) -> None:
         super().__init__("runtime_ownership_unconfirmed")
@@ -106,11 +106,13 @@ class RuntimeController:
             operation, deadline=deadline
         )
         if observation.state != RuntimeState.RUNNING or not observation.control_ready:
+            if observation.state == RuntimeState.STOPPING:
+                raise _ReadinessEnded(observation.identity)
             raise ControlFault("runtime_ownership_unconfirmed")
         probe = store.acquire(create=False)
         if probe is not None:
             probe.close()
-            raise _ReadinessReleased(observation.identity)
+            raise _ReadinessEnded(observation.identity)
         return observation
 
     def start(self) -> ControlSuccess | Failure:
@@ -161,6 +163,7 @@ class RuntimeController:
             if owner is None:
                 raise ControlFault("runtime_start_timeout")
             if owner is not None:
+                owner.prepare_endpoint(ready_deadline)
                 owner.require_no_endpoint()
                 store.credential(owner)
                 expected = uuid4()
@@ -258,7 +261,7 @@ class RuntimeController:
                 and (
                     isinstance(error, _PeerDisconnected)
                     or (
-                        isinstance(error, _ReadinessReleased)
+                        isinstance(error, _ReadinessEnded)
                         and error.identity is not None
                         and error.identity.instance_id == expected
                         and error.identity.pid == spawned.pid

@@ -1,5 +1,7 @@
 """Native control sockets and actual owned child processes, never user installations."""
 
+from __future__ import annotations
+
 import hashlib
 import os
 import socket
@@ -74,6 +76,56 @@ def installation(
         )
     layout.credential.unlink(missing_ok=True)
     layout.socket.unlink(missing_ok=True)
+
+
+def test_real_runtime_publishes_endpoint_proof_before_ready_and_removes_it_on_stop(
+    installation: RuntimeLayout,
+) -> None:
+    controller = RuntimeController(installation)
+    try:
+        result = controller.start()
+        assert isinstance(result, ControlSuccess) and result.data.application_ready, result
+        receipt = installation.runtime_dir / "endpoint.json"
+        assert receipt.is_file() and 0 < receipt.stat().st_size <= 2048
+        assert receipt.stat().st_mode & 0o7777 == 0o600 and receipt.stat().st_nlink == 1
+        assert isinstance(controller.stop(), ControlSuccess)
+        assert not receipt.exists() and not installation.socket.exists()
+        assert installation.lock.exists() and installation.credential.exists()
+    finally:
+        assert isinstance(controller.stop(), ControlSuccess)
+
+
+def test_native_publication_io_failure_never_claims_ready(
+    installation: RuntimeLayout,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = subprocess.Popen
+    script = (
+        "import os,errno\n"
+        "original=os.link\n"
+        "def link(src,dst,**kwargs):\n"
+        " if dst=='endpoint.json':raise OSError(errno.EIO,'SYNTHETIC_PUBLICATION_IO')\n"
+        " return original(src,dst,**kwargs)\n"
+        "os.link=link\n"
+        "from jeff.bootstrap.runtime import main\n"
+        "raise SystemExit(main())\n"
+    )
+
+    def launch(command: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        assert command[3:5] == ["-m", "jeff.bootstrap.runtime"]
+        return original([*command[:3], "-c", script, *command[5:]], **kwargs)
+
+    controller = RuntimeController(installation)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "Popen", launch)
+            result = controller.start()
+        assert isinstance(result, Failure), result
+        assert controller._child is not None and controller._child.poll() is not None
+        assert not installation.socket.exists() and not installation.endpoint_receipt.exists()
+        assert isinstance(controller.stop(), ControlSuccess)
+    finally:
+        assert isinstance(controller.stop(), ControlSuccess)
 
 
 def test_stop_retries_real_directory_entry_churn_without_resending_stop(

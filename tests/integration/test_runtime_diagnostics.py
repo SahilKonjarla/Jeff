@@ -9,6 +9,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 import pytest
 
@@ -53,6 +54,25 @@ def snapshot(layout: RuntimeLayout) -> dict[str, tuple[int, int, int, int, str |
         for root in (layout.data_dir, layout.runtime_dir)
         for path in (root, *root.rglob("*"))
     }
+
+
+def test_receipt_only_residue_is_read_only_unavailable_not_clean_stopped(
+    stopped: RuntimeLayout,
+) -> None:
+    store = RuntimeStateStore(stopped)
+    owner = store.acquire(create=False)
+    assert owner is not None
+    with owner, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as endpoint:
+        endpoint.bind(str(stopped.socket))
+        stopped.socket.chmod(0o600)
+        owner.publish_endpoint(uuid4(), store.read_credential())
+        endpoint.close()
+        stopped.socket.unlink()  # exact fixture entry: interrupted matching cleanup
+    before = snapshot(stopped)
+    report = RuntimeDiagnosticsAdapter(lambda: stopped).inspect()
+    assert report.data.summary == "unavailable" and report.data.runtime is None
+    assert report.data.checks[4].code == "runtime_endpoint_collision"
+    assert snapshot(stopped) == before
 
 
 def test_shared_diagnostic_lease_excludes_real_owner_and_releases(stopped: RuntimeLayout) -> None:

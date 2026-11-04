@@ -241,6 +241,75 @@ def test_busy_start_preserves_child_diagnostic_when_owner_exits_after_hello(
     assert gated, "The real child-exit/flock boundary must actually be exercised"
 
 
+def test_busy_start_preserves_failure_when_authenticated_reply_is_stopping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
+    owner = RuntimeStateStore(layout).acquire(create=True)
+    assert owner is not None
+    with owner:
+        storage = SQLiteStorage(owner)
+        storage.start()
+        try:
+            assert storage.wait_ready(5).state == "ready"
+        finally:
+            storage.close()
+    marker = tmp_path / "actual-stopping"
+    original_launch = subprocess.Popen
+    original_request = runtime_ipc.ControlConnection.request
+    gated = False
+    script = (
+        "import os\nfrom pathlib import Path\n"
+        "from jeff.infrastructure.runtime_ipc import ControlServer\n"
+        "original=ControlServer.request_stop\n"
+        "def stop(self):\n"
+        " original(self)\n"
+        " if self.storage_snapshot().state=='failed':\n"
+        "  Path(os.environ['JEFF_TEST_STOPPING_MARKER']).touch()\n"
+        "ControlServer.request_stop=stop\n"
+        "from jeff.bootstrap.runtime import main\nraise SystemExit(main())\n"
+    )
+
+    def launch(command: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        assert command[3:5] == ["-m", "jeff.bootstrap.runtime"]
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        kwargs["env"] = {**environment, "JEFF_TEST_STOPPING_MARKER": str(marker)}
+        captured: subprocess.Popen[bytes] = original_launch(  # type: ignore[call-overload]
+            [*command[:3], "-c", script, *command[5:]], **kwargs
+        )
+        return captured
+
+    def request(
+        self: runtime_ipc.ControlConnection,
+        operation: ControlOperation,
+        expected_instance_id: object = None,
+    ) -> ControlObservation:
+        nonlocal gated
+        if operation == "hello" and not gated:
+            while not marker.exists():
+                assert time.monotonic() < self.deadline
+                time.sleep(0.01)
+            gated = True
+        return original_request(self, operation, expected_instance_id)  # type: ignore[arg-type]
+
+    controller = RuntimeController(layout)
+    try:
+        with closing(sqlite3.connect(layout.database, isolation_level=None)) as lock:
+            lock.execute("BEGIN EXCLUSIVE")
+            with monkeypatch.context() as patch:
+                patch.setattr(subprocess, "Popen", launch)
+                patch.setattr(runtime_ipc.ControlConnection, "request", request)
+                result = controller.start()
+            assert gated
+            assert isinstance(result, Failure) and result.error.code == "storage_busy", result
+            lock.execute("ROLLBACK")
+    finally:
+        assert isinstance(controller.stop(), ControlSuccess)
+        layout.credential.unlink(missing_ok=True)
+
+
 @pytest.mark.parametrize(
     "mode",
     [

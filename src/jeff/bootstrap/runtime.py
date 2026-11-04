@@ -126,6 +126,8 @@ async def _serve(
             if serving.done():
                 await serving
             await asyncio.sleep(0.01)
+        if serving.done():
+            await serving  # publication/listener failure cannot become application readiness
         state = storage.snapshot()
         if state.state == "ready" and not server.stopping:
             projects = ProjectService(GitProjectDiscovery(), FileProjectStore())

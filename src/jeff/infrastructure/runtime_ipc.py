@@ -61,7 +61,7 @@ from jeff.application.storage import StorageReadiness
 from jeff.domain.runtime import RuntimeState
 from jeff.infrastructure.runtime_dispatch import RuntimeDispatcher
 from jeff.infrastructure.runtime_events import RuntimeEvents
-from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
+from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore, _EndpointReceipt
 
 
 class RpcRequest(
@@ -872,11 +872,15 @@ class ControlServer:
     async def serve(self) -> None:
         self.owner.require_no_endpoint()
         endpoint = None
+        receipt: _EndpointReceipt | None = None
         server = None
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             listener.bind(str(self.owner.store.layout.socket))
             endpoint = self.owner.endpoint_identity()
+            receipt = self.owner.publish_endpoint(
+                self.identity.instance_id, self._token, endpoint=endpoint
+            )
             listener.setblocking(False)
             server = await asyncio.start_unix_server(
                 self._accept,
@@ -919,4 +923,4 @@ class ControlServer:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
             if endpoint is not None:
-                self.owner.remove_endpoint(endpoint)
+                self.owner.remove_endpoint(endpoint, receipt=receipt, token=self._token)

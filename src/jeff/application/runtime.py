@@ -138,6 +138,10 @@ class RuntimeLayout(_RuntimeModel):
     def lock(self) -> Path:
         return self.runtime_dir / "daemon.lock"
 
+    @property
+    def endpoint_receipt(self) -> Path:
+        return self.runtime_dir / "endpoint.json"
+
 
 class PathObservation(_RuntimeModel):
     role: RuntimePathRole

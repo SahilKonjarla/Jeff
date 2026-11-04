@@ -1,6 +1,6 @@
 # Bootstrap — composition root
 
-**Status:** M02 slice-4 C wires public explicit lifecycle, runtime-aware status and authenticated daemon-dependent project commands. History/debug/events/retention and read-only doctor are now composed as well. Stale/crash recovery, cross-platform proof and full M02 acceptance remain pending.
+**Status:** M02 slice-4 C wires public explicit lifecycle, runtime-aware status and authenticated daemon-dependent project commands. History/debug/events/retention and read-only doctor are now composed as well. Proof-based idle endpoint recovery is wired before accepting clients; hot/active-work crash recovery, cross-platform proof and full M02 acceptance remain pending.
 
 **Ownership:** `main.py` passes lazy `create_project_client`, `create_runtime_controller` and `create_runtime_diagnostics` factories to CLI presentation. No location selection, project discovery, credential read or connection happens for help/syntax. There is no client-local question adapter or fallback path. Only the daemon composes `QuestionService(..., GitRepositoryRead())` after actual storage initialization.
 
