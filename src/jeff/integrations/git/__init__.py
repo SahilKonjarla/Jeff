@@ -2,10 +2,12 @@
 
 import os
 import re
+import select
 import selectors
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from jeff.application.history import GitCategory, GitObservation, GitObserver
@@ -15,6 +17,17 @@ from jeff.domain.repository import BranchState, FileChange, git_exclusions
 GIT_TIMEOUT = 5.0
 GIT_OUTPUT_LIMIT = 1024 * 1024
 MAX_CHANGES = 10_000
+ProcessRunner = Callable[..., subprocess.CompletedProcess[bytes]]
+
+
+class _GitParentGone(Exception):
+    """An inherited liveness capability ended; only the current owner reaps its child."""
+
+
+def _parent_live(fd: int) -> None:
+    if select.select([fd], [], [], 0)[0]:
+        os.read(fd, 1)
+        raise _GitParentGone
 
 
 def _run_git(
@@ -24,14 +37,14 @@ def _run_git(
     deadline: float | None = None,
     observer: GitObserver | None = None,
     category: GitCategory | None = None,
+    process_runner: ProcessRunner | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     began = time.monotonic_ns()
     measured = [0, 0]
     code: str = "git_failed"
     try:
-        result = _run_git_process(
-            executable, directory, *arguments, deadline=deadline, measured=measured
-        )
+        run = process_runner if process_runner is not None else _run_git_process
+        result = run(executable, directory, *arguments, deadline=deadline, measured=measured)
         code = (
             "ok"
             if result.returncode == 0 or (category == "filters.inspect" and result.returncode == 1)
@@ -68,6 +81,8 @@ def _run_git_process(
     *arguments: str,
     deadline: float | None = None,
     measured: list[int] | None = None,
+    _watch_fd: int | None = None,
+    _on_started: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Bound both streams while reading; kill/reap only this owned process on failure."""
     command = [
@@ -99,6 +114,8 @@ def _run_git_process(
     }
     if deadline is not None and deadline <= time.monotonic():
         raise ProjectError("git_timeout", "Git timed out; no command was retried.")
+    if _watch_fd is not None:
+        _parent_live(_watch_fd)
     try:
         with subprocess.Popen(
             command,
@@ -106,10 +123,13 @@ def _run_git_process(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            close_fds=True,
         ) as process:
             if measured is not None:
                 measured[1] = 1
             try:
+                if _on_started is not None:
+                    _on_started()
                 assert process.stdout is not None and process.stderr is not None
                 buffers = {"stdout": bytearray(), "stderr": bytearray()}
                 total = 0
@@ -121,14 +141,20 @@ def _run_git_process(
                     for label, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
                         os.set_blocking(stream.fileno(), False)
                         selector.register(stream, selectors.EVENT_READ, label)
-                    while selector.get_map():
+                    if _watch_fd is not None:
+                        selector.register(_watch_fd, selectors.EVENT_READ, "parent")
+                    open_streams = 2
+                    while open_streams:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise subprocess.TimeoutExpired(command, GIT_TIMEOUT)
                         for key, _ in selector.select(min(remaining, 0.1)):
+                            if key.data == "parent":
+                                _parent_live(key.fd)
                             chunk = os.read(key.fd, min(65536, GIT_OUTPUT_LIMIT - total + 1))
                             if not chunk:
                                 selector.unregister(key.fileobj)
+                                open_streams -= 1
                                 continue
                             total += len(chunk)
                             if measured is not None:
@@ -140,6 +166,13 @@ def _run_git_process(
                                     "No partial answer is available; reduce the visible changes.",
                                 )
                             buffers[str(key.data)].extend(chunk)
+                if _watch_fd is not None:
+                    while process.poll() is None:
+                        _parent_live(_watch_fd)
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(command, GIT_TIMEOUT)
+                        select.select([_watch_fd], [], [], min(remaining, 0.01))
                 returncode = process.wait(timeout=max(0.001, deadline - time.monotonic()))
                 return subprocess.CompletedProcess(
                     command, returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"])
@@ -157,6 +190,9 @@ def _run_git_process(
 
 
 class GitProjectDiscovery:
+    def __init__(self, *, process_runner: ProcessRunner | None = None) -> None:
+        self._process_runner = process_runner
+
     def find_root(self, directory: Path, *, deadline: float | None = None) -> Path:
         executable = shutil.which("git", path=os.defpath)
         if executable is None:
@@ -210,15 +246,15 @@ class GitProjectDiscovery:
                 "git_timeout", "Git discovery timed out; no command was retried."
             ) from error
 
-    @staticmethod
     def _query(
-        executable: str, directory: Path, *arguments: str, deadline: float | None = None
+        self, executable: str, directory: Path, *arguments: str, deadline: float | None = None
     ) -> subprocess.CompletedProcess[str]:
         result = _run_git(
             executable,
             directory,
             *arguments,
             deadline=deadline,
+            process_runner=self._process_runner,
         )
         return subprocess.CompletedProcess(
             result.args,
@@ -309,6 +345,9 @@ def _parse_status(output: bytes) -> tuple[BranchState, tuple[FileChange, ...]]:
 
 
 class GitRepositoryRead:
+    def __init__(self, *, process_runner: ProcessRunner | None = None) -> None:
+        self._process_runner = process_runner
+
     def read_branch(
         self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
     ) -> BranchState:
@@ -325,8 +364,8 @@ class GitRepositoryRead:
         )
         return changes
 
-    @staticmethod
     def _status(
+        self,
         root: Path,
         *,
         branch_only: bool,
@@ -352,6 +391,7 @@ class GitRepositoryRead:
             deadline=deadline,
             observer=observer,
             category="filters.inspect",
+            process_runner=self._process_runner,
         )
         if filters.returncode not in {0, 1}:
             raise ProjectError(
@@ -404,6 +444,7 @@ class GitRepositoryRead:
             deadline=deadline,
             observer=observer,
             category="status.branch" if branch_only else "status.changes",
+            process_runner=self._process_runner,
         )
         if result.returncode != 0:
             raise ProjectError(

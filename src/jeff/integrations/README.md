@@ -1,10 +1,14 @@
 # Integrations — tier 2
 
-**Status:** M01 root discovery and read-only branch/change metadata implemented. Other integrations and Git-write commands remain unimplemented.
+**Status:** M01 read-only Git plus M02 daemon-owned native-child lifetime implemented. Other integrations and Git-write commands remain unimplemented.
 
-**Ownership:** `git.py` implements `GitProjectDiscovery.find_root(directory) -> Path` and the application's `GitRead` port through `GitRepositoryRead.read_branch(root)` / `read_changes(root)`. Discovery canonicalizes non-bare roots and rejects tracked private config without changing the index.
+**Ownership:** `git/__init__.py` implements `GitProjectDiscovery.find_root(directory) -> Path` and the application's `GitRead` port through `GitRepositoryRead.read_branch(root)` / `read_changes(root)`. Discovery canonicalizes non-bare roots and rejects tracked private config without changing the index.
 
 **Dependencies:** domain/application ports and technical standard-library modules. No client/bootstrap or sibling integration implementation imports. Bootstrap injects adapters; they never grant execution authority.
+
+## Native lifetime
+
+Bootstrap injects `git/worker.py::OwnedGitRunner` for daemon discovery/filter/status. Each single-use helper owns real Git Popen plus a duplicate of the daemon's existing lifetime-lock description and liveness reader. Git inherits none of these handles. EOF/deadline kills/reaps only the captured child; the lease excludes replacement until helper exit. Private protocol1 allows five fixed operations, not arbitrary argv. A transferred Unix-socket capability establishes native peer identity for receiver-local Darwin NOTE_EXIT; kqueue FDs are not transferred. Late captured exits0/1 reconcile cleanup; running/abnormal exits remain quarantined. No fallback/replay/new grace. Non-daemon default runner remains available to its existing callers.
 
 ## Queries and protections
 
@@ -22,6 +26,6 @@ The NUL-delimited parser handles ordinary changes, rename origins, untracked pat
 
 **Example:** `jeff ask "what changed?" --json` → registered project → safe filter preflight/status → parsed domain values → scoped application result. See [root usage](../../../README.md).
 
-**Owning milestone:** M01. Run `.venv/bin/python -m pytest tests/integration tests/acceptance -q` after installation. [Discovery tests](../../../tests/integration/test_git_discovery.py) and [question tests](../../../tests/integration/test_git_questions.py) cover real Git states, query immutability, bounded stdout/stderr/time, malformed output, and filter-command non-execution. [Installed tests](../../../tests/acceptance/test_installed_questions.py) exercise console and module commands outside the source tree. Fixture-only Git mutations are explicitly approved; no Jeff repository index/history changes.
+**Owning milestones:** M01/M02. Run `.venv/bin/python -m pytest tests/integration tests/acceptance -q` after installation. [Discovery tests](../../../tests/integration/test_git_discovery.py) and [question tests](../../../tests/integration/test_git_questions.py) cover real Git states, query immutability, bounded stdout/stderr/time, malformed output, and filter-command non-execution. [Installed tests](../../../tests/acceptance/test_installed_questions.py) exercise console and module commands outside the source tree. Fixture-only Git mutations are explicitly approved; no Jeff repository index/history changes.
 
 Linux, linked-worktree/submodule/partial-clone-specific scenarios, all hostile config combinations, and complete execution isolation remain unverified. Add other adapters only with real milestone behavior and their declared ports. See [package map](../README.md).

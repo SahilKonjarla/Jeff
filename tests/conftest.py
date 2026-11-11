@@ -11,6 +11,30 @@ import pytest
 
 
 @pytest.fixture
+def git_helper_script() -> Callable[[str, str], str]:
+    """Apply a native fault/observer at Git's owning process, retaining all inherited FDs."""
+
+    def compose(helper_hook: str, daemon_hook: str) -> str:
+        worker = (
+            helper_hook + "\nimport jeff.integrations.git.worker as _worker\n"
+            "raise SystemExit(_worker.main())\n"
+        )
+        return f"""
+import subprocess
+_spawn_helper=subprocess.Popen
+_helper_code={worker!r}
+def _launch_helper(command,*args,**kwargs):
+    if command[3:5]==['-m','jeff.integrations.git.worker']:
+        command=[*command[:3],'-c',_helper_code,*command[5:]]
+    return _spawn_helper(command,*args,**kwargs)
+subprocess.Popen=_launch_helper
+{daemon_hook}
+"""
+
+    return compose
+
+
+@pytest.fixture
 def owned_runtime_launches(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Capture genuine handles; emergency cleanup is evidence of a failing fixture."""
     original = subprocess.Popen

@@ -433,14 +433,30 @@ def test_native_slow_reader_closes_without_blocking_second_client(
 
     layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
     original = subprocess.Popen
-    # Actual owned socket buffer constraint, not a fake writer/drain or shortened timeout.
-    launcher = """
-import runpy,socket
+    # Larger truthful root fields fill the real transport without30 redundant Git calls.
+    padding = tmp_path / "event-root"
+    while len(os.fsencode(padding)) < 800:
+        padding /= "r" * 48
+    padding.mkdir(parents=True, mode=0o700)
+    destination = padding / "repo"
+    git_repo.rename(destination)
+    git_repo = destination
+    blocked = tmp_path / "actual-backpressure"
+    # Actual owned socket buffers/drain, unchanged original5-second send deadline.
+    launcher = f"""
+import asyncio,runpy,socket
+from pathlib import Path
 import jeff.infrastructure.runtime_ipc as ipc
 original=ipc._stream_send
 async def send(writer,frame):
     writer.get_extra_info('socket').setsockopt(socket.SOL_SOCKET,socket.SO_SNDBUF,1024)
-    return await original(writer,frame)
+    task=asyncio.create_task(original(writer,frame))
+    await asyncio.sleep(0)
+    buffered=writer.transport.get_write_buffer_size()
+    high=writer.transport.get_write_buffer_limits()[1]
+    if frame.kind=='event'and buffered>high:
+        Path({str(blocked)!r}).touch(mode=0o600)
+    return await task
 ipc._stream_send=send
 runpy.run_module('jeff.bootstrap.runtime',run_name='__main__')
 """
@@ -466,12 +482,15 @@ runpy.run_module('jeff.bootstrap.runtime',run_name='__main__')
             slow.connection.sendall(encode_message(request.model_dump(mode="json"), 65536))
             ready = receive_message(slow.connection, 65536, time.monotonic() + 5, StreamFrame)
             assert ready.kind == "ready"
-            for _ in range(30):
+            for _ in range(20):
                 assert client.execute(
                     ProjectCall(
                         operation="ask", directory=git_repo, question="what branch am I on?"
                     )
                 ).result.ok
+                if blocked.exists():
+                    break
+            assert blocked.exists(), "Actual socket/transport backpressure was not reached"
             assert isinstance(control.status(), ControlSuccess)
             time.sleep(5.3)
             # All8 slots now reusable while the unconsuming peer still holds its own socket.
@@ -559,7 +578,7 @@ from pathlib import Path
 import jeff.infrastructure.runtime_storage as sql
 import jeff.infrastructure.runtime_ipc as ipc
 expire=Path({str(expire)!r})
-original_store,original_connect,original_send,original_popen=sql.SQLiteStorage,sqlite3.connect,ipc._stream_send,subprocess.Popen
+original_store,original_connect,original_send=sql.SQLiteStorage,sqlite3.connect,ipc._stream_send
 def store(*args,**kwargs):
     kwargs['retention_clock']=lambda:time.time_ns()//1000000+(31*86400000 if expire.exists() else 0)
     kwargs['retention_monotonic']=lambda:160.0 if expire.exists() else 100.0
@@ -579,22 +598,24 @@ async def send(writer,frame):
     await original_send(writer,frame)
     if str(frame.request_id)=={str(slow_id)!r} and frame.kind=='event':
         Path({str(sending)!r}).write_text('real prefix written')
+        Path({str(arm_read)!r}).write_text('arm only after actual buffered prefix')
         until=time.monotonic()+8
         while not Path({str(release_send)!r}).exists():
             if time.monotonic()>until:raise TimeoutError('Owned fixture write gate expired')
             await asyncio.sleep(.01)
 ipc._stream_send=send
-def popen(command,**kwargs):
-    if ('-C' in command and command[command.index('-C')+1]=={str(other)!r}
-        and Path({str(arm_read)!r}).exists()):
-        Path({str(read_busy)!r}).write_text('worker held at Git process seam')
-        until=time.monotonic()+8
-        while not Path({str(release_read)!r}).exists():
-            if time.monotonic()>until:raise OSError('Owned fixture read gate expired')
-            time.sleep(.01)
-    return original_popen(command,**kwargs)
-subprocess.Popen=popen
-import jeff.bootstrap.runtime as runtime  # Import after I/O hooks, as the former runpy did.
+import jeff.bootstrap.runtime as runtime  # Import after actual SQL/socket hooks.
+original_runner=runtime.OwnedGitRunner
+class GatedRunner(original_runner):
+    def __call__(self,executable,directory,*args,**kwargs):
+        if directory==Path({str(other)!r}) and Path({str(arm_read)!r}).exists():
+            Path({str(read_busy)!r}).write_text('worker held before owned Git spawn')
+            until=time.monotonic()+8
+            while not Path({str(release_read)!r}).exists():
+                if time.monotonic()>until:raise OSError('Owned fixture read gate expired')
+                time.sleep(.01)
+        return super().__call__(executable,directory,*args,**kwargs)
+runtime.OwnedGitRunner=GatedRunner
 runtime.SQLiteStorage=store
 raise SystemExit(runtime.main())
 """
@@ -615,7 +636,6 @@ raise SystemExit(runtime.main())
             client.subscribe(SubscriptionQuery(directory=git_repo, query_id=slow_id)) as slow,
             client.subscribe(SubscriptionQuery(directory=other)) as second,
         ):
-            arm_read.write_text("arm")
             assert client.execute(
                 ProjectCall(operation="ask", directory=git_repo, question="what branch am I on?")
             ).result.ok

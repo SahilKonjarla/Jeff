@@ -6,6 +6,7 @@ import os
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -121,6 +122,7 @@ def test_native_slow_git_delivery_failure_keeps_control_and_receipt_honest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
+    git_helper_script: Callable[[str, str], str],
 ) -> None:
     projects = ProjectService(GitProjectDiscovery(), FileProjectStore())
     assert projects.execute("init", git_repo).ok
@@ -128,22 +130,41 @@ def test_native_slow_git_delivery_failure_keeps_control_and_receipt_honest(
     marker = tmp_path / "git-status-count"
     original = subprocess.Popen
     # System subprocess fault in the actual child, never a mocked dispatcher result.
-    launcher = f"""
-import runpy,subprocess,sys
+    helper_hook = f"""
+import atexit,json,os,subprocess,sys
 from pathlib import Path
 original=subprocess.Popen
+children=[];killed=[];original_kill=original.kill
 marker=Path({str(marker)!r})
+def kill(process):
+    if process in children and process.poll() is None:killed.append(process)
+    return original_kill(process)
+original.kill=kill
+def record():
+    if not killed:return
+    fd=os.open(marker.with_name('slow-probe-signals.jsonl'),os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
+    try:
+        for process in killed:
+            row={{'role':'python_slow_fixture','signal_call':'SIGKILL',
+                  'captured_pid':process.pid,'native_exit_code':process.poll()}}
+            os.write(fd,(json.dumps(row)+'\\n').encode())
+    finally:os.close(fd)
+atexit.register(record)
 def launch(command,*args,**kwargs):
     if command[0]=='/usr/bin/git' and 'status' in command:
         with marker.open('a') as out:out.write('1\\n')
         code=(\"import sys,time;sys.stdout.buffer.write(b'# branch.oid (initial)'+bytes([0])+\"
               \"b'# branch.head main'+bytes([0]));sys.stdout.flush();time.sleep(3);\"
               \"open(sys.argv[1],'a').write('1'+chr(10))\")
-        return original([sys.executable,'-I','-B','-c',code,str(marker)+'.done'],*args,**kwargs)
+        child=original([sys.executable,'-I','-B','-c',code,str(marker)+'.done'],*args,**kwargs)
+        children.append(child)
+        return child
     return original(command,*args,**kwargs)
 subprocess.Popen=launch
-runpy.run_module('jeff.bootstrap.runtime',run_name='__main__')
 """
+    launcher = git_helper_script(
+        helper_hook, "import runpy;runpy.run_module('jeff.bootstrap.runtime',run_name='__main__')"
+    )
 
     def launch(command: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
         if "jeff.bootstrap.runtime" in command:
@@ -167,7 +188,7 @@ runpy.run_module('jeff.bootstrap.runtime',run_name='__main__')
                 wire = ProjectRequest(
                     call=call if number == 0 else call.model_copy(update={"request_id": uuid4()}),
                     expected_instance_id=connection.identity.instance_id,
-                    remaining_ms=300 if mode == "timeout" else 30000,
+                    remaining_ms=1500 if mode == "timeout" else 30000,
                 )
                 connection.connection.sendall(encode_message(wire.model_dump(mode="json"), 65536))
             until = time.monotonic() + 3

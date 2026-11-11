@@ -365,9 +365,11 @@ raise SystemExit(runtime.main())
         cli("init", git_repo)
         project_a = FileProjectStore().read(git_repo)
         client = RuntimeProjectClient(layout)
-        for _ in range(60):
-            configured = client.execute(ProjectCall(operation="config", directory=git_repo))
-            assert configured.result.ok
+        # Config is read-only; repeating it cannot populate the retirement workload.
+        before_config = layout.database.read_bytes()
+        configured = client.execute(ProjectCall(operation="config", directory=git_repo))
+        assert configured.result.ok
+        assert layout.database.read_bytes() == before_config
         history = cli("history", git_repo)["data"]["items"]
         baseline_page = client.inspect_evidence(
             EvidenceQuery(operation="replay", directory=git_repo)

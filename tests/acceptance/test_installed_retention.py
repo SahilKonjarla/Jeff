@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -21,18 +22,21 @@ from jeff.infrastructure.runtime_state import RuntimeStateStore
 
 @pytest.mark.usefixtures("owned_runtime_launches")
 def test_scheduled_retirement_refuses_same_native_uuid_after_restart(
-    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    git_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    git_helper_script: Callable[[str, str], str],
 ) -> None:
     layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
     control, client = RuntimeController(layout), RuntimeProjectClient(layout)
     expire, actions = tmp_path / "expire", tmp_path / "actions"
     original = subprocess.Popen
-    launcher = f"""
-import subprocess,time
+    daemon_hook = f"""
+import time
 from pathlib import Path
 import jeff.bootstrap.runtime as runtime
 expire,actions=Path({str(expire)!r}),Path({str(actions)!r})
-original_store,original_popen=runtime.SQLiteStorage,subprocess.Popen
+original_store=runtime.SQLiteStorage
 def store(*args,**kwargs):
     assert kwargs['scheduled_retention'] is True
     kwargs['retention_clock']=lambda:(
@@ -41,6 +45,12 @@ def store(*args,**kwargs):
     kwargs['retention_monotonic']=lambda:160.0 if expire.exists() else 100.0
     return original_store(*args,**kwargs)
 runtime.SQLiteStorage=store  # Inject at composition; retain the storage module's class.
+raise SystemExit(runtime.main())
+"""
+    helper_hook = f"""
+import subprocess
+from pathlib import Path
+original_popen=subprocess.Popen;actions=Path({str(actions)!r})
 def popen(command,**kwargs):
     # Count only real answer-adapter status invocations, not legitimate scope rev-parse.
     if ('-C' in command and command[command.index('-C')+1]=={str(git_repo)!r}
@@ -48,8 +58,8 @@ def popen(command,**kwargs):
         with actions.open('a') as out:out.write('status\\n')
     return original_popen(command,**kwargs)
 subprocess.Popen=popen
-raise SystemExit(runtime.main())
 """
+    launcher = git_helper_script(helper_hook, daemon_hook)
 
     def launch(command: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
         if "jeff.bootstrap.runtime" in command:

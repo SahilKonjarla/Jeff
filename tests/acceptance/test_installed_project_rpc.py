@@ -271,7 +271,8 @@ import os,runpy,subprocess,time
 from pathlib import Path
 point={point!r}
 paused,release,published=map(Path,{[str(paused), str(release), str(published)]!r})
-original_popen,original_link=subprocess.Popen,os.link
+import jeff.bootstrap.runtime as runtime
+original_runner,original_link=runtime.OwnedGitRunner,os.link
 gated=False
 def gate():
     paused.write_text('paused')
@@ -279,21 +280,21 @@ def gate():
     while not release.exists():
         if time.monotonic()>=until:raise TimeoutError('Owned test gate expired')
         time.sleep(.005)
-def launch(command,*args,**kwargs):
-    global gated
-    if (point=='before_claim' and not gated and command[0]=='/usr/bin/git'
-            and '--show-toplevel' in command):
-        gated=True
-        gate()
-    return original_popen(command,*args,**kwargs)
+class GatedRunner(original_runner):
+    def __call__(self,executable,directory,*args,**kwargs):
+        global gated
+        if point=='before_claim' and not gated and args[:2]==('rev-parse','--show-toplevel'):
+            gated=True
+            gate()
+        return super().__call__(executable,directory,*args,**kwargs)
 def link(source,destination,**kwargs):
     result=original_link(source,destination,**kwargs)
     if destination=='jeff.local.yaml':
         with published.open('a') as out:out.write('1\\n')
         if point=='after_publication':gate()
     return result
-subprocess.Popen,os.link=launch,link
-runpy.run_module('jeff.bootstrap.runtime',run_name='__main__')
+runtime.OwnedGitRunner,os.link=GatedRunner,link
+raise SystemExit(runtime.main())
 """
 
     def launch(command: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:

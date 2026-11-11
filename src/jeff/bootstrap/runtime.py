@@ -44,6 +44,7 @@ from jeff.infrastructure.runtime_process import RuntimeController
 from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
 from jeff.infrastructure.runtime_storage import SQLiteStorage
 from jeff.integrations.git import GitProjectDiscovery, GitRepositoryRead
+from jeff.integrations.git.worker import OwnedGitRunner
 
 
 def _selected_layout() -> RuntimeLayout:
@@ -115,6 +116,12 @@ async def _serve(
         scheduled_retention=True,
     )
     dispatcher: RuntimeDispatcher | None = None
+
+    def duplicate_git_lease() -> int:
+        owner.check()
+        return os.dup(owner.fd)
+
+    git_runner = OwnedGitRunner(duplicate_git_lease)
     server = ControlServer(
         owner, token, identity, storage.snapshot, on_stop=storage.pause_retention
     )
@@ -130,10 +137,15 @@ async def _serve(
             await serving  # publication/listener failure cannot become application readiness
         state = storage.snapshot()
         if state.state == "ready" and not server.stopping:
-            projects = ProjectService(GitProjectDiscovery(), FileProjectStore())
+            projects = ProjectService(
+                GitProjectDiscovery(process_runner=git_runner), FileProjectStore()
+            )
             dispatcher = RuntimeDispatcher(
                 ProjectDispatcher(
-                    projects, QuestionService(projects, GitRepositoryRead()), storage, identity
+                    projects,
+                    QuestionService(projects, GitRepositoryRead(process_runner=git_runner)),
+                    storage,
+                    identity,
                 )
             )
             dispatcher.start()
@@ -169,6 +181,8 @@ async def _serve(
                 while not dispatcher.closed:
                     await asyncio.sleep(0.01)
                 dispatcher.close(timeout=0)
+            while not git_runner.closed:
+                await asyncio.sleep(0.01)
             # Cooperative observation, not an executor/cancelled wait mistaken for SQL exit.
             storage.request_close()
             while not storage.closed:
