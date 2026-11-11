@@ -1,16 +1,25 @@
 """Owned external filesystem fixtures; inspection never creates or adopts a runtime."""
 
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
-from jeff.application.runtime import RuntimeLayout, RuntimePathInputs, RuntimePathInspection
+from jeff.application.runtime import (
+    ControlFault,
+    RuntimeLayout,
+    RuntimePathInputs,
+    RuntimePathInspection,
+)
 from jeff.infrastructure.runtime_paths import inspect_layout, resolve_layout
+from jeff.infrastructure.runtime_state import RuntimeStateStore
+from jeff.infrastructure.runtime_storage import SQLiteStorage
 
 
 @pytest.fixture
@@ -399,6 +408,76 @@ def test_missing_root_with_changed_ancestor_is_unknown_not_absent(
         result = observations(layout)
     assert result["data_dir"] == ("unknown", "runtime_inspection_failed")
     assert result["credential"] == ("unknown", "runtime_inspection_failed")
+
+
+@pytest.mark.parametrize("phase", ["open", "final", "continued", "mode"])
+def test_real_sqlite_journal_metadata_requires_one_coherent_directory_sample(
+    layout: RuntimeLayout, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    owner = RuntimeStateStore(layout).acquire(create=True)
+    assert owner is not None
+    with owner:
+        owner.store.credential(owner)
+        storage = SQLiteStorage(owner)
+        storage.start()
+        try:
+            assert storage.wait_ready(5).state == "ready"
+        finally:
+            storage.close()
+        with closing(sqlite3.connect(layout.database, isolation_level=None)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            real_stat = os.stat
+            directory_calls, key_calls = 0, 0
+            primed = False
+            observed: list[tuple[int, ...]] = []
+
+            def interleaved(
+                path: str, *, dir_fd: int | None = None, follow_symlinks: bool = True
+            ) -> os.stat_result:
+                nonlocal directory_calls, key_calls, primed
+                result = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+                if path == layout.data_dir.name:
+                    directory_calls += 1
+                if path == "ipc.key":
+                    key_calls += 1
+                trigger = (
+                    path == layout.data_dir.name and directory_calls == 1 and phase != "final"
+                ) or (path == "ipc.key" and key_calls == 2 and phase == "final")
+                if trigger:
+                    before = real_stat(layout.data_dir, follow_symlinks=False)
+                    connection.execute("PRAGMA user_version=4")  # Real journal, no business DML.
+                    after = real_stat(layout.data_dir, follow_symlinks=False)
+                    assert (before.st_dev, before.st_ino, before.st_mode, before.st_uid) == (
+                        after.st_dev,
+                        after.st_ino,
+                        after.st_mode,
+                        after.st_uid,
+                    )
+                    assert after.st_nlink != before.st_nlink
+                    observed.append((before.st_nlink, after.st_nlink))
+                    primed = True
+                    if phase == "mode":
+                        layout.data_dir.chmod(0o755)
+                elif phase == "continued" and path == layout.data_dir.name and directory_calls == 2:
+                    (layout.data_dir / "continued-fixture-churn").touch(mode=0o600)
+                return result
+
+            try:
+                with monkeypatch.context() as patch:
+                    patch.setattr(os, "stat", interleaved)
+                    if phase in ("open", "final"):
+                        assert RuntimeStateStore(layout).layout == layout
+                    else:
+                        with pytest.raises(ControlFault) as refused:
+                            RuntimeStateStore(layout)
+                        assert refused.value.code == "runtime_inspection_failed"
+                assert primed and len(observed) == 1
+                if phase == "continued":
+                    assert directory_calls == 3
+                    assert (layout.data_dir / "continued-fixture-churn").exists()
+            finally:
+                layout.data_dir.chmod(0o700)
+                connection.execute("ROLLBACK")  # SQLite alone retires the real journal.
 
 
 def test_fresh_imports_do_not_resolve_defaults_generate_entropy_or_create_state() -> None:

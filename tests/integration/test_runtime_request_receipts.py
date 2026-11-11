@@ -46,6 +46,7 @@ def test_receipt_claim_finish_lookup_and_restart_without_replay(tmp_path: Path) 
         return time.monotonic() + 5
 
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner, instance_id=instance)
         storage.start()
         try:
@@ -114,6 +115,7 @@ def test_schema_one_registry_migrates_and_concurrent_claim_is_unique(tmp_path: P
             fixture.execute(f"PRAGMA application_id={DATABASE_APPLICATION_ID}")
             fixture.execute("PRAGMA user_version=1")
         layout.database.chmod(0o600)
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner, instance_id=instance)
         storage.start()
         try:
@@ -199,6 +201,7 @@ def test_actual_receipt_commit_acknowledgement_loss_is_inspectable_not_replayed(
     with owner:
         with monkeypatch.context() as patch:
             patch.setattr(sqlite3, "connect", connect)
+            owner.store.credential(owner)
             storage = SQLiteStorage(owner, instance_id=instance)
             storage.start()
             try:
@@ -237,6 +240,7 @@ def test_schema_two_migration_failure_rolls_back_actual_ddl_and_preserves_regist
         return original(*args, **kwargs, factory=FailedMigration)
 
     with owner:
+        owner.store.credential(owner)
         initial = SQLiteStorage(owner)
         initial.start()
         try:
@@ -288,6 +292,7 @@ def test_init_identity_can_be_associated_once_and_diagnostic_exception_is_narrow
         project_id=None,
     )
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner, instance_id=instance)
         storage.start()
         try:

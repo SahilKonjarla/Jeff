@@ -24,6 +24,7 @@ def test_stream_never_retrofits_null_identity_and_advances_empty_intervals(tmp_p
     assert owner is not None
     instance, project = uuid4(), uuid4()
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance)
         store.start()
         try:
@@ -108,6 +109,7 @@ def test_delivery_hint_failure_cannot_rewrite_a_committed_receipt(tmp_path: Path
 
     project, instance = uuid4(), uuid4()
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance, commit_hint=unavailable)
         store.start()
         try:
@@ -166,6 +168,7 @@ def test_retention_position_is_checked_committed_and_published_before_hint(
     with owner, monkeypatch.context() as patch:
         patch.setattr(sqlite3, "connect", connect)
         observed = []
+        owner.store.credential(owner)
         store = SQLiteStorage(
             owner,
             instance_id=instance,
@@ -239,6 +242,7 @@ def test_actual_expiry_invalidates_all_cursor_kinds_but_preserves_exact_unknown_
     wall = [0]
     read = HistoryRead(canonical_root=tmp_path / "p", project_id=project, limit=1)
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance, retention_clock=lambda: wall[0])
         store.start()
         try:

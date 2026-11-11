@@ -21,6 +21,7 @@ def test_latest_debug_is_scoped_acceptance_order_and_does_not_write(tmp_path: Pa
     instance, project = uuid4(), uuid4()
     scope = HistoryScope(project_id=project, canonical_root=tmp_path / "p")
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance)
         store.start()
         try:
@@ -94,6 +95,7 @@ def test_history_snapshot_pages_are_scope_bound_stable_and_read_only(tmp_path: P
     instance, project = uuid4(), uuid4()
     scope = HistoryRead(project_id=project, canonical_root=tmp_path / "p", limit=2)
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance)
         store.start()
         try:

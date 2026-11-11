@@ -142,6 +142,10 @@ class RuntimeLayout(_RuntimeModel):
     def endpoint_receipt(self) -> Path:
         return self.runtime_dir / "endpoint.json"
 
+    @property
+    def recovery_permit(self) -> Path:
+        return self.data_dir / "recovery.json"
+
 
 class PathObservation(_RuntimeModel):
     role: RuntimePathRole

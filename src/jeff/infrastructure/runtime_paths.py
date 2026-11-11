@@ -116,12 +116,26 @@ def _inspect_file(fd: int, name: str, role: RuntimePathRole, uid: int) -> PathOb
     return PathObservation(role=role, state="present")
 
 
-def _chain_stable(chain: list[tuple[int, str, os.stat_result]]) -> bool:
+def _same_directory_identity(before: os.stat_result, after: os.stat_result) -> bool:
+    return stat.S_ISDIR(before.st_mode) and _signature(before)[:4] == _signature(after)[:4]
+
+
+def _chain_stable(
+    chain: list[tuple[int, str, os.stat_result, int]], *, refresh_allowed: bool
+) -> bool:
     try:
-        return all(
-            _signature(before) == _signature(os.stat(name, dir_fd=fd, follow_symlinks=False))
-            for fd, name, before in chain
-        )
+        for parent, name, before, opened in chain:
+            after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if _signature(before) == _signature(after):
+                continue
+            # Directory entry counts may change during legitimate SQLite publication.
+            # One coherent path/FD sample, never an identity/security change or a loop.
+            if not refresh_allowed or not _same_directory_identity(before, after):
+                return False
+            if _signature(after) != _signature(os.fstat(opened)):
+                return False
+            refresh_allowed = False
+        return True
     except OSError:
         return False
 
@@ -140,13 +154,14 @@ def _inspect_group(
             flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
             fd = os.open("/", flags)
             stack.callback(os.close, fd)
-            chain: list[tuple[int, str, os.stat_result]] = []
+            chain: list[tuple[int, str, os.stat_result, int]] = []
+            refreshed = False
             current = Path("/")
             for component in directory.parts[1:]:
                 try:
                     before = os.stat(component, dir_fd=fd, follow_symlinks=False)
                 except FileNotFoundError:
-                    if _chain_stable(chain):
+                    if _chain_stable(chain, refresh_allowed=not refreshed):
                         return _unavailable(role, children, "missing")
                     return _unavailable(role, children, "unknown", "runtime_inspection_failed")
                 current /= component
@@ -157,9 +172,16 @@ def _inspect_group(
                     return _unavailable(role, children, "unsafe", "unsafe_runtime_path")
                 next_fd = os.open(component, flags, dir_fd=fd)
                 stack.callback(os.close, next_fd)
-                if _signature(before) != _signature(os.fstat(next_fd)):
-                    return _unavailable(role, children, "unknown", "runtime_inspection_failed")
-                chain.append((fd, component, before))
+                after = os.fstat(next_fd)
+                if _signature(before) != _signature(after):
+                    if refreshed or not _same_directory_identity(before, after):
+                        return _unavailable(role, children, "unknown", "runtime_inspection_failed")
+                    fresh = os.stat(component, dir_fd=fd, follow_symlinks=False)
+                    if _signature(fresh) != _signature(after):
+                        return _unavailable(role, children, "unknown", "runtime_inspection_failed")
+                    before = fresh
+                    refreshed = True
+                chain.append((fd, component, before, next_fd))
                 fd = next_fd
             metadata = os.fstat(fd)
             if metadata.st_uid != uid or stat.S_IMODE(metadata.st_mode) != 0o700:
@@ -169,7 +191,7 @@ def _inspect_group(
                 _inspect_file(fd, name, child_role, uid) for child_role, name in children
             )
             # Detect observed ancestor/leaf replacements before handing back a snapshot.
-            if not _chain_stable(chain):
+            if not _chain_stable(chain, refresh_allowed=not refreshed):
                 return _unavailable(role, children, "unknown", "runtime_inspection_failed")
             return entries
     except OSError:

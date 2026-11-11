@@ -147,10 +147,12 @@ def test_stop_retries_real_directory_entry_churn_without_resending_stop(
         after_status = True
         return result
 
-    def chain(entries: list[tuple[int, str, os.stat_result]]) -> bool:
+    def chain(
+        entries: list[tuple[int, str, os.stat_result, int]], *, refresh_allowed: bool
+    ) -> bool:
         nonlocal injected, rejected
         if after_status and not injected and entries[-1][1] == installation.data_dir.name:
-            parent, name, before = entries[-1]
+            parent, name, before, pinned = entries[-1]
             directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             try:
                 actual = os.fstat(directory)
@@ -165,10 +167,26 @@ def test_stop_retries_real_directory_entry_churn_without_resending_stop(
                 injected = True
             finally:
                 os.close(directory)
-            result = original_chain(entries)
+            original_fstat = os.fstat
+
+            def continued(fd: int) -> os.stat_result:
+                if fd == pinned:
+                    # A second actual change makes the fresh path/FD pair inconsistent.
+                    marker = os.open(
+                        "metadata-churn-continued",
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=pinned,
+                    )
+                    os.close(marker)
+                return original_fstat(fd)
+
+            with monkeypatch.context() as sample:
+                sample.setattr(os, "fstat", continued)
+                result = original_chain(entries, refresh_allowed=refresh_allowed)
             rejected = not result
             return result
-        return original_chain(entries)
+        return original_chain(entries, refresh_allowed=refresh_allowed)
 
     def request(
         self: ControlConnection, operation: Any, expected_instance_id: UUID | None = None
@@ -183,7 +201,7 @@ def test_stop_retries_real_directory_entry_churn_without_resending_stop(
         patch.setattr(runtime_paths, "_chain_stable", chain)
         patch.setattr(ControlConnection, "request", request)
         result = controller.stop()
-    assert injected and rejected, "Actual benign entry churn must reject the first snapshot"
+    assert injected and rejected, "Continued actual entry churn must reject the first snapshot"
     assert isinstance(result, ControlSuccess), result
     assert stop_requests == 1
     assert controller._child is not None and controller._child.poll() == 0

@@ -27,6 +27,7 @@ def test_real_registry_commit_reopen_and_readonly_lookup(tmp_path: Path) -> None
     assert owner is not None
     project = Project(uuid4(), tmp_path / "project ' literal")
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner)
         storage.start()
         try:
@@ -89,6 +90,7 @@ def test_conservative_adoption_preserves_existing_database_and_sidecars(
             sidecar = layout.data_dir / ("state.sqlite3-" + kind)
             sidecar.write_bytes(b"SYNTHETIC_RECOVERY")
             sidecar.chmod(0o600)
+        owner.store.credential(owner)
         before = {p.name: p.read_bytes() for p in layout.data_dir.iterdir()}
         storage = SQLiteStorage(owner)
         storage.start()
@@ -107,6 +109,7 @@ def test_conflicting_identity_never_rebinds_and_close_refuses_new_work(tmp_path:
     assert owner is not None
     first = Project(uuid4(), tmp_path / "project")
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner)
         storage.start()
         try:
@@ -149,6 +152,7 @@ def test_failed_real_migration_rolls_back_and_clean_schema_zero_retries(
     with owner:
         with monkeypatch.context() as patch:
             patch.setattr(sqlite3, "connect", failing_connect)
+            owner.store.credential(owner)
             storage = SQLiteStorage(owner)
             storage.start()
             try:
@@ -193,6 +197,7 @@ def test_driver_error_after_actual_commit_is_uncertain_not_retryable_failure(
     with owner:
         with monkeypatch.context() as patch:
             patch.setattr(sqlite3, "connect", connect)
+            owner.store.credential(owner)
             storage = SQLiteStorage(owner)
             storage.start()
             try:
@@ -249,6 +254,7 @@ def test_running_timeout_retains_slot_queue_is_bounded_and_close_waits_for_real_
 
     with owner, monkeypatch.context() as patch:
         patch.setattr(sqlite3, "connect", connect)
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner)
         storage.start()
         try:
@@ -308,6 +314,7 @@ def test_recognized_marker_does_not_bless_unknown_objects_or_mismatched_ledger(
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner)
         storage.start()
         try:
@@ -353,6 +360,7 @@ def test_connection_close_error_is_uncertain_and_checked_descriptor_is_not_leake
 
     with owner, monkeypatch.context() as patch:
         patch.setattr(sqlite3, "connect", connect)
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner)
         storage.start()
         assert storage.wait_ready(5).state == "ready"
@@ -400,6 +408,7 @@ def test_unsafe_database_never_reaches_the_sqlite_engine(
 
         with monkeypatch.context() as patch:
             patch.setattr(sqlite3, "connect", forbidden)
+            owner.store.credential(owner)
             storage = SQLiteStorage(owner)
             storage.start()
             try:
@@ -436,6 +445,7 @@ def test_database_replacement_at_engine_open_is_detected_without_mutating_replac
 
     with owner, monkeypatch.context() as patch:
         patch.setattr(sqlite3, "connect", connect)
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner)
         storage.start()
         try:
@@ -454,6 +464,7 @@ def test_clean_wal_header_is_refused_before_any_engine_adoption(
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         initial = SQLiteStorage(owner)
         initial.start()
         try:

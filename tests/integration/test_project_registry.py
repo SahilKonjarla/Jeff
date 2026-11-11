@@ -26,6 +26,7 @@ def test_index_and_lookup_revalidate_yaml_without_copying_private_settings(
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner)
         storage.start()
         try:

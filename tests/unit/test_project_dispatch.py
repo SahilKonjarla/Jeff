@@ -32,6 +32,7 @@ def test_branch_receipt_duplicate_and_scope_without_answer_archive(
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner, instance_id=identity.instance_id)
         storage.start()
         try:
@@ -92,6 +93,7 @@ def test_config_is_read_only_unindexed_and_changes_use_existing_policy(
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner, instance_id=identity.instance_id)
         storage.start()
         try:
@@ -183,6 +185,7 @@ def test_real_git_timeout_evidence_is_recorded_after_actual_child_reaping(
         return child
 
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=identity.instance_id)
         store.start()
         try:
@@ -225,6 +228,7 @@ def test_unregistered_init_claims_root_then_associates_real_identity(
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner, instance_id=identity.instance_id)
         storage.start()
         try:
@@ -293,6 +297,7 @@ def test_deleted_registration_with_indexed_root_never_generates_replacement(
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner, instance_id=identity.instance_id)
         storage.start()
         try:
@@ -331,6 +336,7 @@ def test_failed_yaml_publication_preserves_ignore_and_root_bound_unknown_receipt
         original(source, destination, **kwargs)
 
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner, instance_id=identity.instance_id)
         storage.start()
         try:
@@ -424,6 +430,7 @@ def test_failed_index_after_actual_yaml_write_does_not_erase_or_regenerate_ident
     with owner:
         with monkeypatch.context() as patch:
             patch.setattr(sqlite3, "connect", connect)
+            owner.store.credential(owner)
             storage = SQLiteStorage(owner, instance_id=identity.instance_id)
             storage.start()
             try:

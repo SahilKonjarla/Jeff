@@ -62,6 +62,7 @@ def test_four_active_sixteen_pending_and_actual_drain(git_repo: Path, tmp_path: 
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner, instance_id=identity.instance_id)
         storage.start()
         assert storage.wait_ready(5).state == "ready"

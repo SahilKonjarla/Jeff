@@ -64,6 +64,7 @@ def test_terminal_retirement_removes_evidence_but_permanently_refuses_uuid(tmp_p
     read = HistoryRead(project_id=project.project_id, canonical_root=project.root)
     clock = [0]
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance, retention_clock=lambda: clock[0])
         store.start()
         try:
@@ -149,6 +150,7 @@ def test_dispatcher_refuses_retired_uuid_as_known_nonacceptance_without_poisonin
     assert owner is not None
     clock = [0]
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(
             owner, instance_id=identity.instance_id, retention_clock=lambda: clock[0]
         )
@@ -228,6 +230,7 @@ def test_retirement_rollback_or_lost_commit_ack_never_creates_a_replay_gap(
     with owner:
         with monkeypatch.context() as patch:
             patch.setattr(sqlite3, "connect", connect)
+            owner.store.credential(owner)
             store = SQLiteStorage(owner, instance_id=instance, retention_clock=lambda: clock[0])
             store.start()
             try:
@@ -278,6 +281,7 @@ def test_retirement_preserves_all_unknown_accepted_running_evidence(tmp_path: Pa
     instance, project = uuid4(), uuid4()
     clock = [0]
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance, retention_clock=lambda: clock[0])
         store.start()
         try:
@@ -346,6 +350,7 @@ def test_retirement_batch_is_bounded_and_tombstones_store_only_uuid(tmp_path: Pa
     clock = [0]
     retired_ids = set()
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance, retention_clock=lambda: clock[0])
         store.start()
         try:
@@ -493,6 +498,7 @@ with owner:
             if migration_fault == "busy":
                 holder.execute("BEGIN IMMEDIATE")  # real two-second SQLite contention
             patch.setattr(sqlite3, "connect", connect)
+            owner.store.credential(owner)
             failing = SQLiteStorage(owner, instance_id=instance)
             failing.start()
             try:
@@ -598,6 +604,7 @@ with owner:
     assert owner is not None
     instance = uuid4()
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance, retention_clock=lambda: clock)
         store.start()
         try:
@@ -655,6 +662,7 @@ def test_retirement_refuses_corrupt_or_exhausted_metadata_without_partial_deleti
         project_id=project,
     )
     with owner:
+        owner.store.credential(owner)
         initial = SQLiteStorage(owner, instance_id=instance)
         initial.start()
         try:
@@ -730,6 +738,7 @@ def test_concurrent_expiry_and_duplicate_claim_never_reopens_request_admission(
     instance, project = uuid4(), uuid4()
     wall = [0]
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance, retention_clock=lambda: wall[0])
         store.start()
         try:
@@ -792,6 +801,7 @@ def test_scheduled_retirement_runs_on_idle_owner_only_after_ready_plus_sixty_sec
     instance, project = uuid4(), uuid4()
     wall, monotonic = [0], [100.0]
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(
             owner,
             instance_id=instance,
@@ -859,6 +869,7 @@ def test_observed_backward_wall_step_defers_even_when_the_receipt_would_look_old
     instance, project = uuid4(), uuid4()
     wall = [0]
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance, retention_clock=lambda: wall[0])
         store.start()
         try:
@@ -915,6 +926,7 @@ def test_stop_acceptance_pauses_retention_without_sealing_ordinary_sql(
     identity = RuntimeIdentityData(instance_id=uuid4(), pid=os.getpid())
     mono = [100.0]
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(
             owner,
             instance_id=identity.instance_id,
@@ -952,6 +964,7 @@ def test_unrepresentable_monotonic_interval_never_spins_expiry(tmp_path: Path, b
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, scheduled_retention=True, retention_monotonic=lambda: bad)
         store.start()
         try:
@@ -980,6 +993,7 @@ def test_bad_wall_sample_defers_one_cadence_without_sql_failure_or_immediate_ret
         return cast(int, wall[0])  # intentional clock-driver fault, not a valid typed value
 
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(
             owner,
             scheduled_retention=True,
@@ -1018,6 +1032,7 @@ def test_scheduled_batches_are_bounded_and_progress_during_continuous_sql_traffi
     traffic_stop = threading.Event()
     traffic_ready = threading.Event()
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(
             owner,
             instance_id=instance,
@@ -1090,6 +1105,7 @@ def test_actual_sqlite_busy_consumes_attempt_and_backoff_starts_after_completion
     assert owner is not None
     mono = [100.0]
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, scheduled_retention=True, retention_monotonic=lambda: mono[0])
         store.start()
         try:
@@ -1146,6 +1162,7 @@ def test_pause_and_close_do_not_count_a_running_retirement_as_released_sql(
     with owner:
         with monkeypatch.context() as patch:
             patch.setattr(sqlite3, "connect", connect)
+            owner.store.credential(owner)
             store = SQLiteStorage(
                 owner,
                 instance_id=identity.instance_id,
@@ -1213,6 +1230,7 @@ def test_huge_retention_days_are_safe_and_settings_reload_only_on_restart(tmp_pa
     huge = 10**100
     with owner:
         # Create ordinary private defaults, then change only this owned fixture's policy.
+        owner.store.credential(owner)
         initial = SQLiteStorage(owner)
         initial.start()
         try:
@@ -1288,6 +1306,7 @@ def test_scheduler_is_disabled_by_default_even_when_both_clocks_advance(tmp_path
     assert owner is not None
     mono, wall = [100.0], [0]
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(
             owner, retention_monotonic=lambda: mono[0], retention_clock=lambda: wall[0]
         )
@@ -1325,6 +1344,7 @@ def test_sixty_second_delay_begins_after_sql_initialization_not_at_construction(
 
     with owner, monkeypatch.context() as patch:
         patch.setattr(sqlite3, "connect", connect)
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, scheduled_retention=True, retention_monotonic=lambda: mono[0])
         store.start()
         try:
@@ -1368,6 +1388,7 @@ def test_scheduled_lost_commit_ack_closes_admission_without_retrying_retirement(
     with owner:
         with monkeypatch.context() as patch:
             patch.setattr(sqlite3, "connect", connect)
+            owner.store.credential(owner)
             store = SQLiteStorage(
                 owner,
                 instance_id=instance,

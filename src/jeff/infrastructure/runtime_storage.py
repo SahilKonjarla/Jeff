@@ -60,7 +60,12 @@ from jeff.application.storage import (
 )
 from jeff.domain.projects import Project
 from jeff.infrastructure.runtime_settings import load_or_create_settings
-from jeff.infrastructure.runtime_state import DiagnosticLease, Ownership
+from jeff.infrastructure.runtime_state import (
+    RECOVERY_DATABASE_BYTES,
+    RECOVERY_JOURNAL_BYTES,
+    DiagnosticLease,
+    Ownership,
+)
 
 _LEDGER = "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)"
 _PROJECTS = (
@@ -238,7 +243,7 @@ def inspect_stopped_storage(lease: DiagnosticLease, deadline: float) -> int:
     """
 
     def no_sidecars(root: int) -> None:
-        for name in _SIDECARS:
+        for name in (*_SIDECARS, "recovery.json"):
             try:
                 os.stat(name, dir_fd=root, follow_symlinks=False)
             except FileNotFoundError:
@@ -246,6 +251,8 @@ def inspect_stopped_storage(lease: DiagnosticLease, deadline: float) -> int:
             raise StorageFault("storage_recovery_required")
 
     try:
+        with lease.data_directory() as root:
+            no_sidecars(root)  # Refuse residue before any database body-capable open.
         with lease.data_directory() as root, lease.open_file("database") as fd:
             no_sidecars(root)
             header = os.pread(fd, 100, 0)
@@ -539,6 +546,91 @@ class SQLiteStorage:
                 "storage_busy" if result.cancel() else "storage_outcome_unconfirmed"
             ) from None
 
+    def _begin_write(self, connection: sqlite3.Connection, root: int, fd: int) -> None:
+        """Arm the actual DELETE journal before business DML, on the same SQL owner."""
+        self._check(root, fd)
+        try:
+            self.owner.store.read_credential()  # Existing authority only, never rekey residue.
+            self.owner.retire_storage_recovery(fd)
+            connection.execute("BEGIN IMMEDIATE")
+            page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+            pages = connection.execute("PRAGMA page_count").fetchone()[0]
+            connection.execute("PRAGMA user_version=4")  # Same version; real journal first.
+            journal = os.open("state.sqlite3-journal", os.O_RDONLY | _FLAGS, dir_fd=root)
+            try:
+                self.owner.arm_storage_recovery(
+                    fd, journal, page_size=page_size, original_pages=pages
+                )
+            finally:
+                os.close(journal)
+        except (ControlFault, OSError):
+            raise StorageFault("storage_recovery_required") from None
+
+    def _commit_write(self, connection: sqlite3.Connection, fd: int) -> None:
+        connection.execute("COMMIT")
+        try:
+            self.owner.retire_storage_recovery(fd)
+        except (ControlFault, OSError):
+            raise StorageFault("storage_outcome_unconfirmed") from None
+
+    def _rollback_write(self, connection: sqlite3.Connection, fd: int) -> None:
+        connection.execute("ROLLBACK")
+        try:
+            self.owner.retire_storage_recovery(fd)
+        except (ControlFault, OSError):
+            raise StorageFault("storage_outcome_unconfirmed") from None
+
+    def _authorize_recovery(self, root: int, database_fd: int) -> int:
+        """Read-only eligibility before writable SQLite open; return a pinned journal FD."""
+        journal = os.open("state.sqlite3-journal", os.O_RDONLY | _FLAGS, dir_fd=root)
+        try:
+            before = os.fstat(journal)
+            permit = self.owner.verify_storage_recovery(database_fd, journal)
+            database = os.fstat(database_fd)
+            if not (
+                0 < database.st_size <= RECOVERY_DATABASE_BYTES
+                and 28 <= before.st_size <= RECOVERY_JOURNAL_BYTES
+                and permit.original_pages * permit.page_size <= RECOVERY_DATABASE_BYTES
+                and database.st_size % permit.page_size == 0
+            ):
+                raise StorageFault("storage_recovery_required")
+            header = os.pread(journal, 28, 0)
+            magic = bytes.fromhex("d9d505f920a163d7")
+            if len(header) != 28 or header[:8] != magic:
+                raise StorageFault("storage_recovery_required")
+            records = int.from_bytes(header[8:12], "big")
+            original_pages = int.from_bytes(header[16:20], "big")
+            sector = int.from_bytes(header[20:24], "big")
+            page_size = int.from_bytes(header[24:28], "big")
+            if not (
+                records > 0
+                and original_pages == permit.original_pages
+                and page_size == permit.page_size
+                and 512 <= sector <= 65536
+                and sector & (sector - 1) == 0
+                and before.st_size >= sector + page_size + 8
+                and (
+                    records == 0xFFFFFFFF or records <= (before.st_size - sector) // (page_size + 8)
+                )
+            ):
+                raise StorageFault("storage_recovery_required")
+            # ATTACH is forbidden; never adopt a super-journal relationship/path.
+            if os.pread(journal, 8, before.st_size - 8) == magic:
+                raise StorageFault("storage_recovery_required")
+            after = os.fstat(journal)
+            if (_signature(before), before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                _signature(after),
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            ):
+                raise StorageFault("storage_recovery_required")
+            self.owner.verify_storage_recovery(database_fd, journal)
+            return journal
+        except BaseException:
+            os.close(journal)
+            raise
+
     def _sidecars(self, root: int, *, preexisting: bool) -> None:
         for name in _SIDECARS:
             try:
@@ -571,21 +663,57 @@ class SQLiteStorage:
 
     def _open(self, root: int) -> tuple[sqlite3.Connection, int]:
         self.owner.check()
-        self._sidecars(root, preexisting=True)
+        for name in _SIDECARS[1:]:
+            try:
+                os.stat(name, dir_fd=root, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            raise StorageFault("storage_recovery_required")
+        try:
+            os.stat("state.sqlite3-journal", dir_fd=root, follow_symlinks=False)
+            recovering = True
+        except FileNotFoundError:
+            recovering = False
+        try:
+            os.stat("recovery.json", dir_fd=root, follow_symlinks=False)
+            has_permit = True
+        except FileNotFoundError:
+            has_permit = False
         fd = -1
+        journal_fd = -1
         connection: sqlite3.Connection | None = None
         try:
-            try:
-                fd = os.open(
-                    "state.sqlite3", os.O_RDWR | _FLAGS | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=root
-                )
-                created = True
-            except FileExistsError:
-                fd = os.open("state.sqlite3", os.O_RDONLY | _FLAGS, dir_fd=root)
+            if recovering or has_permit:
+                try:
+                    fd = os.open("state.sqlite3", os.O_RDONLY | _FLAGS, dir_fd=root)
+                except FileNotFoundError:
+                    raise StorageFault("storage_recovery_required") from None
                 created = False
+            else:
+                try:
+                    fd = os.open(
+                        "state.sqlite3",
+                        os.O_RDWR | _FLAGS | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                        dir_fd=root,
+                    )
+                    created = True
+                except FileExistsError:
+                    fd = os.open("state.sqlite3", os.O_RDONLY | _FLAGS, dir_fd=root)
+                    created = False
             self._check(root, fd)
+            if recovering:
+                try:
+                    journal_fd = self._authorize_recovery(root, fd)
+                except (ControlFault, OSError):
+                    raise StorageFault("storage_recovery_required") from None
+            else:
+                try:
+                    self.owner.retire_storage_recovery(fd)
+                except (ControlFault, OSError):
+                    raise StorageFault("storage_recovery_required") from None
             base = self.owner.store.layout.database.as_uri()
-            if not created:
+            if not created and not recovering:
                 header = os.pread(fd, 100, 0)
                 if len(header) != 100 or header[:16] != b"SQLite format 3\0":
                     raise StorageFault("storage_unrecognized")
@@ -607,6 +735,10 @@ class SQLiteStorage:
                     raise _fault(error, "storage_unrecognized") from None
                 self._check(root, fd)
                 self._sidecars(root, preexisting=True)
+            if recovering:
+                self.owner.verify_storage_recovery(
+                    fd, journal_fd
+                )  # Last check before writable open.
             connection = sqlite3.connect(
                 base + "?mode=rw&cache=private",
                 uri=True,
@@ -682,17 +814,25 @@ class SQLiteStorage:
                     raise
             _schema(connection)
             self._activity_meta(connection)
+            if recovering:
+                if connection.execute("PRAGMA quick_check(1)").fetchone() != ("ok",):
+                    raise StorageFault("storage_unrecognized")
+                self._sidecars(root, preexisting=True)  # SQLite, not Jeff, removed its journal.
+                self.owner.retire_storage_recovery(fd)
             if self.instance_id is not None:
-                self._reconcile(connection, self.instance_id)
+                self._reconcile(connection, self.instance_id, root, fd)
             self._check(root, fd)
             return connection, fd
         except BaseException:
             try:
                 if connection is not None and connection.in_transaction:
-                    connection.execute("ROLLBACK")
+                    self._rollback_write(connection, fd)
             finally:
                 self._release(connection, fd)
             raise
+        finally:
+            if journal_fd >= 0:
+                os.close(journal_fd)
 
     def _execute(self, connection: sqlite3.Connection, work: _Work, root: int, fd: int) -> object:
         self._check(root, fd)
@@ -720,7 +860,7 @@ class SQLiteStorage:
         project_id, path = str(work.payload.project_id), str(work.payload.root)
         writing = work.operation == "index"
         if writing:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_write(connection, root, fd)
         rows = connection.execute(
             "SELECT project_id,canonical_root FROM projects WHERE project_id=? OR canonical_root=?",
             (project_id, path),
@@ -735,7 +875,10 @@ class SQLiteStorage:
         self._check(root, fd)
         try:
             if writing:
-                connection.execute("COMMIT")
+                if created:
+                    self._commit_write(connection, fd)
+                else:
+                    self._rollback_write(connection, fd)
             self._check(root, fd)
         except (sqlite3.Error, StorageFault, ControlFault, OSError):
             if writing and not connection.in_transaction:
@@ -1093,7 +1236,7 @@ class SQLiteStorage:
                 next_after=events[-1].sequence if events else payload.after,
             )
         assert isinstance(payload, ActivityRecord)
-        connection.execute("BEGIN IMMEDIATE")
+        self._begin_write(connection, root, fd)
         row = connection.execute(
             f"SELECT {_COLUMNS} FROM request_receipts WHERE request_id=?",
             (str(payload.request_id),),
@@ -1116,7 +1259,7 @@ class SQLiteStorage:
             raise StorageFault("receipt_conflict")
         self._check(root, fd)
         try:
-            connection.execute("COMMIT")
+            self._commit_write(connection, fd)
             self._check(root, fd)
         except Exception:
             if not connection.in_transaction:
@@ -1134,7 +1277,7 @@ class SQLiteStorage:
         if now is None:
             raise StorageFault("storage_busy")  # Defer; never clamp to a stale larger cutoff.
         cutoff = max(0, now - self._retention_days * 86400000)
-        connection.execute("BEGIN IMMEDIATE")
+        self._begin_write(connection, root, fd)
         meta = self._activity_meta(connection)
         rows = connection.execute(
             f"SELECT {_COLUMNS} FROM request_receipts "
@@ -1196,13 +1339,16 @@ class SQLiteStorage:
         )
         self._check(root, fd)
         try:
-            connection.execute("COMMIT")
+            if selected:
+                self._commit_write(connection, fd)
+            else:
+                self._rollback_write(connection, fd)
             self._check(root, fd)
         except Exception:
             if not connection.in_transaction:
                 raise StorageFault("storage_outcome_unconfirmed") from None
             raise
-        self._publish_retention(result)  # Checked COMMIT precedes cache, then caller's hint.
+        self._publish_retention(result)  # Checked transaction completion precedes the cache.
         self._activity_dirty = bool(selected)
         return result
 
@@ -1305,7 +1451,7 @@ class SQLiteStorage:
         except Exception as error:
             try:
                 if connection.in_transaction:
-                    connection.execute("ROLLBACK")
+                    self._rollback_write(connection, fd)
             except sqlite3.Error:
                 fault = StorageFault("storage_outcome_unconfirmed")
             else:
@@ -1315,19 +1461,21 @@ class SQLiteStorage:
                 self._closing.set()
             self._retention_end(fault=fault)
 
-    def _reconcile(self, connection: sqlite3.Connection, instance: UUID) -> None:
+    def _reconcile(
+        self, connection: sqlite3.Connection, instance: UUID, root: int, fd: int
+    ) -> None:
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.start_seconds
         while True:
             if time.monotonic() >= deadline:
                 raise StorageFault("storage_busy")
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_write(connection, root, fd)
             rows = connection.execute(
                 f"SELECT {_COLUMNS} FROM request_receipts WHERE state IN ('accepted','running') "
                 "AND owner_instance_id<>? LIMIT 100",
                 (str(instance),),
             ).fetchall()
             if not rows:
-                connection.execute("COMMIT")
+                self._rollback_write(connection, fd)  # Undo the primer when there is no work.
                 return
             for row in rows:
                 receipt = self._receipt(row)
@@ -1337,7 +1485,7 @@ class SQLiteStorage:
                     (time.time_ns() // 1000000, str(receipt.request_id)),
                 )
                 self._append_event(connection, receipt, "request.interrupted", code="interrupted")
-            connection.execute("COMMIT")
+            self._commit_write(connection, fd)
 
     def _receipt_work(
         self, connection: sqlite3.Connection, work: _Work, root: int, fd: int
@@ -1346,7 +1494,7 @@ class SQLiteStorage:
         assert isinstance(payload, (ReceiptClaim, ReceiptTransition, ReceiptScope))
         writing = work.operation != "inspect"
         if writing:
-            connection.execute("BEGIN IMMEDIATE")
+            self._begin_write(connection, root, fd)
         row = connection.execute(
             f"SELECT {_COLUMNS} FROM request_receipts WHERE request_id=?",
             (str(payload.request_id),),
@@ -1482,7 +1630,10 @@ class SQLiteStorage:
         self._check(root, fd)
         if writing:
             try:
-                connection.execute("COMMIT")
+                if isinstance(result, ReceiptClaimResult) and not result.created:
+                    self._rollback_write(connection, fd)
+                else:
+                    self._commit_write(connection, fd)
                 self._check(root, fd)
             except Exception:
                 if not connection.in_transaction:
@@ -1573,7 +1724,7 @@ class SQLiteStorage:
                         except Exception as error:  # thread boundary never leaks raw driver facts
                             try:
                                 if connection.in_transaction:
-                                    connection.execute("ROLLBACK")
+                                    self._rollback_write(connection, fd)
                             except sqlite3.Error:
                                 fault = StorageFault("storage_outcome_unconfirmed")
                                 self._failed(fault)

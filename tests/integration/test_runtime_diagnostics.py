@@ -75,6 +75,44 @@ def test_receipt_only_residue_is_read_only_unavailable_not_clean_stopped(
     assert snapshot(stopped) == before
 
 
+def test_recovery_permission_residue_is_read_only_unavailable(
+    stopped: RuntimeLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = RuntimeStateStore(stopped).acquire(create=False)
+    assert owner is not None
+    with owner, closing(sqlite3.connect(stopped.database, isolation_level=None)) as connection:
+        size = connection.execute("PRAGMA page_size").fetchone()[0]
+        pages = connection.execute("PRAGMA page_count").fetchone()[0]
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("PRAGMA user_version=4")
+        db = os.open(stopped.database, os.O_RDONLY | os.O_NOFOLLOW)
+        journal = os.open(stopped.data_dir / "state.sqlite3-journal", os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            owner.arm_storage_recovery(db, journal, page_size=size, original_pages=pages)
+            connection.execute("COMMIT")  # Leave only a genuine own permit, not a fake journal.
+        finally:
+            os.close(journal)
+            os.close(db)
+    before = snapshot(stopped)
+    original = os.open
+
+    def denied(
+        path: str | bytes | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fsdecode(path) in ("ipc.key", "state.sqlite3", "recovery.json"):
+            raise AssertionError("Doctor attempted a credential/database/recovery body open")
+        return original(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", denied)
+    report = RuntimeDiagnosticsAdapter(lambda: stopped).inspect()
+    assert report.data.summary == "unavailable" and report.data.runtime is None
+    assert snapshot(stopped) == before
+
+
 def test_shared_diagnostic_lease_excludes_real_owner_and_releases(stopped: RuntimeLayout) -> None:
     store = RuntimeStateStore(stopped)
     before = snapshot(stopped)

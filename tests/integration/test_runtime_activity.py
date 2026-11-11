@@ -37,6 +37,7 @@ def test_atomic_lifecycle_evidence_scoped_replay_no_write_and_restart(tmp_path: 
         return time.monotonic() + 5
 
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance)
         store.start()
         try:
@@ -147,6 +148,7 @@ def test_nullable_identity_routing_budget_and_owner_guards(tmp_path: Path) -> No
         project_id=None,
     )
     with owner:
+        owner.store.credential(owner)
         store = SQLiteStorage(owner, instance_id=instance)
         store.start()
         try:
@@ -266,6 +268,7 @@ def test_real_receipt_and_event_transaction_failure_never_replays_or_fakes_compl
     with owner:
         with monkeypatch.context() as patch:
             patch.setattr(sqlite3, "connect", connect)
+            owner.store.credential(owner)
             store = SQLiteStorage(owner, instance_id=instance)
             store.start()
             try:
@@ -377,6 +380,7 @@ with owner:
         before = layout.database.read_bytes()
         with monkeypatch.context() as patch:
             patch.setattr(sqlite3, "connect", connect)
+            owner.store.credential(owner)
             failing = SQLiteStorage(owner, instance_id=uuid4())
             failing.start()
             try:
