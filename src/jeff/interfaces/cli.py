@@ -32,7 +32,11 @@ def create_app(
     control: Callable[[], RuntimeControl],
     diagnostics: Callable[[], RuntimeDiagnostics] | None = None,
 ) -> typer.Typer:
-    """Build a CLI around injected application use cases, not concrete adapters."""
+    """Build a CLI without invoking factories or selecting an installation.
+
+    Registered callback docstrings are user-visible help; rendering and factory
+    selection remain separate so help/syntax cannot start runtime work.
+    """
     app = typer.Typer(
         name="jeff",
         help=(
@@ -61,6 +65,7 @@ def create_app(
         | Failure,
         json_output: bool,
     ) -> None:
+        """Render typed public results only; raw exceptions are never output payloads."""
         if json_output:
             typer.echo(
                 json.dumps(
@@ -187,6 +192,8 @@ def create_app(
         def dispatch(directory: Path) -> Success | QuestionSuccess | Failure:
             call = ProjectCall(operation=operation, directory=directory, question=question)
             reply = client().execute(call)
+            # Correlation belongs on stderr, preserving the established JSON body.
+            # Unknown or duplicate admission is not permission to retry the action.
             if (
                 reply.accepted is None
                 or (reply.receipt is not None and reply.receipt.state == "unknown")

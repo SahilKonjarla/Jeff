@@ -133,6 +133,7 @@ def _send(
 
 
 def _arguments(operation: str, drivers: list[str]) -> tuple[str, ...]:
+    """Expand a finite private operation, not caller-provided command authority."""
     if operation == "discovery.root":
         return ("rev-parse", "--show-toplevel")
     if operation == "discovery.private_tracking":
@@ -169,6 +170,7 @@ def _arguments(operation: str, drivers: list[str]) -> tuple[str, ...]:
 
 
 def _request(directory: Path, arguments: tuple[str, ...], deadline: float) -> _Request:
+    """Require an exact argv round-trip through the private operation allowlist."""
     drivers: list[str] = []
     position = 0
     while position < len(arguments) and arguments[position] == "-c":
@@ -210,6 +212,7 @@ def _request(directory: Path, arguments: tuple[str, ...], deadline: float) -> _R
 
 
 def _validate_descriptors(watch: int, channel: int, lease: int) -> None:
+    """Check inherited roles without reopening or reacquiring the existing lock lease."""
     descriptors = (watch, channel, lease)
     if min(descriptors) < 3 or len(set(descriptors)) != 3:
         raise ValueError("Invalid inherited descriptor roles")
@@ -248,6 +251,7 @@ class OwnedGitRunner:
 
     @property
     def closed(self) -> bool:
+        """Reconcile captured outcomes; abnormal exits keep cleanup unconfirmed."""
         with self._mutex:
             self._reconcile_locked()
             return not self._helpers and not self._cleanup_pending
@@ -260,6 +264,7 @@ class OwnedGitRunner:
         deadline: float | None = None,
         measured: list[int] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
+        """Run once inside the caller budget, retaining quarantine for uncertain cleanup."""
         if executable != "/usr/bin/git" or deadline is None:
             raise ProjectError(
                 "git_failed", "Owned Git invocation is unavailable; no fallback was run."
@@ -512,6 +517,7 @@ def _main() -> int:
 
 
 def main() -> int:
+    """Reserve exit2 for unexpected failures, including final descriptor-close errors."""
     try:
         return _main()
     except Exception:

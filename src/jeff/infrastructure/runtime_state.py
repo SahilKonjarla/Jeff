@@ -437,6 +437,7 @@ class DiagnosticObservation:
             raise DiagnosticDeadlineExceeded
 
     def stopped_lease(self) -> DiagnosticLease:
+        """Issue read-only authority only while the pinned lock is free and residue absent."""
         self.check()
         if self.held:
             raise ControlFault("runtime_ownership_unconfirmed")
@@ -462,6 +463,7 @@ class Ownership:
         self.close()
 
     def close(self) -> None:
+        """Close this copy only; LOCK_UN would also release inherited live copies."""
         if self.fd >= 0:
             os.close(self.fd)
             self.fd = -1
@@ -470,6 +472,7 @@ class Ownership:
             self.directory_fd = -1
 
     def check(self) -> None:
+        """Revalidate that the captured descriptors still name the selected stable anchor."""
         try:
             with self.store.directory(self.store.layout.runtime_dir, create=False) as root:
                 if _identity(os.fstat(root)) != _identity(os.fstat(self.directory_fd)):
@@ -614,6 +617,7 @@ class Ownership:
                     os.close(fd)
 
     def verify_storage_recovery(self, database_fd: int, journal_fd: int) -> _RecoveryPermit:
+        """Authenticate exact namespace/file bindings; leave journal recovery to SQLite."""
         self.check()
         token = self.store.read_credential()
         with self.store.directory(self.store.layout.data_dir, create=False) as root:
@@ -919,6 +923,12 @@ class Ownership:
 
 
 class RuntimeStateStore:
+    """Operate on one checked namespace; constructor metadata is not lifetime authority.
+
+    Ownership, diagnostic leases and existing-key reads are separate capabilities.
+    Missing state never authorizes reset, key rotation or a guessed-PID cleanup.
+    """
+
     def __init__(self, layout: RuntimeLayout) -> None:
         if sys.platform != "darwin":
             raise ControlFault("unsupported_runtime_platform")
@@ -1123,6 +1133,7 @@ class RuntimeStateStore:
             raise ControlFault("runtime_ownership_unconfirmed") from None
 
     def credential(self, owner: Ownership) -> bytes:
+        """Create only an absent key under ownership; never replace invalid existing bytes."""
         if owner.store is not self:
             raise ControlFault("runtime_ownership_unconfirmed")
         owner.require_no_endpoint()
@@ -1155,6 +1166,7 @@ class RuntimeStateStore:
         return self.read_credential()
 
     def read_credential(self) -> bytes:
+        """Read the existing bounded private key without creating or repairing state."""
         try:
             with self.directory(self.layout.data_dir, create=False) as root:
                 fd = os.open("ipc.key", os.O_RDONLY | _FILE_FLAGS, dir_fd=root)

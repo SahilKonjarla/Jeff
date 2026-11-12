@@ -27,6 +27,7 @@ class _UniqueLoader(yaml.SafeLoader):  # type: ignore[misc]
 
 
 def parse_settings(payload: bytes) -> RuntimeSettings:
+    """Bound YAML structure before validation and suppress raw configuration errors."""
     try:
         if len(payload) > SETTINGS_LIMIT:
             raise ValueError("Size")
@@ -74,6 +75,11 @@ def read_existing_settings(lease: DiagnosticLease) -> RuntimeSettings:
 def load_or_create_settings(
     owner: Ownership,
 ) -> tuple[RuntimeSettings, Literal["default_file", "existing_file"]]:
+    """Create defaults exclusively or preserve an existing checked file byte-for-byte.
+
+    This is startup-only loading, not hot reload or repair. A failed initial write
+    can leave partial state that later starts must refuse rather than overwrite.
+    """
     try:
         owner.check()
         source: Literal["default_file", "existing_file"] = "existing_file"

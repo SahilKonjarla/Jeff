@@ -180,6 +180,8 @@ class Receipt(ReceiptClaim):
         return self
 
 
+# The sole identity association is a running init's null-to-known UUID transition;
+# a terminal update cannot retarget the claim or fabricate a successful outcome.
 class ReceiptTransition(_StorageModel):
     error_code: ActivityCode | None = None
     request_id: UUID
@@ -234,6 +236,12 @@ class RetentionProgress(_StorageModel):
 
 
 class RequestLedger(Protocol):
+    """Persist scoped request truth without exposing SQL or replaying stored answers.
+
+    Absolute deadlines bound caller waits, not cancellation of admitted writes.
+    Missing or expired details never establish that an action did not execute.
+    """
+
     def stream_page(self, scope: StreamRead, *, deadline: float) -> StreamPage: ...
     def history(self, scope: HistoryRead, *, deadline: float) -> HistoryPage: ...
     def debug(self, scope: HistoryScope, *, deadline: float) -> tuple[Receipt, ActivityTrace]: ...
@@ -248,6 +256,8 @@ class RequestLedger(Protocol):
 
 
 class ProjectRegistry(Protocol):
+    """Index already validated identities; never discover or rebind projects implicitly."""
+
     def root_claimed(self, root: Path, *, deadline: float | None = None) -> bool:
         """Read-only existence check; never recover an identity from a missing YAML file."""
         ...

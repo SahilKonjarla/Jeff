@@ -101,6 +101,8 @@ class RuntimePathInputs:
     runtime_dir: str | None = None
 
 
+# Pure path derivation: constructing a layout does not create state or establish
+# ownership. Every adapter must revalidate its own operation-time capabilities.
 class RuntimeLayout(_RuntimeModel):
     data_dir: Path
     runtime_dir: Path
@@ -276,6 +278,8 @@ class ControlSuccess(_RuntimeModel):
 
 
 class RuntimeControl(Protocol):
+    """Explicit installation lifecycle; acknowledgement alone does not confirm exit."""
+
     def start(self) -> ControlSuccess | Failure: ...
     def status(self) -> ControlSuccess | Failure: ...
     def stop(self) -> ControlSuccess | Failure: ...
@@ -352,6 +356,8 @@ def control_failure(code: ControlIssueCode) -> Failure:
     return Failure(error=ErrorData(code=code, message=_CONTROL_MESSAGES[code]))
 
 
+# SecretStr masks repr, not transport serialization. This handshake value must
+# remain private to the authenticated channel, never public results or history.
 class AuthRequest(_RuntimeModel):
     revision: StrictInt = Field(ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION)
     token: SecretStr

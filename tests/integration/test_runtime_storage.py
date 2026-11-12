@@ -220,6 +220,10 @@ def test_driver_error_after_actual_commit_is_uncertain_not_retryable_failure(
 def test_running_timeout_retains_slot_queue_is_bounded_and_close_waits_for_real_sql(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Keep the real timeout: caller uncertainty must not release running SQL capacity.
+
+    Release the SQL gate before executor teardown so held workers can actually end.
+    """
     layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None

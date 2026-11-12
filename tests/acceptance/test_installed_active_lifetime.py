@@ -1,4 +1,8 @@
-"""Named6D native actor windows; genuine captured owners, never default/user state."""
+"""Named6D native actor windows; genuine captured owners, never default/user state.
+
+Environment gates identify harness paths, not renewed permission to inject faults.
+Every fault execution requires its own explicit, bounded operator authority.
+"""
 
 from __future__ import annotations
 
@@ -843,6 +847,11 @@ ipc._stream_send=send
 
 @contextmanager
 def _live_peer_reader(stream: OwnedActivityStream) -> Iterator[tuple[set[str], threading.Event]]:
+    """Drain the healthy peer so another reader's backpressure remains isolated.
+
+    Close the owned stream before joining; propagate reader failures to the test
+    rather than treating a stopped thread as proof of successful peer shutdown.
+    """
     seen: set[str] = set()
     closed, stop = threading.Event(), threading.Event()
     errors: list[BaseException] = []

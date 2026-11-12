@@ -573,6 +573,8 @@ def test_retirement_invalidates_buffered_writer_while_global_read_is_busy(
     arm_read, expire, committed = tmp_path / "arm-read", tmp_path / "expire", tmp_path / "committed"
     release_send, release_read = tmp_path / "release-send", tmp_path / "release-read"
     original = subprocess.Popen
+    # Install SQL/socket hooks before bootstrap captures them. Inject clocks only at
+    # composition; rebinding the storage class would change the fixture's type identity.
     launcher = f"""
 import asyncio,sqlite3,subprocess,time
 from pathlib import Path

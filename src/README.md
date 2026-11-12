@@ -1,6 +1,6 @@
 # Source layout
 
-**Status:** M01 registration and read-only branch/change questions implemented. M02 adds authenticated public daemon lifecycle/project dispatch, private SQLite/receipts and runtime-aware status; history/doctor/recovery remain pending.
+**Status:** M01 registration and read-only branch/change questions implemented. M02 adds authenticated public daemon lifecycle/project dispatch, private SQLite/receipts and runtime-aware status; scoped history/events/retention, read-only doctor, proven owned recovery and native Git-child lifetime are delivered. M02 is accepted; later execution/provider features remain outside scope.
 
 `jeff/` contains the Python package; see its [tier map](jeff/README.md). Packaging and tooling live in [pyproject.toml](../pyproject.toml).
 

@@ -227,6 +227,11 @@ class _Invocation:
 def _invocation(
     root: Path, *, hold_git: bool = False, seconds: int = 4, observe: bool = False
 ) -> Iterator[_Invocation]:
+    """Separate parent liveness from the helper's inherited lifetime lease.
+
+    Closing the writer exercises EOF cleanup; closing the parent's lease copy
+    cannot release the helper's lock. Teardown waits without forced termination.
+    """
     anchor = root / "helper.lock"
     lease = os.open(anchor, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
     fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -410,6 +415,8 @@ def test_normal_exit_and_observer_fd_cleanup(git_repo: Path, tmp_path: Path) -> 
         received = array.array("i")
         received.frombytes(data)
         assert len(received) == 1
+        # Authenticate the transferred socket's native peer, then register exit locally.
+        # An FD number or serialized PID alone is not equivalent ownership evidence.
         with socket.socket(fileno=received[0]) as capability, closing(select.kqueue()) as observer:
             uid, pid = peer_identity(capability)
             assert (uid, pid) == (os.geteuid(), call.process.pid)

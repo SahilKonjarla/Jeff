@@ -216,6 +216,7 @@ class DoctorResult(_DoctorModel):
 
 
 def doctor_result(report: DoctorReport) -> DoctorResult:
+    """Preserve an unhealthy report as bounded result data instead of discarding it."""
     if report.summary in ("healthy", "stopped", "uninitialized"):
         return DoctorResult(ok=True, data=report)
     unavailable = report.summary == "unavailable"
@@ -253,4 +254,6 @@ class DiagnosticDeadlineExceeded(Exception):
 
 
 class RuntimeDiagnostics(Protocol):
+    """Observe the selected installation without starting, repairing or scheduling work."""
+
     def inspect(self) -> DoctorResult: ...

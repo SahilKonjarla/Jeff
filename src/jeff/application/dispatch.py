@@ -159,6 +159,8 @@ class ActivityFault(Exception):
 
 
 class ActivityStream(Protocol):
+    """One owned consumer; EOF is possible without a terminal frame or processing ACK."""
+
     ready: StreamFrame
 
     def __enter__(self) -> Self: ...
@@ -168,6 +170,8 @@ class ActivityStream(Protocol):
 
 
 class ActivityClient(Protocol):
+    """Open explicit subscriptions without reconnecting or persisting cursors implicitly."""
+
     def subscribe(self, query: SubscriptionQuery) -> ActivityStream: ...
 
 
@@ -367,6 +371,8 @@ def dispatch_failure(
 
 
 class DispatchStore(RequestLedger, ProjectRegistry, Protocol):
+    """Combine typed ledger/registry ports without granting arbitrary SQL callbacks."""
+
     pass
 
 
@@ -450,6 +456,12 @@ class ProjectDispatcher:
             )
 
     def execute(self, call: ProjectCall, absolute_deadline: float) -> DispatchReply:
+        """Claim actions durably before mutation; config remains a read-only exception.
+
+        Queue/transport admission is not the claim. A lost claim acknowledgement
+        leaves acceptance unknown; missing replies never authorize action replay.
+        """
+
         def reply(
             result: Success | QuestionSuccess | Failure,
             accepted: bool | None = False,
@@ -638,6 +650,7 @@ class ProjectDispatcher:
             return reply(dispatch_failure("request_outcome_unknown"), accepted)
 
     def read_stream(self, query: StreamQuery, absolute_deadline: float) -> StreamReply:
+        """Rebind the current project before reading a committed, cursor-checked page."""
         bound = self._bind(query, absolute_deadline)
         if isinstance(bound, Failure):
             return StreamReply(error=bound)
@@ -656,6 +669,8 @@ class ProjectDispatcher:
             return StreamReply(error=storage_failure(error.code))
 
     def inspect_evidence(self, query: EvidenceQuery, absolute_deadline: float) -> EvidenceReply:
+        """Read scoped evidence without registration repair or invented nonexecution proof."""
+
         def failed(error: Failure) -> EvidenceReply:
             return EvidenceReply(
                 request_id=query.query_id,
@@ -829,10 +844,14 @@ class ProjectStatusService:
 
 
 class EvidenceClient(Protocol):
+    """Inspect bounded request metadata, never retrieve a cached raw answer."""
+
     def inspect_evidence(self, query: EvidenceQuery) -> EvidenceReply: ...
 
 
 class ProjectClient(EvidenceClient, Protocol):
+    """Separate daemon actions from local read-only status; no in-process fallback."""
+
     def execute(self, call: ProjectCall) -> DispatchReply: ...
     def inspect_receipt(self, query: ReceiptQuery) -> ReceiptReply: ...
     def status(self, directory: Path) -> ProjectStatusSuccess | Failure: ...

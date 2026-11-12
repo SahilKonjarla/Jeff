@@ -32,6 +32,8 @@ class _Work:
 
 
 class RuntimeDispatcher:
+    """Keep blocking use cases off the control loop with finite, owned worker lifetimes."""
+
     def __init__(self, dispatch: ProjectDispatcher) -> None:
         self.dispatch = dispatch
         self._queue: queue.Queue[_Work] = queue.Queue(DEFAULT_RUNTIME_LIMITS.pending_requests)
@@ -79,6 +81,7 @@ class RuntimeDispatcher:
                 raise ControlFault("runtime_start_failed") from None
 
     def submit(self, call: Call, deadline: float) -> Future[Reply]:
+        """Queue work without implying durable acceptance or cancelling running work."""
         result: Future[Reply] = Future()
         with self._mutex:
             if (
@@ -101,12 +104,14 @@ class RuntimeDispatcher:
             self._draining = True
 
     def request_close(self) -> None:
+        """Seal admission; queued refusals and active workers still require real drain."""
         with self._mutex:
             self._draining = True
             self._closing.set()
             self._ready = False
 
     def close(self, timeout: float = DEFAULT_RUNTIME_LIMITS.stop_seconds) -> None:
+        """Join owned threads within one budget, reporting unconfirmed exit on timeout."""
         self.request_close()
         deadline = time.monotonic() + timeout
         for thread in self._threads:

@@ -25,6 +25,7 @@ class _GitParentGone(Exception):
 
 
 def _parent_live(fd: int) -> None:
+    """Treat a readable watch pipe as lost parent liveness, never as a PID check."""
     if select.select([fd], [], [], 0)[0]:
         os.read(fd, 1)
         raise _GitParentGone
@@ -39,6 +40,7 @@ def _run_git(
     category: GitCategory | None = None,
     process_runner: ProcessRunner | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
+    """Record fixed start/output/outcome facts after the runner's cleanup path."""
     began = time.monotonic_ns()
     measured = [0, 0]
     code: str = "git_failed"
@@ -190,6 +192,8 @@ def _run_git_process(
 
 
 class GitProjectDiscovery:
+    """Resolve canonical roots through the injected runner without registering a project."""
+
     def __init__(self, *, process_runner: ProcessRunner | None = None) -> None:
         self._process_runner = process_runner
 
@@ -275,6 +279,7 @@ def _path(raw: bytes) -> str:
 
 
 def _parse_status(output: bytes) -> tuple[BranchState, tuple[FileChange, ...]]:
+    """Parse NUL records, including rename pairs, or reject the entire bounded answer."""
     if not output.endswith(b"\0"):
         raise _malformed()
     records = output[:-1].split(b"\0")
@@ -345,6 +350,8 @@ def _parse_status(output: bytes) -> tuple[BranchState, tuple[FileChange, ...]]:
 
 
 class GitRepositoryRead:
+    """Read protected metadata; filter-backed changes fail rather than execute drivers."""
+
     def __init__(self, *, process_runner: ProcessRunner | None = None) -> None:
         self._process_runner = process_runner
 

@@ -101,6 +101,11 @@ def running_cli(
 
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
+    """Create a disposable child repository, not the harness's Git-negative boundary.
+
+    The runner must first verify that the temporary arena has no Git ancestors.
+    Merely placing an ignored scratch directory inside Jeff is not sufficient.
+    """
     executable = shutil.which("git", path=os.defpath)
     assert executable is not None, "These checks require an installed system Git"
     root = tmp_path / "sample project"

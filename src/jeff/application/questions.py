@@ -14,6 +14,8 @@ from jeff.domain.repository import BranchState, FileChange, escape_metadata, pro
 
 
 class GitRead(Protocol):
+    """Observe bounded metadata; adapters own subprocess cleanup and fixed Git controls."""
+
     def read_branch(
         self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
     ) -> BranchState: ...
@@ -78,6 +80,7 @@ class QuestionSuccess(BaseModel):
 
 
 def question_intent(question: str) -> Literal["ask.branch", "ask.changes"] | None:
+    """Recognize the finite question vocabulary before project or Git access."""
     intent = " ".join(question.casefold().split()).removesuffix("?").rstrip()
     if intent == "what branch am i on":
         return "ask.branch"
@@ -87,6 +90,8 @@ def question_intent(question: str) -> Literal["ask.branch", "ask.changes"] | Non
 
 
 class QuestionService:
+    """Bind supported intents to registered projects and render only safe metadata."""
+
     def __init__(
         self,
         projects: ProjectService,
@@ -105,6 +110,7 @@ class QuestionService:
         deadline: float | None = None,
         observer: GitObserver | None = None,
     ) -> QuestionSuccess | Failure:
+        """Return bounded supported metadata or a fixed failure, never truncated Git output."""
         intent = question_intent(question)
         if intent is None:
             return Failure(

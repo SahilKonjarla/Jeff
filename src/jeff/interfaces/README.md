@@ -1,6 +1,6 @@
 # Interfaces — tier 3
 
-**Status:** public CLI start/stop, runtime-aware status and authenticated daemon-dependent init/config/both Git questions are implemented in M02 slice 4 C. Slice5 B adds scoped read-only `history` and `debug last` over authenticated wire5/schema3. Slice5 C adds installed-client subscriptions without changing this CLI or adding follow/watch verbs. Current wire6/schema4/settings1 also has bounded retention and read-only doctor; desktop, voice, MCP, general execution and stale/crash recovery remain unimplemented.
+**Status:** public CLI start/stop, runtime-aware status and authenticated daemon-dependent init/config/both Git questions are implemented in M02 slice 4 C. Slice5 B adds scoped read-only `history` and `debug last` over authenticated wire5/schema3. Slice5 C adds installed-client subscriptions without changing this CLI or adding follow/watch verbs. Current wire6/schema4/settings1 also has bounded retention and read-only doctor; explicit start also supports proven owned endpoint/SQLite recovery. M02 is accepted; desktop, voice, MCP and general execution remain unimplemented.
 
 **Ownership:** `cli.py` renders application results. `create_app(client_factory, control_factory, diagnostics_factory=None)` accepts lazy application-owned project/control/diagnostics factories (two-argument callers remain supported); no concrete adapters, Git/storage imports, autostart or local action fallback.
 

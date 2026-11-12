@@ -44,7 +44,7 @@ Changes intentionally report `complete: false`, `visible_clean`, protected-path/
 
 `RuntimePathInputs` carries trusted explicit platform/home/temp/UID values and independent optional `data_dir`/`runtime_dir` strings. The pure contracts do not read the environment. The bootstrap selects these fields lazily from `JEFF_DATA_DIR`/`JEFF_RUNTIME_DIR`; public help/syntax does not invoke location selection. `RuntimeLayout` derives fixed filenames from its roots. The expected UID is trusted host input, not client-selected authority.
 
-`PROTOCOL_REVISION = 5` and `DEFAULT_RUNTIME_LIMITS` declare the reviewed framing/admission/deadline/history budgets; they implement no codec, deadline, readiness or authentication. Mac preflight constants reserve terminators: socket 103 bytes, pathname 1023 bytes, component 255 bytes. Linux selection/verification is deferred. See [contract tests](../../../tests/unit/test_runtime_contracts.py) and [path tests](../../../tests/unit/test_runtime_paths.py).
+`PROTOCOL_REVISION = 6` and `DEFAULT_RUNTIME_LIMITS` declare the reviewed framing/admission/deadline/history budgets; they implement no codec, deadline, readiness or authentication. Mac preflight constants reserve terminators: socket 103 bytes, pathname 1023 bytes, component 255 bytes. Linux selection/verification is deferred. See [contract tests](../../../tests/unit/test_runtime_contracts.py) and [path tests](../../../tests/unit/test_runtime_paths.py).
 
 ## Authenticated control contracts — M02 slice 2
 

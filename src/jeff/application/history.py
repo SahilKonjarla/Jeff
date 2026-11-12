@@ -208,6 +208,8 @@ class HistoryRead(HistoryScope):
     cursor: str | None = Field(default=None, max_length=8192)
 
 
+# This keyset cursor freezes membership, not receipt state: later reads can observe
+# updated outcomes for requests already inside the original snapshot ceiling.
 class HistoryCursor(HistoryScope):
     kind: Literal["history.v1"] = "history.v1"
     database_epoch: UUID
@@ -307,6 +309,8 @@ class ActivityPage(ActivityMeta):
     has_more: StrictBool
 
 
+# Stream positions use a distinct discriminator from history cursors. A received
+# position is not a processing ACK and does not authorize automatic action replay.
 class StreamCursor(HistoryScope):
     kind: Literal["activity.v1"] = "activity.v1"
     database_epoch: UUID
@@ -355,6 +359,7 @@ class StreamPage(ActivityMeta, HistoryScope):
     has_more: StrictBool
 
     def position(self, after: int) -> StreamCursor:
+        """Bind a position to this page's scope/epoch; storage still validates its currency."""
         return StreamCursor(
             project_id=self.project_id,
             canonical_root=self.canonical_root,

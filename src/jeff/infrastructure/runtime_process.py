@@ -88,6 +88,8 @@ def _stopped() -> ControlSuccess:
 
 
 class RuntimeController:
+    """Control one installation using authenticated peers and captured launch handles."""
+
     def __init__(self, layout: RuntimeLayout) -> None:
         self.layout = layout
         self._child: subprocess.Popen[bytes] | None = None
@@ -116,6 +118,11 @@ class RuntimeController:
         return observation
 
     def start(self) -> ControlSuccess | Failure:
+        """Converge on full readiness; only our newly spawned child is cleanup authority.
+
+        Exclusive lifetime ownership permits supported residue checks, not generic
+        repair. The startup pipe cannot substitute for authenticated readiness.
+        """
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.start_seconds
         ready_deadline = deadline - 1  # reserve bounded cleanup time for our own failed child
         owner: Ownership | None = None
@@ -295,6 +302,7 @@ class RuntimeController:
                 owner.close()
 
     def status(self) -> ControlSuccess | Failure:
+        """Observe a verified owner or safe stopped state without starting or repairing."""
         try:
             self._reap()
             store = RuntimeStateStore(self.layout)
@@ -319,6 +327,11 @@ class RuntimeController:
             return control_failure(error.code)
 
     def stop(self) -> ControlSuccess | Failure:
+        """Send stop once, then require native exit and released endpoint/ownership.
+
+        Acknowledgement or socket disappearance alone is insufficient. Failure to
+        confirm exit never grants permission to signal the remembered peer PID.
+        """
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.stop_seconds
         current = self.status()
         if isinstance(current, Failure) or current.data.state == RuntimeState.STOPPED:

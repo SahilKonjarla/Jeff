@@ -44,6 +44,12 @@ class _Subscriber:
 
 
 class RuntimeEvents:
+    """Deliver committed pages with finite reservations, never a second event journal.
+
+    SQL-thread hints only wake the loop. Checked retention positions independently
+    invalidate setup, buffered pages and suspended writes, even if hints are lost.
+    """
+
     def __init__(
         self,
         identity: RuntimeIdentityData,
@@ -138,6 +144,7 @@ class RuntimeEvents:
             sub.sending = False
 
     async def _read(self, query: StreamQuery, deadline: float) -> StreamReply:
+        """Serialize real worker reads; coroutine cancellation cannot release that slot."""
         async with self._read_lock:
             if time.monotonic() >= deadline:
                 raise ControlFault("runtime_busy")
@@ -172,6 +179,7 @@ class RuntimeEvents:
         writer: asyncio.StreamWriter,
         deadline: float,
     ) -> None:
+        """Reserve a peer before its snapshot and retain it until transport cleanup ends."""
         if (
             not self.ready
             or len(self._streams) >= DEFAULT_RUNTIME_LIMITS.subscriptions
@@ -237,7 +245,8 @@ class RuntimeEvents:
                     if sub.page is None and sub.error is None:
                         await sub.wake.wait()
                     continue
-                # The page is retained until every event/write finishes: max64 TOTAL credits.
+                # Retain this peer's page through every send: max64 credits for this peer.
+                # The current write is part of that page, not a second queued event set.
                 for event in current.events:
                     if sub.error is not None:
                         break
@@ -331,6 +340,7 @@ class RuntimeEvents:
         self._stopping = True
 
     async def drain(self, deadline: float) -> None:
+        """Attempt final committed delivery, then abort only captured remaining transports."""
         self.begin_stop()
         self._final = True
         self._wake.set()

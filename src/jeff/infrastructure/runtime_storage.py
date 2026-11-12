@@ -392,6 +392,7 @@ class SQLiteStorage:
             return self._retention_progress
 
     def snapshot(self) -> StorageReadiness:
+        """Return cached readiness without opening SQLite or queuing diagnostic work."""
         with self._mutex:
             return self._state
 
@@ -415,6 +416,7 @@ class SQLiteStorage:
         return self._thread is None or not self._thread.is_alive()
 
     def request_close(self) -> None:
+        """Seal new work and maintenance; active SQL still owns its connection and slot."""
         with self._mutex:
             self._accepting = False
             self._closing.set()
@@ -428,6 +430,7 @@ class SQLiteStorage:
                 self._state = StorageReadiness(state="closing")
 
     def close(self, timeout: float = DEFAULT_RUNTIME_LIMITS.stop_seconds) -> None:
+        """Join the SQL owner; a timed-out or faulty close stays explicitly unconfirmed."""
         self.request_close()
         thread = self._thread
         if thread is not None:
@@ -511,6 +514,7 @@ class SQLiteStorage:
         | None,
         deadline: float | None,
     ) -> object:
+        """Bound admission and caller waiting without abandoning already running SQL."""
         if isinstance(payload, Project) and (
             not isinstance(payload.project_id, UUID)
             or not payload.root.is_absolute()
@@ -567,6 +571,7 @@ class SQLiteStorage:
             raise StorageFault("storage_recovery_required") from None
 
     def _commit_write(self, connection: sqlite3.Connection, fd: int) -> None:
+        """Commit before proof retirement; a later failure is not evidence of rollback."""
         connection.execute("COMMIT")
         try:
             self.owner.retire_storage_recovery(fd)
@@ -574,6 +579,7 @@ class SQLiteStorage:
             raise StorageFault("storage_outcome_unconfirmed") from None
 
     def _rollback_write(self, connection: sqlite3.Connection, fd: int) -> None:
+        """Let SQLite roll back before retiring only the matching recovery permission."""
         connection.execute("ROLLBACK")
         try:
             self.owner.retire_storage_recovery(fd)
@@ -1268,6 +1274,11 @@ class SQLiteStorage:
         return event
 
     def _retire(self, connection: sqlite3.Connection, root: int, fd: int) -> RetirementBatch:
+        """Atomically tombstone eligible completed UUIDs before deleting their details.
+
+        Unknown/unfinished ownership remains. Publish new cursor-invalidating facts
+        only after checked transaction completion; no-op priming is rolled back.
+        """
         with self._mutex:
             if self._retention_progress.paused or self._closing.is_set():
                 raise StorageFault("storage_closing")
@@ -1464,6 +1475,7 @@ class SQLiteStorage:
     def _reconcile(
         self, connection: sqlite3.Connection, instance: UUID, root: int, fd: int
     ) -> None:
+        """Mark prior-owner unfinished receipts interrupted/unknown, never re-execute them."""
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.start_seconds
         while True:
             if time.monotonic() >= deadline:

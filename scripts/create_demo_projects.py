@@ -274,6 +274,7 @@ class DemoResult:
 
 
 def _safe_directory_path(path: Path, *, may_be_missing: bool) -> None:
+    """Refuse links/special ancestors; only the final output directory may be absent."""
     for candidate in (path, *path.parents):
         try:
             info = candidate.lstat()
@@ -286,6 +287,7 @@ def _safe_directory_path(path: Path, *, may_be_missing: bool) -> None:
 
 
 def _owned(path: Path, project: str) -> None:
+    """Recognize the generator marker without requiring an unchanged working tree."""
     _safe_directory_path(path, may_be_missing=False)
     _safe_directory_path(path / ".git", may_be_missing=False)
     try:
@@ -314,6 +316,7 @@ def _owned(path: Path, project: str) -> None:
 
 
 def _git(executable: str, root: Path, *arguments: str) -> bytes:
+    """Bind fixture mutations to their own .git, never an inherited parent repository."""
     _safe_directory_path(root, may_be_missing=False)
     if arguments[0] == "init":
         if (root / ".git").exists() or (root / ".git").is_symlink():
@@ -372,6 +375,7 @@ def _git(executable: str, root: Path, *arguments: str) -> bytes:
 
 
 def _new_file(path: Path, content: str, *, private: bool = False) -> None:
+    """Create exclusively under a directory descriptor; preserve any existing entry."""
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         descriptor = os.open(
@@ -454,6 +458,7 @@ def generate(output_dir: Path = DEFAULT_OUTPUT) -> tuple[DemoResult, ...]:
 
 
 def main() -> int:
+    """Create or preserve declared fixtures; failures never trigger automatic cleanup."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output-dir",

@@ -29,6 +29,8 @@ class RuntimeState(StrEnum):
 
 @dataclass(frozen=True)
 class RuntimeIdentity:
+    """Describe an instance; the PID alone is never a signalling capability."""
+
     instance_id: UUID
     pid: int
 
@@ -39,6 +41,8 @@ class RuntimeIdentity:
 
 @dataclass(frozen=True)
 class RuntimeSnapshot:
+    """Keep state/identity claims coherent without proving a live authenticated owner."""
+
     state: RuntimeState
     identity: RuntimeIdentity | None = None
 

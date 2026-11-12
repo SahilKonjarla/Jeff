@@ -12,12 +12,16 @@ Operation = Literal["init", "config", "status"]
 
 
 class ProjectDiscovery(Protocol):
+    """Bind caller directories to canonical roots without granting write authority."""
+
     def find_root(self, directory: Path, *, deadline: float | None = None) -> Path:
         """Find a canonical non-bare Git root without user-command execution."""
         ...
 
 
 class ProjectStore(Protocol):
+    """Own project-file identity; registry or caller UUIDs cannot replace it."""
+
     def initialize(self, project: Project) -> tuple[Project, bool]:
         """Preserve existing identity/settings; return identity and whether created."""
         ...
@@ -61,6 +65,8 @@ class Failure(BaseModel):
 
 
 class ProjectService:
+    """Resolve and validate registration through ports, without daemon lifecycle policy."""
+
     def __init__(self, discovery: ProjectDiscovery, store: ProjectStore) -> None:
         self._discovery = discovery
         self._store = store

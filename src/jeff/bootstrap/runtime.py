@@ -48,6 +48,7 @@ from jeff.integrations.git.worker import OwnedGitRunner
 
 
 def _selected_layout() -> RuntimeLayout:
+    """Select needed host inputs lazily, without probing or preparing installation state."""
     if sys.platform != "darwin":
         raise ControlFault("unsupported_runtime_platform")
     data = os.environ.get("JEFF_DATA_DIR")
@@ -102,6 +103,11 @@ def create_activity_client() -> ActivityClient:
 async def _serve(
     owner: Ownership, token: bytes, identity: RuntimeIdentityData, result_fd: int
 ) -> None:
+    """Compose one owner and drain actual worker/helper/SQL lifetimes before exit.
+
+    The startup pipe is diagnostic only; authenticated full readiness remains the
+    parent's authority. Shutdown waits for resources rather than cancelling waits.
+    """
     events = RuntimeEvents(
         identity,
         _stream_send,
@@ -118,6 +124,7 @@ async def _serve(
     dispatcher: RuntimeDispatcher | None = None
 
     def duplicate_git_lease() -> int:
+        """Share the existing flock description; a newly opened lock would not do so."""
         owner.check()
         return os.dup(owner.fd)
 
@@ -191,6 +198,7 @@ async def _serve(
 
 
 def main() -> int:
+    """Validate inherited FDs, inspect metadata, then adopt before reading the key."""
     parser = argparse.ArgumentParser(
         description="Internal owned daemon child; use public jeff start."
     )

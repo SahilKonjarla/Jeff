@@ -286,6 +286,8 @@ def test_crash_commit_window(
         "NO_COLOR": "1",
     }
     original = subprocess.Popen
+    # Both pre-COMMIT labels use the same real retirement/spill mechanism. Require
+    # changed database bytes and genuine journal magic, not merely an open transaction.
     script = """import hashlib,json,os,time
 from pathlib import Path
 import jeff.bootstrap.runtime as runtime

@@ -132,6 +132,7 @@ def _nonfinite(value: str) -> None:
 
 
 def decode_message[Message: BaseModel](payload: bytes, model: type[Message]) -> Message:
+    """Reject ambiguous JSON before typed validation; never echo invalid payloads."""
     try:
         data = json.loads(
             payload.decode("utf-8", errors="strict"),
@@ -149,6 +150,7 @@ def decode_message[Message: BaseModel](payload: bytes, model: type[Message]) -> 
 
 
 def encode_message(message: dict[str, object], maximum: int) -> bytes:
+    """Bound the encoded UTF-8 body before publishing its network-order length prefix."""
     try:
         payload = json.dumps(
             message, ensure_ascii=True, allow_nan=False, separators=(",", ":")
@@ -181,6 +183,7 @@ def _read_exact(connection: socket.socket, size: int, deadline: float) -> bytes:
 def receive_message[Message: BaseModel](
     connection: socket.socket, maximum: int, deadline: float, model: type[Message]
 ) -> Message:
+    """Validate advertised size before reading the body, sharing one absolute deadline."""
     size = int(struct.unpack("!I", _read_exact(connection, 4, deadline))[0])
     if not 0 < size <= maximum:
         raise ControlFault("runtime_protocol_error")
@@ -308,6 +311,8 @@ class ControlConnection:
 
 
 class ControlClient:
+    """Open bounded native-peer/authenticated connections without owning daemon lifetime."""
+
     def __init__(self, layout: RuntimeLayout, token: bytes) -> None:
         if len(token) != 32:
             raise ControlFault("runtime_credentials_invalid")
@@ -389,6 +394,11 @@ class OwnedActivityStream:
             self.connection.connection.close()
 
     def receive(self, wait_seconds: float | None = None) -> StreamFrame | None:
+        """Return None only for an idle wait; partial/invalid frames close this stream.
+
+        Exactly one reader may advance the received cursor. That cursor is not a
+        consumer processing acknowledgement or permission to replay an action.
+        """
         if wait_seconds is not None and (not math.isfinite(wait_seconds) or wait_seconds < 0):
             raise ValueError("Idle wait must be finite and nonnegative.")
         if not self._reader.acquire(blocking=False):
@@ -487,6 +497,7 @@ class RuntimeProjectClient:
         )
 
     def subscribe(self, query: SubscriptionQuery) -> OwnedActivityStream:
+        """Bind capability preflight and ready frame to the same authenticated instance."""
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
         with self._connect(deadline) as preflight:
             observation = preflight.request("status", preflight.identity.instance_id)
@@ -527,6 +538,7 @@ class RuntimeProjectClient:
             raise
 
     def execute(self, call: ProjectCall) -> DispatchReply:
+        """Exchange once; loss after connection leaves outcome unknown, never retried."""
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
         with self._connect(deadline) as connection:
             try:
@@ -615,6 +627,8 @@ async def _stream_send(writer: asyncio.StreamWriter, frame: StreamFrame) -> None
 
 
 class ControlServer:
+    """Authenticate before dispatch and share finite admission with control/stream work."""
+
     def __init__(
         self,
         owner: Ownership,
@@ -648,6 +662,7 @@ class ControlServer:
         task.add_done_callback(self._tasks.discard)
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Verify the kernel peer before secrets, then decode one bounded request."""
         project_slot = False
         response: ControlResponse | DispatchReply | ReceiptReply | EvidenceReply
         try:
@@ -858,6 +873,7 @@ class ControlServer:
             return self._project_refusal(request, unknown=True)
 
     def request_stop(self) -> None:
+        """Seal admission once; a lost stop reply cannot reverse accepted shutdown."""
         if self._stop_deadline is None:
             self._stop_deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.stop_seconds
         if not self.stopping and self._on_stop is not None:
@@ -870,6 +886,7 @@ class ControlServer:
         self._stop.set()
 
     async def serve(self) -> None:
+        """Publish owned endpoint proof before accepting, then drain before retiring it."""
         self.owner.require_no_endpoint()
         endpoint = None
         receipt: _EndpointReceipt | None = None

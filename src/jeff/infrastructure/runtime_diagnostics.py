@@ -1,4 +1,4 @@
-"""Read-only metadata/tool diagnostics; no lifecycle, credential or SQL-owner access."""
+"""Read-only diagnostics: authenticated live caches or leased stopped-state inspection."""
 
 import os
 import re
@@ -40,10 +40,13 @@ _PATH_REASONS = {
 
 
 class RuntimeDiagnosticsAdapter:
+    """Project finite facts under one budget without becoming another runtime owner."""
+
     def __init__(self, layout: Callable[[], RuntimeLayout]) -> None:
         self._layout = layout
 
     def inspect(self) -> DoctorResult:
+        """Share one deadline across checks; uncertainty is a report, not repair authority."""
         deadline = time.monotonic() + 5.0
         checks = [
             DoctorCheck(
@@ -225,6 +228,7 @@ class RuntimeDiagnosticsAdapter:
     def _runtime(
         layout: RuntimeLayout, deadline: float
     ) -> tuple[list[DoctorCheck], RuntimeSettings | None, int | None, DoctorRuntimeData | None]:
+        """Use authenticated cached live facts, never client-side live settings/SQL reads."""
         try:
             with RuntimeStateStore(layout).diagnostic_observation(deadline) as ownership:
                 if not ownership.held:
@@ -373,6 +377,7 @@ class RuntimeDiagnosticsAdapter:
     def _stopped(
         layout: RuntimeLayout, deadline: float
     ) -> tuple[list[DoctorCheck], RuntimeSettings | None, int | None]:
+        """Hold a non-creating lease through all stopped reads and final revalidation."""
         settings: RuntimeSettings | None = None
         version: int | None = None
         checks = [

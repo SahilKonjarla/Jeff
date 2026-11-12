@@ -89,6 +89,11 @@ def doctor_installation(
 
 
 def readonly_cli(layout: RuntimeLayout, env: dict[str, str], cwd: Path) -> list[str]:
+    """Measure denials and the selected socket exception before observing doctor.
+
+    Unchanged snapshots alone cannot establish that the harness blocked writes,
+    live settings/DB reads and unrelated networking as intended.
+    """
     profile = cwd.parent / "doctor.sb"
     profile.write_text(
         "(version 1)\n(allow default)\n(deny file-write*)\n"
