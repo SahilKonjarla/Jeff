@@ -83,7 +83,7 @@ def test_outside_repository_returns_safe_json_error(tmp_path: Path) -> None:
     assert not list(tmp_path.iterdir())
 
 
-def test_unregistered_status_and_human_readable_error(git_repo: Path) -> None:
+def test_unregistered_and_malformed_configuration_errors_are_safe(git_repo: Path) -> None:
     result = invoke(git_repo, "status", "--json")
     assert result.returncode == 1
     assert Failure.model_validate_json(result.stdout).error.code == "project_not_initialized"
@@ -92,8 +92,6 @@ def test_unregistered_status_and_human_readable_error(git_repo: Path) -> None:
     assert not human.stdout
     assert not (git_repo / "jeff.local.yaml").exists()
 
-
-def test_malformed_settings_do_not_leak_in_installed_errors(git_repo: Path) -> None:
     config = git_repo / "jeff.local.yaml"
     config.write_text("token: FAKE_PRIVATE_VALUE\nproject: [broken")
     result = invoke(git_repo, "config", "--json")

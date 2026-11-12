@@ -1,6 +1,6 @@
 # Unit tests
 
-**Status:** M01 CLI/domain/application tests and M02 runtime/control contracts, pure paths, strict v3 codec and private settings/storage contracts implemented.
+**Status:** M01 CLI/domain/application tests and M02 runtime/control contracts, pure paths, strict wire6 codec and private settings/storage contracts implemented.
 
 - [test_demo_safety.py](test_demo_safety.py): generator preflight/refusal, symlinks/traversal/markers, no writes or Git on preserved repos, missing Git, partial-state refusal, and prevention of parent-repository Git fallback.
 - [test_questions.py](test_questions.py): deterministic routing, unsupported input without Git access/echo, registered targeting/time, protected origin/destination filtering, and safe terminal metadata.
@@ -19,7 +19,7 @@
 - [test_project_rpc_contracts.py](test_project_rpc_contracts.py): v3 instance-bound finite messages, strict budgets/path/auth identity and receipt payload refusal.
 - [test_cli.py](test_cli.py): lazy application client/control factories, lifecycle delegation, no client action fallback, JSON/stderr correlation separation; native behavior is proved separately in acceptance.
 - [test_activity_contracts.py](test_activity_contracts.py): strict finite observation/trace/replay values and evidence request scope/shape, no raw payloads.
-- [test_project_dispatch.py](test_project_dispatch.py): init/config/both-question dispatch, duplicate/scoped inspection, read-only diagnostics, missing-indexed-YAML refusal and real YAML/SQLite partial faults through the application interface; owned Git/YAML/SQLite and explicit synthetic privacy sink checks.
+The seven real Git/YAML/SQLite dispatcher cases moved unchanged to [integration/test_project_dispatch.py](../integration/test_project_dispatch.py); they are not unit tests. Global help/syntax checks share the three-forbidden-factory seam; doctor-specific help/syntax remains separate. Revision decoding keeps representative old/future integers and distinct malformed type/encoding/framing cases.
 
 **Dependencies:** pytest, Typer test runner, Pydantic result contracts, domain/application/interfaces, pure path selection and control codec. Controlled discovery/storage doubles exercise the same public interface as adapters without invoking Git or storage. Real filesystem/process checks belong under integration/acceptance.
 

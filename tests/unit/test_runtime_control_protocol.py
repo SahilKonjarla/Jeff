@@ -29,10 +29,8 @@ def test_control_frame_roundtrip_has_big_endian_length_and_typed_request() -> No
         b"\xff",
         b"[]",
         b'{"revision":true}',
-        b'{"revision":2}',
-        b'{"revision":3}',
-        b'{"revision":4}',
-        b'{"revision":5}',
+        b'{"revision":5}',  # Representative supported-type old revision.
+        b'{"revision":7}',  # Representative future revision.
         b'{"revision":1.0}',
         b'{"revision":1,"operation":"ask"}',
         b"{" + b'"x":[' * 1100 + b"0" + b"]" * 1100 + b"}",

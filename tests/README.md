@@ -1,6 +1,6 @@
 # Tests
 
-**Status:** M01/M02 slice-4 C suites implemented. Current guarded macOS full run: **387 passed/136.51 s**, current fresh noneditable installed control/storage/project/public-CLI/compatibility proof **20 passed/24.99 s**, plus Ruff/format/mypy/pip. Historical M01 baseline was 126, not current coverage. The supplied manual CLI transcript passed; the user also reports a repeat local test run, without an additional log/count supplied. Do not invent new counts or treat this as hosted CI, full product coverage or automatic milestone acceptance.
+**Status:** M02 accepted; subsequent approved test-only cleanup has **334 test functions/692 collected source cases** and an explicit **290-case installed selection**. The accepted M02 baseline was697 source/343 installed passes; those immutable receipts remain historical evidence. Cleanup validation ran112 affected source +9 installed cases, zero skips, plus Ruff/format/mypy—not a fresh full692/290 execution. [Cleanup scope/evidence](../.agent-work/reports/m02-test-cleanup.md). Linux/alternate-user/hosted validation remains deferred/unperformed.
 
 | Directory | Scope and current implementation |
 | --- | --- |
@@ -9,6 +9,12 @@
 | [integration](integration/README.md) | Real storage/discovery/Git states, limits, filter safety, error/race boundaries |
 | [acceptance](acceptance/README.md) | Installed lifecycle/project/questions/restart/status, actual ignores, native identity, safe errors and stderr-only correlation |
 | [architecture](architecture/README.md) | Static tier restrictions, relative imports, and positive/negative checker cases |
+
+## Source and installed selection
+
+Source retains the full behavior/security/SQL/real-deadline matrix. The versioned installed selection is [test-cleanup-installed-manifest.json](../.agent-work/temporary/m02-s5a/test-cleanup-installed-manifest.json), following the existing explicit-manifest acceptance workflow; pytest does **not** automatically apply it. It retains real installed CLI/lifecycle/native-peer/helper/compatibility/crash cases, while doctor model/CLI-port unit cases and the real35-second unconfirmed-stop proof run source-only. Two standalone acceptance scenarios were merged without dropping their assertions. This is51 duplicate installed executions omitted plus2 merged cases—not53 deleted source tests.
+
+Both delivery-hint paths, all crash/COMMIT/publication/security cases, actual backpressure triggers and one real deadline proof remain. Full guarded crash gates require new explicit fault authority; the accepted M02 envelope is exhausted. Do not rerun a full native acceptance matrix as ordinary cleanup verification or call unrun selected cases passed.
 
 **Owning milestone:** M01 establishes registration, the two Git questions and independent demo fixtures. Separate Mac speech/model/hotkey feasibility probes passed, but are not this pytest suite or shipped integrations. Hosted CI is not active; Docker/self-hosted alternatives are not configured. Linux verification is explicitly deferred.
 

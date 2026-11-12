@@ -53,14 +53,13 @@ def test_generator_cli_and_installed_jeff_for_both_projects(tmp_path: Path) -> N
         identity = Success.model_validate_json(initialized.stdout)
         identities.append(identity.data.project_id)
         configs.append((root / "jeff.local.yaml").read_bytes())
-        for operation in ("config", "status", "init"):
-            checked = invoke(root, [jeff, operation, "--json"])
-            assert checked.returncode == 0, checked.stderr
-            assert (
-                ProjectStatusSuccess.model_validate_json(checked.stdout)
-                if operation == "status"
-                else Success.model_validate_json(checked.stdout)
-            ).data.project_id == identity.data.project_id
+        # Config/repeated init are covered by the dedicated project-command workflow.
+        checked = invoke(root, [jeff, "status", "--json"])
+        assert checked.returncode == 0, checked.stderr
+        assert (
+            ProjectStatusSuccess.model_validate_json(checked.stdout).data.project_id
+            == identity.data.project_id
+        )
         branch_result = invoke(root, [jeff, "ask", "what branch am I on?", "--json"])
         assert branch_result.returncode == 0, branch_result.stderr
         branch = QuestionSuccess.model_validate_json(branch_result.stdout)

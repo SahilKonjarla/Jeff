@@ -251,7 +251,6 @@ def forbidden() -> NoReturn:
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["--help"],
         ["doctor", "--help"],
         ["doctor", "--repair"],
         ["doctor", "unexpected"],

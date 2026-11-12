@@ -104,7 +104,7 @@ runpy.run_module('jeff.bootstrap.runtime',run_name='__main__')
         with client.subscribe(SubscriptionQuery(directory=git_repo, cursor=cursor)) as batching:
             calls = [
                 ProjectCall(operation="ask", directory=git_repo, question="what branch am I on?")
-                for _ in range(14)
+                for _ in range(12)
             ]
             for call in calls:
                 assert client.execute(call).result.ok
@@ -120,7 +120,8 @@ runpy.run_module('jeff.bootstrap.runtime',run_name='__main__')
                         completed.add(message.event.request_id)
                         if completed == expected:
                             break
-            assert completed == expected and len(sequences) == 75
+            # Five original events + twelve five-event requests: cross the64-event page.
+            assert completed == expected and len(sequences) == 65
             assert all(a < b for a, b in zip(sequences, sequences[1:], strict=False))
         assert isinstance(control.stop(), ControlSuccess)
         assert isinstance(control.start(), ControlSuccess)

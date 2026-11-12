@@ -78,7 +78,7 @@ def test_help_and_syntax_are_lazy(
     arguments: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(create_app(forbidden, forbidden), arguments)
+    result = runner.invoke(create_app(forbidden, forbidden, forbidden), arguments)
     assert result.exit_code == (0 if "--help" in arguments else 2), result.exception
     assert not list(tmp_path.iterdir())
     if arguments == ["--help"]:
