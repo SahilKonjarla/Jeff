@@ -1,26 +1,27 @@
 # Bootstrap — composition root
 
-**Status:** M01 CLI/discovery/configuration/question wiring implemented; daemon lifecycle and other adapters remain unimplemented.
+**Status:** M02 slice-4 C wires public explicit lifecycle, runtime-aware status and authenticated daemon-dependent project commands. History/debug/events/retention and read-only doctor are now composed as well. Proof-based idle endpoint recovery is wired before accepting clients; owned hot-journal recovery and active-work/native Git-child lifetime are delivered and M02 is accepted. Cross-platform/hosted execution remains deferred/unperformed, not passed.
 
-**Ownership:** `main.py` constructs `ProjectService(GitProjectDiscovery(), FileProjectStore())` and `QuestionService(projects, GitRepositoryRead())`, then passes both to `create_app`. It contains no project rules, storage implementation, policy decisions, or provider logic.
+**Ownership:** `main.py` passes lazy `create_project_client`, `create_runtime_controller` and `create_runtime_diagnostics` factories to CLI presentation. No location selection, project discovery, credential read or connection happens for help/syntax. There is no client-local question adapter or fallback path. Only the daemon composes `QuestionService` with `GitRepositoryRead(process_runner=git_runner)` after actual storage initialization. The same owned runner is injected into discovery/filter/status; there is no daemon fallback to direct Git.
 
-**Dependencies:** composition may import all tiers. Only entry points and bootstrap itself import bootstrap; domain/application/clients cannot depend on it.
+**Dependencies:** composition may import all tiers; only entry points/bootstrap import bootstrap. No project/domain/storage policy is implemented here.
 
-## Entry points and flow
+## Public entry points
 
-`main() -> None` is declared as `jeff.bootstrap.main:main` in `pyproject.toml`. `jeff/__main__.py` invokes it under the main guard.
+`jeff.bootstrap.main:main` is the installed console entry; `python -m jeff` invokes the same function. Both use the same factories and application interfaces.
 
-After the [root install](../../../README.md):
+`runtime.create_project_client() -> ProjectClient` supplies the authenticated RPC adapter with lazy layout selection and `ProjectStatusService`: the latter first validates local Git/YAML, then selects the runtime controller for read-only status. The local project service is never an init/config/ask fallback. Status preserves identity fields plus explicit runtime observations; invalid/unregistered projects retain their local errors before runtime selection.
 
-```bash
-.venv/bin/jeff --help
-.venv/bin/python -m jeff --help
-```
+`runtime.create_runtime_controller() -> RuntimeControl` selects only the documented JEFF_DATA_DIR/JEFF_RUNTIME_DIR overrides and needed trusted host metadata. Both overrides skip home/temp lookup. Darwin TMPDIR selection avoids tempfile write probes; actual creation/validation is explicit startup only. Public start waits for authenticated matching-instance full application readiness (all ten supported operations including subscriptions, live workers and schema/settings readiness), not the startup pipe or control hello alone.
 
-Both use the same service/adapters. Constructing them performs no project I/O; help is side-effect-free. Explicit `init`, `config`, `status`, or the two supported `ask` questions invoke application use cases, which call their declared ports. No daemon, provider, credential loading, runtime event bus, or job execution is initialized.
+`runtime.create_runtime_diagnostics() -> RuntimeDiagnostics` composes the installation doctor without selecting locations eagerly. Its adapter reuses deadline-aware authenticated cached control while live and read-only existing settings/schema helpers only under stopped ownership. It never calls controller.status's30s/O_RDWR path, starts providers/daemon, opens a live SQLite reader or repairs state. Tool probes use fixed system Git and a minimal environment.
 
-**Configuration/security:** the file adapter owns private schema/storage; Git discovery owns its narrow subprocess environment. Bootstrap must preserve those responsibilities and never become an alternate authorization path.
+## Internal daemon ownership
 
-**Owning milestones:** M01 local composition; M02 later adds daemon state/lifecycle. [Installed tests](../../../tests/acceptance/README.md) exercise public entry points outside the source repository; [architecture checks](../../../tests/architecture/README.md) reject inward bootstrap imports.
+`runtime.main()` remains an internal child entry with inherited lifetime-lock FD, bounded one-way startup-result pipe and non-secret instance UUID. It validates required inherited descriptors, inspects namespace metadata and adopts actual ownership before reading credential contents. It applies a restrictive umask, starts the dedicated SQL owner and composes bounded dispatch. No credential argv/environment, user-state scan or autostart.
 
-Run `.venv/bin/python -m pytest tests/acceptance tests/architecture -q` from the root after installation. Add explicit wiring only when a real adapter exists. Full daemon lifecycle/recovery and cross-platform acceptance remain pending. See [package map](../README.md).
+The child retains its raw lock descriptor until kernel process exit. Cached control observations distinguish storage/handler/full readiness; partial control/storage startup does not claim application-ready. Diagnostic startup-pipe metadata is not authority. Initialization failure closes/exits; shutdown drains actual project workers and captured Git-helper cleanup before the SQL owner and native process exit. No arbitrary PID/name signalling or default-state repair.
+
+Do not invoke internal entry points against normal/user installations as fixtures. [Installed control](../../../tests/acceptance/test_installed_runtime_control.py) proves matching installation/native identity, launcher exit survival and authenticated shutdown. [Public workflow](../../../tests/acceptance/test_daemon_cli_workflow.py) proves real public start/stop/project/restart/status and uncertain-delivery correlation, with no fallback.
+
+After [installation](../../../README.md), run documented tests only in approved owned outside-Git arenas. [Architecture checks](../../../tests/architecture/README.md) enforce tier direction. Help/native local proof is not Linux/CI, desktop/audio/provider or formal milestone acceptance. See [package map](../README.md).

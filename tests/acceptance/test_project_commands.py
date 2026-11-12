@@ -6,7 +6,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from jeff.application.dispatch import ProjectStatusSuccess
 from jeff.application.projects import Failure, Success
+
+pytestmark = pytest.mark.usefixtures("running_cli")
 
 
 def invoke(directory: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -17,6 +22,10 @@ def invoke(directory: Path, *arguments: str) -> subprocess.CompletedProcess[str]
             "PATH": os.defpath,
             "NO_COLOR": "1",
             "TERM": "dumb",
+            **{
+                name: os.environ[name]
+                for name in ("HOME", "TMPDIR", "JEFF_DATA_DIR", "JEFF_RUNTIME_DIR")
+            },
             # Inherited Git targeting/config must not redirect Jeff's adapter.
             "GIT_DIR": "/nonexistent/FAKE_PRIVATE_VALUE",
             "GIT_WORK_TREE": "/nonexistent/FAKE_PRIVATE_VALUE",
@@ -43,7 +52,11 @@ def test_installed_initialize_inspect_repeat_and_actual_git_ignores(git_repo: Pa
     for command in ("config", "status", "init"):
         checked = invoke(nested, command, "--json")
         assert checked.returncode == 0, checked.stderr
-        current = Success.model_validate_json(checked.stdout)
+        current = (
+            ProjectStatusSuccess.model_validate_json(checked.stdout)
+            if command == "status"
+            else Success.model_validate_json(checked.stdout)
+        )
         assert current.data.project_id == first.data.project_id
         assert not current.data.created
     assert config.read_bytes() == original
@@ -70,7 +83,7 @@ def test_outside_repository_returns_safe_json_error(tmp_path: Path) -> None:
     assert not list(tmp_path.iterdir())
 
 
-def test_unregistered_status_and_human_readable_error(git_repo: Path) -> None:
+def test_unregistered_and_malformed_configuration_errors_are_safe(git_repo: Path) -> None:
     result = invoke(git_repo, "status", "--json")
     assert result.returncode == 1
     assert Failure.model_validate_json(result.stdout).error.code == "project_not_initialized"
@@ -79,8 +92,6 @@ def test_unregistered_status_and_human_readable_error(git_repo: Path) -> None:
     assert not human.stdout
     assert not (git_repo / "jeff.local.yaml").exists()
 
-
-def test_malformed_settings_do_not_leak_in_installed_errors(git_repo: Path) -> None:
     config = git_repo / "jeff.local.yaml"
     config.write_text("token: FAKE_PRIVATE_VALUE\nproject: [broken")
     result = invoke(git_repo, "config", "--json")

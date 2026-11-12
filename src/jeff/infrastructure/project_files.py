@@ -30,7 +30,10 @@ def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
 
 
 class FileProjectStore:
+    """Preserve project identity through checked reads and atomic per-file publication."""
+
     def initialize(self, project: Project) -> tuple[Project, bool]:
+        """Reuse valid existing identity; ignore/config writes are not one transaction."""
         with self._root(project.root) as directory:
             existing = self._load(directory, project.root)
             self._ensure_ignored(directory)
@@ -57,6 +60,7 @@ class FileProjectStore:
             return project, True
 
     def read(self, root: Path) -> Project:
+        """Inspect registration only; missing or moved configuration is never repaired."""
         with self._root(root) as directory:
             project = self._load(directory, root)
             if project is None:
@@ -183,6 +187,10 @@ class FileProjectStore:
         replace: bool,
         expected: os.stat_result | None = None,
     ) -> None:
+        """Publish exclusively, or check the ignore fingerprint before replacing.
+
+        The check/replace pair is not an atomic compare-and-swap against editors.
+        """
         temporary = f".jeff-write-{uuid4().hex}.tmp"
         descriptor = os.open(
             temporary,

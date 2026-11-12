@@ -56,6 +56,8 @@ def escape_metadata(value: str) -> str:
 
 @dataclass(frozen=True)
 class BranchState:
+    """Represent named, unborn or detached HEAD without inferring working-tree state."""
+
     name: str | None
     commit: str | None
     detached: bool
@@ -64,6 +66,8 @@ class BranchState:
 
 @dataclass(frozen=True)
 class FileChange:
+    """Retain both rename paths so disclosure policy can exclude either side."""
+
     path: str
     original_path: str | None
     index_status: str

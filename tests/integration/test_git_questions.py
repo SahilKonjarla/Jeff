@@ -193,9 +193,16 @@ def test_stderr_limit_kills_and_reaps_the_owned_child(
     children: list[subprocess.Popen[bytes]] = []
 
     def spawn(
-        command: list[str], *, env: dict[str, str], stdin: int, stdout: int, stderr: int
+        command: list[str],
+        *,
+        env: dict[str, str],
+        stdin: int,
+        stdout: int,
+        stderr: int,
+        close_fds: bool,
     ) -> subprocess.Popen[bytes]:
         assert env["GIT_ALLOW_PROTOCOL"] == "" and env["GIT_NO_LAZY_FETCH"] == "1"
+        assert close_fds is True
         child = real_popen(
             [
                 sys.executable,
@@ -207,6 +214,7 @@ def test_stderr_limit_kills_and_reaps_the_owned_child(
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
+            close_fds=close_fds,
         )
         children.append(child)
         return child

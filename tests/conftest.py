@@ -3,14 +3,109 @@
 import os
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 
 @pytest.fixture
+def git_helper_script() -> Callable[[str, str], str]:
+    """Apply a native fault/observer at Git's owning process, retaining all inherited FDs."""
+
+    def compose(helper_hook: str, daemon_hook: str) -> str:
+        worker = (
+            helper_hook + "\nimport jeff.integrations.git.worker as _worker\n"
+            "raise SystemExit(_worker.main())\n"
+        )
+        return f"""
+import subprocess
+_spawn_helper=subprocess.Popen
+_helper_code={worker!r}
+def _launch_helper(command,*args,**kwargs):
+    if command[3:5]==['-m','jeff.integrations.git.worker']:
+        command=[*command[:3],'-c',_helper_code,*command[5:]]
+    return _spawn_helper(command,*args,**kwargs)
+subprocess.Popen=_launch_helper
+{daemon_hook}
+"""
+
+    return compose
+
+
+@pytest.fixture
+def owned_runtime_launches(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Capture genuine handles; emergency cleanup is evidence of a failing fixture."""
+    original = subprocess.Popen
+    children: list[subprocess.Popen[bytes]] = []
+
+    def tracked(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        child = original(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", tracked)
+    yield
+    forced = False
+    for child in children:
+        if child.poll() is None:
+            forced = True
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+    assert not forced, "Owned runtime fixture required forced child cleanup"
+
+
+@pytest.fixture
+def cli_environment(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, str]:
+    root = tmp_path_factory.mktemp("cli").resolve()
+    for name in ("home", "tmp", "config", "cache", "data"):
+        (root / name).mkdir(mode=0o700)
+    env = {
+        "HOME": str(root / "home"),
+        "TMPDIR": str(root / "tmp"),
+        "XDG_CONFIG_HOME": str(root / "config"),
+        "XDG_CACHE_HOME": str(root / "cache"),
+        "XDG_DATA_HOME": str(root / "data"),
+        "JEFF_DATA_DIR": str(root / "d"),
+        "JEFF_RUNTIME_DIR": str(root / "r"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return env
+
+
+@pytest.fixture
+def running_cli(
+    cli_environment: dict[str, str], owned_runtime_launches: None
+) -> Iterator[dict[str, str]]:
+    from jeff.application.runtime import ControlSuccess
+    from jeff.bootstrap.runtime import create_runtime_controller
+
+    control = create_runtime_controller()
+    try:
+        started = control.start()
+        assert isinstance(started, ControlSuccess) and started.data.application_ready, started
+        yield cli_environment
+    finally:
+        assert isinstance(control.stop(), ControlSuccess)
+        (Path(cli_environment["JEFF_DATA_DIR"]) / "ipc.key").unlink(missing_ok=True)
+
+
+@pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
+    """Create a disposable child repository, not the harness's Git-negative boundary.
+
+    The runner must first verify that the temporary arena has no Git ancestors.
+    Merely placing an ignored scratch directory inside Jeff is not sufficient.
+    """
     executable = shutil.which("git", path=os.defpath)
     assert executable is not None, "These checks require an installed system Git"
     root = tmp_path / "sample project"

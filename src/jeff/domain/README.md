@@ -1,6 +1,6 @@
 # Domain — tier 0
 
-**Status:** M01 project identity, repository metadata, and disclosure policy implemented. Job/approval/runtime rules remain unimplemented.
+**Status:** M01 project identity, repository metadata and disclosure policy implemented; M02 slice-1 runtime value invariants added. Jobs/approvals remain unimplemented; the M02 internal control lifecycle uses these values without putting OS behavior in domain.
 
 **Ownership:** `projects.py` defines immutable `Project(project_id: UUID, root: Path)` and `ProjectError(code, message)`. Identity requires an absolute root; filesystem canonicalization and configuration parsing belong to adapters. Errors contain fixed actionable messages, not raw file/provider output.
 
@@ -14,6 +14,12 @@
 
 **Configuration/events:** no user-configurable grants or events yet. No credentials, arbitrary settings, emitted events, jobs, or approvals are represented by this slice.
 
-**Owning milestone:** M01. [Unit tests](../../../tests/unit/test_projects.py) check absolute roots, stable initialization, and application handling of stale identities. [Question policy tests](../../../tests/unit/test_questions.py) cover routing, filtering, and safe metadata; [architecture checks](../../../tests/architecture/README.md) enforce static import restrictions.
+## Runtime values — M02 slice 1
+
+`runtime.py` defines frozen `RuntimeIdentity(instance_id: UUID, pid: int)` and `RuntimeSnapshot(state, identity=None)`, plus the six `RuntimeState` values. PID must be a positive integer (not bool); running/stopping require identity, stopped forbids it, and starting/unknown/unhealthy may lack identity. Invalid values raise fixed-message `RuntimeFault`, without echoing supplied data.
+
+These are observations, not a lifecycle coordinator: constructing one never discovers, authenticates, starts or signals a process. PID/UUID values alone confer no authority. [Runtime contract tests](../../../tests/unit/test_runtime_contracts.py) cover immutability and invalid combinations. No OS defaults or installation I/O occur at import.
+
+**Owning milestones:** M01 and M02 foundation. [Unit tests](../../../tests/unit/test_projects.py) check absolute roots, stable initialization, and application handling of stale identities. [Question policy tests](../../../tests/unit/test_questions.py) cover routing, filtering, and safe metadata; [architecture checks](../../../tests/architecture/README.md) enforce static import restrictions.
 
 Run `.venv/bin/python -m pytest tests/unit tests/architecture -q` from the repository root after [installation](../../../README.md). Add pure rules when actual use cases need them; do not pull storage or runtime concerns into identity values. See [package map](../README.md).

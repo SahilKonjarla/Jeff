@@ -24,6 +24,7 @@ Repeats preserve all existing work and registrations. The script refuses unrelat
 After the [root install](../README.md), activate Jeff's venv, then enter either generated repository:
 
 ```bash
+jeff start --json  # Explicit daemon startup; no autostart for project commands.
 jeff init --json
 jeff config --json
 jeff status --json
@@ -31,7 +32,7 @@ jeff ask "what branch am I on?"
 jeff ask "what changed?" --json
 ```
 
-Expected initial branch: `main` with a real commit. Expected initial visible change: untracked `demo-notes.txt`. Repeated init preserves the ID; the two repositories get distinct IDs. Full multi-project daemon supervision is still future work.
+Expected initial branch: `main` with a real commit. Expected initial visible change: untracked `demo-notes.txt`. Repeated init preserves the ID; the two repositories get distinct IDs. Public questions execute through the shared daemon. Stop with `jeff stop --json`; status remains read-only/usable while stopped, but init/config/ask require explicit startup. General multi-project job/process supervision remains future work.
 
 ## Sandbox service and tests
 

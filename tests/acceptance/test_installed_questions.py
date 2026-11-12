@@ -11,6 +11,8 @@ import pytest
 from jeff.application.projects import Failure, Success
 from jeff.application.questions import BranchAnswer, ChangesAnswer, QuestionSuccess
 
+pytestmark = pytest.mark.usefixtures("running_cli")
+
 
 def run(root: Path, entry: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     prefix = (
@@ -25,6 +27,10 @@ def run(root: Path, entry: str, *arguments: str) -> subprocess.CompletedProcess[
             "PATH": os.defpath,
             "NO_COLOR": "1",
             "TERM": "dumb",
+            **{
+                name: os.environ[name]
+                for name in ("HOME", "TMPDIR", "JEFF_DATA_DIR", "JEFF_RUNTIME_DIR")
+            },
             "GIT_DIR": "/invalid/FAKE_TEST_SENTINEL",
         },
         capture_output=True,
@@ -36,6 +42,17 @@ def run(root: Path, entry: str, *arguments: str) -> subprocess.CompletedProcess[
 
 @pytest.mark.parametrize("entry", ["console", "module"])
 def test_installed_questions_are_project_bound_and_read_only(git_repo: Path, entry: str) -> None:
+    # Preserve both original entry-point error checks before any registration.
+    if entry == "module":
+        unknown = run(git_repo, entry, "ask", "FAKE_TEST_SENTINEL", "--json")
+        assert unknown.returncode == 1
+        assert Failure.model_validate_json(unknown.stdout).error.code == "unsupported_intent"
+        assert "FAKE_TEST_SENTINEL" not in unknown.stdout + unknown.stderr
+    else:
+        missing = run(git_repo, entry, "ask", "what changed?", "--json")
+        assert missing.returncode == 1
+        assert Failure.model_validate_json(missing.stdout).error.code == "project_not_initialized"
+    assert not (git_repo / "jeff.local.yaml").exists()
     initialized = run(git_repo, entry, "init", "--json")
     assert initialized.returncode == 0, initialized.stderr
     identity = Success.model_validate_json(initialized.stdout)
@@ -64,14 +81,3 @@ def test_installed_questions_are_project_bound_and_read_only(git_repo: Path, ent
     assert (git_repo / ".git/HEAD").read_bytes() == head
     assert not (git_repo / ".git/index").exists()
     assert not (git_repo / ".git/index.lock").exists()
-
-
-def test_installed_unknown_and_unregistered_errors(git_repo: Path) -> None:
-    unknown = run(git_repo, "module", "ask", "FAKE_TEST_SENTINEL", "--json")
-    assert unknown.returncode == 1
-    assert Failure.model_validate_json(unknown.stdout).error.code == "unsupported_intent"
-    assert "FAKE_TEST_SENTINEL" not in unknown.stdout + unknown.stderr
-    missing = run(git_repo, "console", "ask", "what changed?", "--json")
-    assert missing.returncode == 1
-    assert Failure.model_validate_json(missing.stdout).error.code == "project_not_initialized"
-    assert not (git_repo / "jeff.local.yaml").exists()

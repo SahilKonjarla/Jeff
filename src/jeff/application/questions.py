@@ -7,14 +7,21 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from jeff.application.history import GitObserver
 from jeff.application.projects import ErrorData, Failure, ProjectService
 from jeff.domain.projects import ProjectError
 from jeff.domain.repository import BranchState, FileChange, escape_metadata, protected_path
 
 
 class GitRead(Protocol):
-    def read_branch(self, root: Path) -> BranchState: ...
-    def read_changes(self, root: Path) -> tuple[FileChange, ...]: ...
+    """Observe bounded metadata; adapters own subprocess cleanup and fixed Git controls."""
+
+    def read_branch(
+        self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
+    ) -> BranchState: ...
+    def read_changes(
+        self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
+    ) -> tuple[FileChange, ...]: ...
 
 
 class AnswerContext(BaseModel):
@@ -72,7 +79,19 @@ class QuestionSuccess(BaseModel):
     error: None = None
 
 
+def question_intent(question: str) -> Literal["ask.branch", "ask.changes"] | None:
+    """Recognize the finite question vocabulary before project or Git access."""
+    intent = " ".join(question.casefold().split()).removesuffix("?").rstrip()
+    if intent == "what branch am i on":
+        return "ask.branch"
+    if intent == "what changed":
+        return "ask.changes"
+    return None
+
+
 class QuestionService:
+    """Bind supported intents to registered projects and render only safe metadata."""
+
     def __init__(
         self,
         projects: ProjectService,
@@ -83,22 +102,34 @@ class QuestionService:
         self._git = git
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    def execute(self, question: str, directory: Path) -> QuestionSuccess | Failure:
-        intent = " ".join(question.casefold().split()).removesuffix("?").rstrip()
-        if intent not in {"what branch am i on", "what changed"}:
+    def execute(
+        self,
+        question: str,
+        directory: Path,
+        *,
+        deadline: float | None = None,
+        observer: GitObserver | None = None,
+    ) -> QuestionSuccess | Failure:
+        """Return bounded supported metadata or a fixed failure, never truncated Git output."""
+        intent = question_intent(question)
+        if intent is None:
             return Failure(
                 error=ErrorData(
                     code="unsupported_intent",
                     message="Supported questions: 'what branch am I on?' and 'what changed?'.",
                 )
             )
-        project = self._projects.execute("config", directory)
+        project = self._projects.execute("config", directory, deadline=deadline)
         if not project.ok:
             return project
         root = Path(project.data.root)
         try:
-            if intent == "what branch am i on":
-                branch = self._git.read_branch(root)
+            if intent == "ask.branch":
+                branch = self._git.read_branch(
+                    root,
+                    deadline=deadline,
+                    observer=observer,
+                )
                 return QuestionSuccess(
                     data=BranchAnswer(
                         project_id=project.data.project_id,
@@ -112,7 +143,11 @@ class QuestionService:
                         ),
                     )
                 )
-            raw = self._git.read_changes(root)
+            raw = self._git.read_changes(
+                root,
+                deadline=deadline,
+                observer=observer,
+            )
             visible: list[ChangeData] = []
             for change in raw:
                 if protected_path(change.path) or (

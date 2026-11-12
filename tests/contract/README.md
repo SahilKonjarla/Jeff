@@ -6,7 +6,7 @@
 
 **Dependencies:** application-owned contracts, domain values, and adapters under test. Adapters remain independent of clients and sibling integration implementations.
 
-**Planned example:** a Git adapter returns an observed branch through the declared read port and reports unsupported/unavailable state honestly. The port and adapter now exist in [application questions](../../src/jeff/application/questions.py) and [Git integration](../../src/jeff/integrations/git.py); their current expectations are checked in [integration tests](../integration/test_git_questions.py).
+**Planned example:** a Git adapter returns an observed branch through the declared read port and reports unsupported/unavailable state honestly. The port and adapter now exist in [application questions](../../src/jeff/application/questions.py) and [Git integration](../../src/jeff/integrations/git/__init__.py); their current expectations are checked in [integration tests](../integration/test_git_questions.py).
 
 **Owning milestones:** M01 first real adapter contracts; later integration milestones add required expectations.
 

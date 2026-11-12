@@ -2,22 +2,89 @@
 
 import os
 import re
+import select
 import selectors
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
+from jeff.application.history import GitCategory, GitObservation, GitObserver
 from jeff.domain.projects import ProjectError
 from jeff.domain.repository import BranchState, FileChange, git_exclusions
 
 GIT_TIMEOUT = 5.0
 GIT_OUTPUT_LIMIT = 1024 * 1024
 MAX_CHANGES = 10_000
+ProcessRunner = Callable[..., subprocess.CompletedProcess[bytes]]
+
+
+class _GitParentGone(Exception):
+    """An inherited liveness capability ended; only the current owner reaps its child."""
+
+
+def _parent_live(fd: int) -> None:
+    """Treat a readable watch pipe as lost parent liveness, never as a PID check."""
+    if select.select([fd], [], [], 0)[0]:
+        os.read(fd, 1)
+        raise _GitParentGone
 
 
 def _run_git(
-    executable: str, directory: Path, *arguments: str
+    executable: str,
+    directory: Path,
+    *arguments: str,
+    deadline: float | None = None,
+    observer: GitObserver | None = None,
+    category: GitCategory | None = None,
+    process_runner: ProcessRunner | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """Record fixed start/output/outcome facts after the runner's cleanup path."""
+    began = time.monotonic_ns()
+    measured = [0, 0]
+    code: str = "git_failed"
+    try:
+        run = process_runner if process_runner is not None else _run_git_process
+        result = run(executable, directory, *arguments, deadline=deadline, measured=measured)
+        code = (
+            "ok"
+            if result.returncode == 0 or (category == "filters.inspect" and result.returncode == 1)
+            else "git_failed"
+        )
+        return result
+    except ProjectError as error:
+        code = (
+            error.code
+            if error.code in ("git_timeout", "git_output_limit", "git_unavailable")
+            else "git_failed"
+        )
+        raise
+    finally:
+        if observer is not None:
+            if category is None:
+                raise ValueError("Observed Git requires a fixed invocation category.")
+            observer.record(
+                GitObservation.model_validate(
+                    {
+                        "category": category,
+                        "code": code,
+                        "process_started": bool(measured[1]),
+                        "elapsed_ms": max(0, (time.monotonic_ns() - began) // 1000000),
+                        "output_bytes": measured[0],
+                    }
+                )
+            )
+
+
+def _run_git_process(
+    executable: str,
+    directory: Path,
+    *arguments: str,
+    deadline: float | None = None,
+    measured: list[int] | None = None,
+    _watch_fd: int | None = None,
+    _on_started: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Bound both streams while reading; kill/reap only this owned process on failure."""
     command = [
@@ -47,6 +114,10 @@ def _run_git(
         "GIT_ATTR_NOSYSTEM": "1",
         "LC_ALL": "C",
     }
+    if deadline is not None and deadline <= time.monotonic():
+        raise ProjectError("git_timeout", "Git timed out; no command was retried.")
+    if _watch_fd is not None:
+        _parent_live(_watch_fd)
     try:
         with subprocess.Popen(
             command,
@@ -54,26 +125,42 @@ def _run_git(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            close_fds=True,
         ) as process:
+            if measured is not None:
+                measured[1] = 1
             try:
+                if _on_started is not None:
+                    _on_started()
                 assert process.stdout is not None and process.stderr is not None
                 buffers = {"stdout": bytearray(), "stderr": bytearray()}
                 total = 0
-                deadline = time.monotonic() + GIT_TIMEOUT
+                deadline = min(
+                    deadline if deadline is not None else float("inf"),
+                    time.monotonic() + GIT_TIMEOUT,
+                )
                 with selectors.DefaultSelector() as selector:
                     for label, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
                         os.set_blocking(stream.fileno(), False)
                         selector.register(stream, selectors.EVENT_READ, label)
-                    while selector.get_map():
+                    if _watch_fd is not None:
+                        selector.register(_watch_fd, selectors.EVENT_READ, "parent")
+                    open_streams = 2
+                    while open_streams:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise subprocess.TimeoutExpired(command, GIT_TIMEOUT)
                         for key, _ in selector.select(min(remaining, 0.1)):
+                            if key.data == "parent":
+                                _parent_live(key.fd)
                             chunk = os.read(key.fd, min(65536, GIT_OUTPUT_LIMIT - total + 1))
                             if not chunk:
                                 selector.unregister(key.fileobj)
+                                open_streams -= 1
                                 continue
                             total += len(chunk)
+                            if measured is not None:
+                                measured[0] = total
                             if total > GIT_OUTPUT_LIMIT:
                                 raise ProjectError(
                                     "git_output_limit",
@@ -81,6 +168,13 @@ def _run_git(
                                     "No partial answer is available; reduce the visible changes.",
                                 )
                             buffers[str(key.data)].extend(chunk)
+                if _watch_fd is not None:
+                    while process.poll() is None:
+                        _parent_live(_watch_fd)
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(command, GIT_TIMEOUT)
+                        select.select([_watch_fd], [], [], min(remaining, 0.01))
                 returncode = process.wait(timeout=max(0.001, deadline - time.monotonic()))
                 return subprocess.CompletedProcess(
                     command, returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"])
@@ -98,7 +192,12 @@ def _run_git(
 
 
 class GitProjectDiscovery:
-    def find_root(self, directory: Path) -> Path:
+    """Resolve canonical roots through the injected runner without registering a project."""
+
+    def __init__(self, *, process_runner: ProcessRunner | None = None) -> None:
+        self._process_runner = process_runner
+
+    def find_root(self, directory: Path, *, deadline: float | None = None) -> Path:
         executable = shutil.which("git", path=os.defpath)
         if executable is None:
             raise ProjectError("git_unavailable", "Install Git before initializing a project.")
@@ -108,7 +207,13 @@ class GitProjectDiscovery:
                 raise ProjectError(
                     "invalid_root", "Run Jeff from an existing repository directory."
                 )
-            root_text = self._query(executable, directory, "rev-parse", "--show-toplevel")
+            root_text = self._query(
+                executable,
+                directory,
+                "rev-parse",
+                "--show-toplevel",
+                **({"deadline": deadline} if deadline is not None else {}),
+            )
             if root_text.returncode != 0:
                 raise ProjectError("not_a_repository", "Run Jeff inside a non-bare Git repository.")
             reported_root = Path(root_text.stdout.removesuffix("\n"))
@@ -117,7 +222,14 @@ class GitProjectDiscovery:
             root = reported_root.resolve(strict=True)
             if not root.is_dir() or not directory.is_relative_to(root):
                 raise ProjectError("invalid_root", "Git returned an invalid repository root.")
-            tracked = self._query(executable, root, "ls-files", "--", "jeff.local.yaml")
+            tracked = self._query(
+                executable,
+                root,
+                "ls-files",
+                "--",
+                "jeff.local.yaml",
+                **({"deadline": deadline} if deadline is not None else {}),
+            )
             if tracked.returncode != 0:
                 raise ProjectError(
                     "git_failed", "Git could not inspect private configuration tracking."
@@ -138,11 +250,16 @@ class GitProjectDiscovery:
                 "git_timeout", "Git discovery timed out; no command was retried."
             ) from error
 
-    @staticmethod
     def _query(
-        executable: str, directory: Path, *arguments: str
+        self, executable: str, directory: Path, *arguments: str, deadline: float | None = None
     ) -> subprocess.CompletedProcess[str]:
-        result = _run_git(executable, directory, *arguments)
+        result = _run_git(
+            executable,
+            directory,
+            *arguments,
+            deadline=deadline,
+            process_runner=self._process_runner,
+        )
         return subprocess.CompletedProcess(
             result.args,
             result.returncode,
@@ -162,6 +279,7 @@ def _path(raw: bytes) -> str:
 
 
 def _parse_status(output: bytes) -> tuple[BranchState, tuple[FileChange, ...]]:
+    """Parse NUL records, including rename pairs, or reject the entire bounded answer."""
     if not output.endswith(b"\0"):
         raise _malformed()
     records = output[:-1].split(b"\0")
@@ -232,16 +350,35 @@ def _parse_status(output: bytes) -> tuple[BranchState, tuple[FileChange, ...]]:
 
 
 class GitRepositoryRead:
-    def read_branch(self, root: Path) -> BranchState:
-        branch, _ = _parse_status(self._status(root, branch_only=True))
+    """Read protected metadata; filter-backed changes fail rather than execute drivers."""
+
+    def __init__(self, *, process_runner: ProcessRunner | None = None) -> None:
+        self._process_runner = process_runner
+
+    def read_branch(
+        self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
+    ) -> BranchState:
+        branch, _ = _parse_status(
+            self._status(root, branch_only=True, deadline=deadline, observer=observer)
+        )
         return branch
 
-    def read_changes(self, root: Path) -> tuple[FileChange, ...]:
-        _, changes = _parse_status(self._status(root, branch_only=False))
+    def read_changes(
+        self, root: Path, *, deadline: float | None = None, observer: GitObserver | None = None
+    ) -> tuple[FileChange, ...]:
+        _, changes = _parse_status(
+            self._status(root, branch_only=False, deadline=deadline, observer=observer)
+        )
         return changes
 
-    @staticmethod
-    def _status(root: Path, *, branch_only: bool) -> bytes:
+    def _status(
+        self,
+        root: Path,
+        *,
+        branch_only: bool,
+        deadline: float | None = None,
+        observer: GitObserver | None = None,
+    ) -> bytes:
         executable = shutil.which("git", path=os.defpath)
         if executable is None:
             raise ProjectError(
@@ -258,6 +395,10 @@ class GitRepositoryRead:
             "--name-only",
             "--get-regexp",
             r"^filter\..*\.(clean|process|required)$",
+            deadline=deadline,
+            observer=observer,
+            category="filters.inspect",
+            process_runner=self._process_runner,
         )
         if filters.returncode not in {0, 1}:
             raise ProjectError(
@@ -307,6 +448,10 @@ class GitRepositoryRead:
             "--",
             ".",
             *exclusions,
+            deadline=deadline,
+            observer=observer,
+            category="status.branch" if branch_only else "status.changes",
+            process_runner=self._process_runner,
         )
         if result.returncode != 0:
             raise ProjectError(
