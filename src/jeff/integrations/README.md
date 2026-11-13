@@ -1,6 +1,6 @@
 # Integrations — tier 2
 
-**Status:** M01 read-only Git plus M02 daemon-owned native-child lifetime implemented. Other integrations and Git-write commands remain unimplemented.
+**Status:** M01 read-only Git plus M02 daemon-owned native-child lifetime implemented. Other integrations and Git-write commands remain unimplemented. Declared Docker execution is the selected M03 general-job direction, not a shipped integration. M03 owns minimal container-job lifecycle; M05 adds Compose/services through application ports. Delivered native Git helpers remain unchanged; this decision does not grant containers host Git or Docker socket authority.
 
 **Ownership:** `git/__init__.py` implements `GitProjectDiscovery.find_root(directory) -> Path` and the application's `GitRead` port through `GitRepositoryRead.read_branch(root)` / `read_changes(root)`. Discovery canonicalizes non-bare roots and rejects tracked private config without changing the index.
 
@@ -28,4 +28,4 @@ The NUL-delimited parser handles ordinary changes, rename origins, untracked pat
 
 **Owning milestones:** M01/M02. Run `.venv/bin/python -m pytest tests/integration tests/acceptance -q` after installation. [Discovery tests](../../../tests/integration/test_git_discovery.py) and [question tests](../../../tests/integration/test_git_questions.py) cover real Git states, query immutability, bounded stdout/stderr/time, malformed output, and filter-command non-execution. [Installed tests](../../../tests/acceptance/test_installed_questions.py) exercise console and module commands outside the source tree. Fixture-only Git mutations are explicitly approved; no Jeff repository index/history changes.
 
-Linux, linked-worktree/submodule/partial-clone-specific scenarios, all hostile config combinations, and complete execution isolation remain unverified. Add other adapters only with real milestone behavior and their declared ports. See [package map](../README.md).
+Jeff targets macOS only. Linked-worktree/submodule/partial-clone-specific scenarios, all hostile config combinations, and complete execution isolation remain unverified. Add other adapters only with real milestone behavior and their declared ports. See [package map](../README.md).

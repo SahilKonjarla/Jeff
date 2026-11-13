@@ -4,7 +4,7 @@
 
 `jeff/` contains the Python package; see its [tier map](jeff/README.md). Packaging and tooling live in [pyproject.toml](../pyproject.toml).
 
-**Owning milestone:** M01. Mac CLI/demo behavior has automated and user-supplied manual evidence; formal milestone acceptance/M02 handoff is not automatic. Demo generation and bounded technical probes live outside the runtime package. Native local validation is recorded; hosted CI is not running and Linux verification is deferred.
+**Owning milestone:** M01. Mac CLI/demo behavior has automated and user-supplied manual evidence; formal milestone acceptance/M02 handoff is not automatic. Demo generation and bounded technical probes live outside the runtime package. Native local validation is recorded; hosted CI is not running. Jeff targets macOS only.
 
 **Implemented flow:** the installed `jeff` script or `python -m jeff` calls bootstrap, which injects lazy application client/control factories into the CLI. Help does no project I/O; explicit project commands bind a canonical Git root, initialize or inspect declared configuration, and render public-safe typed identity results. `ask` adds deterministic question routing through a Git-read port, with protected-path filtering, escaped metadata, bounded Git subprocesses, and timestamped results. Only explicit start launches the authenticated daemon; init/config/ask route through it without fallback and status composes read-only local/runtime facts. No providers or arbitrary user-command execution is started; internal Git reads use narrow validated argv.
 

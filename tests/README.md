@@ -1,6 +1,6 @@
 # Tests
 
-**Status:** M02 accepted; subsequent approved test-only cleanup has **334 test functions/692 collected source cases** and an explicit **290-case installed selection**. The accepted M02 baseline was697 source/343 installed passes; those immutable receipts remain historical evidence. Cleanup validation ran112 affected source +9 installed cases, zero skips, plus Ruff/format/mypy—not a fresh full692/290 execution. [Cleanup scope/evidence](../.agent-work/reports/m02-test-cleanup.md). Linux/alternate-user/hosted validation remains deferred/unperformed.
+**Status:** M02 accepted; subsequent approved test-only cleanup has **334 test functions/692 collected source cases** and an explicit **290-case installed selection**. The accepted M02 baseline was697 source/343 installed passes; those immutable receipts remain historical evidence. Cleanup validation ran112 affected source +9 installed cases, zero skips, plus Ruff/format/mypy—not a fresh full692/290 execution. [Cleanup scope/evidence](../.agent-work/reports/m02-test-cleanup.md). Jeff targets macOS only. Alternate-user/hosted validation remains deferred/unperformed.
 
 | Directory | Scope and current implementation |
 | --- | --- |
@@ -16,7 +16,7 @@ Source retains the full behavior/security/SQL/real-deadline matrix. The versione
 
 Both delivery-hint paths, all crash/COMMIT/publication/security cases, actual backpressure triggers and one real deadline proof remain. Full guarded crash gates require new explicit fault authority; the accepted M02 envelope is exhausted. Do not rerun a full native acceptance matrix as ordinary cleanup verification or call unrun selected cases passed.
 
-**Owning milestone:** M01 establishes registration, the two Git questions and independent demo fixtures. Separate Mac speech/model/hotkey feasibility probes passed, but are not this pytest suite or shipped integrations. Hosted CI is not active; Docker/self-hosted alternatives are not configured. Linux verification is explicitly deferred.
+**Owning milestone:** M01 establishes registration, the two Git questions and independent demo fixtures. Separate Mac speech/model/hotkey feasibility probes passed, but are not this pytest suite or shipped integrations. Hosted CI is not active; Docker/self-hosted CI alternatives are not configured. Docker is now selected for future application jobs, not for automatically moving this native macOS validation suite into containers. Separately approved disposable M03 Docker probes have run; those finite source-level receipts are not this pytest suite, installed Jeff acceptance or production jobs. Linux client/runtime verification is outside product scope.
 
 From the repository root after installing dev dependencies:
 

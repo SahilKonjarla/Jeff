@@ -1,6 +1,6 @@
 # Bootstrap — composition root
 
-**Status:** M02 slice-4 C wires public explicit lifecycle, runtime-aware status and authenticated daemon-dependent project commands. History/debug/events/retention and read-only doctor are now composed as well. Proof-based idle endpoint recovery is wired before accepting clients; owned hot-journal recovery and active-work/native Git-child lifetime are delivered and M02 is accepted. Cross-platform/hosted execution remains deferred/unperformed, not passed.
+**Status:** M02 slice-4 C wires public explicit lifecycle, runtime-aware status and authenticated daemon-dependent project commands. History/debug/events/retention and read-only doctor are now composed as well. Proof-based idle endpoint recovery is wired before accepting clients; owned hot-journal recovery and active-work/native Git-child lifetime are delivered and M02 is accepted. Jeff targets macOS only. Hosted execution remains deferred/unperformed, not passed.
 
 **Ownership:** `main.py` passes lazy `create_project_client`, `create_runtime_controller` and `create_runtime_diagnostics` factories to CLI presentation. No location selection, project discovery, credential read or connection happens for help/syntax. There is no client-local question adapter or fallback path. Only the daemon composes `QuestionService` with `GitRepositoryRead(process_runner=git_runner)` after actual storage initialization. The same owned runner is injected into discovery/filter/status; there is no daemon fallback to direct Git.
 
@@ -24,4 +24,4 @@ The child retains its raw lock descriptor until kernel process exit. Cached cont
 
 Do not invoke internal entry points against normal/user installations as fixtures. [Installed control](../../../tests/acceptance/test_installed_runtime_control.py) proves matching installation/native identity, launcher exit survival and authenticated shutdown. [Public workflow](../../../tests/acceptance/test_daemon_cli_workflow.py) proves real public start/stop/project/restart/status and uncertain-delivery correlation, with no fallback.
 
-After [installation](../../../README.md), run documented tests only in approved owned outside-Git arenas. [Architecture checks](../../../tests/architecture/README.md) enforce tier direction. Help/native local proof is not Linux/CI, desktop/audio/provider or formal milestone acceptance. See [package map](../README.md).
+After [installation](../../../README.md), run documented tests only in approved owned outside-Git arenas. [Architecture checks](../../../tests/architecture/README.md) enforce tier direction. Help/native local proof is not hosted-CI, desktop/audio/provider or formal milestone acceptance. See [package map](../README.md).
