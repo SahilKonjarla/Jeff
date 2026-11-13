@@ -15,7 +15,7 @@ from jeff.infrastructure.runtime_state import RuntimeStateStore
     "payload",
     [
         b"{}",
-        b"schema_version: 2\nhistory: {retention_days: 30}",
+        b"schema_version: 3\nhistory: {retention_days: 30}",
         b"schema_version: 1\nhistory: {retention_days: true}",
         b"schema_version: 1\nhistory: {retention_days: '30'}",
         b"schema_version: 1\nhistory: {retention_days: 0}",

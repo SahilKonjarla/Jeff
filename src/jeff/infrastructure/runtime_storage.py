@@ -20,6 +20,14 @@ from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from jeff.application.diagnostics import DiagnosticDeadlineExceeded
+from jeff.application.execution import (
+    ActionManifest,
+    ExecutionData,
+    ExecutionProfile,
+    ReviewFault,
+    ReviewOperation,
+    ReviewRecord,
+)
 from jeff.application.history import (
     ACTIVITY_EVENT_LIMIT,
     INT64_MAX,
@@ -57,6 +65,14 @@ from jeff.application.storage import (
     StorageFault,
     StorageIssueCode,
     StorageReadiness,
+)
+from jeff.domain.execution import (
+    LIVE_REVIEW_LIMIT,
+    REVIEW_RECORD_LIMIT,
+    REVIEW_TTL_SECONDS,
+    ReviewState,
+    canonical_bytes,
+    fingerprint,
 )
 from jeff.domain.projects import Project
 from jeff.infrastructure.runtime_settings import load_or_create_settings
@@ -133,6 +149,30 @@ _EVENT_COLUMNS = (
     "event_id,request_id,owner_instance_id,canonical_root,project_id,kind,recorded_at_ms,"
     "code,git_category,elapsed_ms,output_bytes,git_started,registration_created"
 )
+_REVIEWS = (
+    "CREATE TABLE execution_reviews (sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "proposal_id TEXT NOT NULL UNIQUE, approval_id TEXT NOT NULL UNIQUE, "
+    "job_id TEXT NOT NULL UNIQUE, "
+    "project_id TEXT NOT NULL, canonical_root TEXT NOT NULL, owner_instance_id TEXT NOT NULL, "
+    "manifest_json TEXT NOT NULL CHECK(length(CAST(manifest_json AS BLOB))<=32768), "
+    "manifest_digest TEXT NOT NULL CHECK(length(manifest_digest)=64), "
+    "configuration_digest TEXT NOT NULL CHECK(length(configuration_digest)=64), "
+    "state TEXT NOT NULL CHECK(state IN ('pending','approved','denied','expired','invalidated')), "
+    "created_at_ms INTEGER NOT NULL CHECK(created_at_ms>=0), "
+    "expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms>=created_at_ms))"
+)
+_REVIEW_OPS = (
+    "CREATE TABLE execution_operations (request_id TEXT PRIMARY KEY, "
+    "project_id TEXT NOT NULL, canonical_root TEXT NOT NULL, operation TEXT NOT NULL "
+    "CHECK(operation IN ('propose','approve','deny')), payload_digest TEXT NOT NULL "
+    "CHECK(length(payload_digest)=64), proposal_id TEXT NOT NULL, "
+    "recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms>=0), "
+    "outcome_state TEXT NOT NULL CHECK(outcome_state IN ('pending','approved','denied')))"
+)
+_REVIEW_COLUMNS = (
+    "sequence,proposal_id,approval_id,job_id,project_id,canonical_root,owner_instance_id,"
+    "manifest_json,manifest_digest,configuration_digest,state,created_at_ms,expires_at_ms"
+)
 _SIDECARS = ("state.sqlite3-journal", "state.sqlite3-wal", "state.sqlite3-shm")
 _FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
@@ -181,7 +221,7 @@ def _schema(connection: sqlite3.Connection) -> int:
     if connection.execute("PRAGMA application_id").fetchone() != (DATABASE_APPLICATION_ID,):
         raise StorageFault("storage_unrecognized")
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version not in (0, 1, 2, 3, DATABASE_SCHEMA):
+    if version not in (0, 1, 2, 3, 4, DATABASE_SCHEMA):
         raise StorageFault("storage_schema_unsupported")
     if connection.execute("PRAGMA journal_mode").fetchone() != ("delete",):
         raise StorageFault("storage_recovery_required")
@@ -203,6 +243,9 @@ def _schema(connection: sqlite3.Connection) -> int:
     if version >= 4:
         expected["request_tombstones"] = ("table", _TOMBSTONES)
         expected["receipts_expirable"] = ("index", _EXPIRABLE_INDEX)
+    if version >= 5:
+        expected["execution_reviews"] = ("table", _REVIEWS)
+        expected["execution_operations"] = ("table", _REVIEW_OPS)
     found = connection.execute(
         "SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT ?",
         (len(expected) + 1,),
@@ -228,6 +271,7 @@ def _schema(connection: sqlite3.Connection) -> int:
             (2, "request_receipts_v2"),
             (3, "activity_v3"),
             (4, "retention_v4"),
+            (5, "execution_review_v5"),
         )
         if number <= version
     ]:
@@ -306,6 +350,7 @@ class _Work:
         "history",
         "stream",
         "retire",
+        "review",
     ]
     payload: (
         Project
@@ -316,6 +361,7 @@ class _Work:
         | ActivityRecord
         | ReplayScope
         | HistoryScope
+        | ReviewOperation
         | None
     )
     deadline: float
@@ -336,7 +382,16 @@ class SQLiteStorage:
         retention_clock: Callable[[], int] | None = None,
         retention_monotonic: Callable[[], float] | None = None,
         scheduled_retention: bool = False,
+        review_clock: Callable[[], int] | None = None,
+        review_monotonic: Callable[[], float] | None = None,
     ) -> None:
+        self._review_clock = review_clock or (lambda: time.time_ns() // 1000000)
+        self._review_monotonic = review_monotonic or time.monotonic
+        self._review_wall_high: int | None = None
+        self._review_mono_high: float | None = None
+        self._review_clock_bad = False
+        self._review_deadlines: dict[str, float] = {}
+        self._execution_profiles: tuple[ExecutionProfile, ...] = ()
         self._retention_monotonic = retention_monotonic or time.monotonic
         self._retention_progress = RetentionProgress(enabled=scheduled_retention)
         self._retention_position: RetentionPosition | None = None
@@ -486,6 +541,16 @@ class SQLiteStorage:
         """Installation-internal bounded maintenance; no cutoff/SQL or wire operation."""
         return cast(RetirementBatch, self._submit("retire", None, deadline))
 
+    @property
+    def execution_profiles(self) -> tuple[ExecutionProfile, ...]:
+        return self._execution_profiles
+
+    def review(self, operation: ReviewOperation, *, deadline: float) -> ExecutionData:
+        try:
+            return cast(ExecutionData, self._submit("review", operation, deadline))
+        except StorageFault as error:
+            raise ReviewFault(error.code) from None
+
     def _submit(
         self,
         operation: Literal[
@@ -502,6 +567,7 @@ class SQLiteStorage:
             "history",
             "stream",
             "retire",
+            "review",
         ],
         payload: Project
         | ReceiptClaim
@@ -511,6 +577,7 @@ class SQLiteStorage:
         | ActivityRecord
         | ReplayScope
         | HistoryScope
+        | ReviewOperation
         | None,
         deadline: float | None,
     ) -> object:
@@ -550,20 +617,32 @@ class SQLiteStorage:
                 "storage_busy" if result.cancel() else "storage_outcome_unconfirmed"
             ) from None
 
-    def _begin_write(self, connection: sqlite3.Connection, root: int, fd: int) -> None:
+    def _begin_write(
+        self,
+        connection: sqlite3.Connection,
+        root: int,
+        fd: int,
+        source_schema: int = DATABASE_SCHEMA,
+    ) -> None:
         """Arm the actual DELETE journal before business DML, on the same SQL owner."""
         self._check(root, fd)
+        if source_schema not in (4, 5) or _schema(connection) != source_schema:
+            raise StorageFault("storage_schema_unsupported")
         try:
             self.owner.store.read_credential()  # Existing authority only, never rekey residue.
             self.owner.retire_storage_recovery(fd)
             connection.execute("BEGIN IMMEDIATE")
             page_size = connection.execute("PRAGMA page_size").fetchone()[0]
             pages = connection.execute("PRAGMA page_count").fetchone()[0]
-            connection.execute("PRAGMA user_version=4")  # Same version; real journal first.
+            connection.execute(f"PRAGMA user_version={source_schema}")  # Real journal first.
             journal = os.open("state.sqlite3-journal", os.O_RDONLY | _FLAGS, dir_fd=root)
             try:
                 self.owner.arm_storage_recovery(
-                    fd, journal, page_size=page_size, original_pages=pages
+                    fd,
+                    journal,
+                    page_size=page_size,
+                    original_pages=pages,
+                    schema_version=source_schema,
                 )
             finally:
                 os.close(journal)
@@ -688,6 +767,7 @@ class SQLiteStorage:
         fd = -1
         journal_fd = -1
         connection: sqlite3.Connection | None = None
+        recovery_schema: int | None = None
         try:
             if recovering or has_permit:
                 try:
@@ -742,9 +822,9 @@ class SQLiteStorage:
                 self._check(root, fd)
                 self._sidecars(root, preexisting=True)
             if recovering:
-                self.owner.verify_storage_recovery(
+                recovery_schema = self.owner.verify_storage_recovery(
                     fd, journal_fd
-                )  # Last check before writable open.
+                ).schema_version  # Last authenticated check before writable open.
             connection = sqlite3.connect(
                 base + "?mode=rw&cache=private",
                 uri=True,
@@ -765,6 +845,13 @@ class SQLiteStorage:
                 connection.execute("PRAGMA user_version=0")
                 connection.execute("COMMIT")
             version = _schema(connection)
+            if recovering:
+                if version != recovery_schema:
+                    raise StorageFault("storage_schema_unsupported")
+                if connection.execute("PRAGMA quick_check(1)").fetchone() != ("ok",):
+                    raise StorageFault("storage_unrecognized")
+                self._sidecars(root, preexisting=True)
+                self.owner.retire_storage_recovery(fd)
             if version == 0:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute(_PROJECTS)
@@ -818,13 +905,24 @@ class SQLiteStorage:
                     if not connection.in_transaction:
                         raise StorageFault("storage_outcome_unconfirmed") from None
                     raise
+            if version < 5:
+                self._begin_write(connection, root, fd, source_schema=4)
+                connection.execute(_REVIEWS)
+                connection.execute(_REVIEW_OPS)
+                connection.execute("INSERT INTO schema_migrations VALUES (5,'execution_review_v5')")
+                connection.execute("PRAGMA user_version=5")
+                self._commit_write(connection, fd)
             _schema(connection)
             self._activity_meta(connection)
-            if recovering:
-                if connection.execute("PRAGMA quick_check(1)").fetchone() != ("ok",):
-                    raise StorageFault("storage_unrecognized")
-                self._sidecars(root, preexisting=True)  # SQLite, not Jeff, removed its journal.
-                self.owner.retire_storage_recovery(fd)
+            if connection.execute(
+                "SELECT 1 FROM execution_reviews WHERE state IN ('pending','approved') LIMIT 1"
+            ).fetchone():
+                self._begin_write(connection, root, fd)
+                connection.execute(
+                    "UPDATE execution_reviews SET state='invalidated' "
+                    "WHERE state IN ('pending','approved')"
+                )
+                self._commit_write(connection, fd)
             if self.instance_id is not None:
                 self._reconcile(connection, self.instance_id, root, fd)
             self._check(root, fd)
@@ -842,6 +940,9 @@ class SQLiteStorage:
 
     def _execute(self, connection: sqlite3.Connection, work: _Work, root: int, fd: int) -> object:
         self._check(root, fd)
+        if work.operation == "review":
+            assert isinstance(work.payload, ReviewOperation)
+            return self._review_work(connection, work.payload, root, fd)
         if work.operation == "retire":
             return self._retire(connection, root, fd)
         if work.operation == "stream":
@@ -891,6 +992,252 @@ class SQLiteStorage:
                 raise StorageFault("storage_outcome_unconfirmed") from None
             raise
         return created if writing else bool(rows)
+
+    def _review_time(self) -> tuple[int, float, bool]:
+        wall, mono = self._review_clock(), self._review_monotonic()
+        if (
+            type(wall) is not int
+            or not 0 <= wall <= INT64_MAX - 600000
+            or not math.isfinite(mono)
+            or mono < 0
+            or (self._review_wall_high is not None and wall < self._review_wall_high)
+            or (self._review_mono_high is not None and mono < self._review_mono_high)
+        ):
+            self._review_clock_bad = True
+        if self._review_clock_bad:
+            return self._review_wall_high or 0, self._review_mono_high or 0.0, False
+        self._review_wall_high, self._review_mono_high = wall, mono
+        return wall, mono, True
+
+    @staticmethod
+    def _review_record(row: tuple[object, ...]) -> ReviewRecord:
+        data = dict(zip(_REVIEW_COLUMNS.split(","), row, strict=True))
+        manifest = ActionManifest.model_validate_json(str(data["manifest_json"]))
+        if (
+            str(manifest.profile.project_id) != data["project_id"]
+            or str(manifest.canonical_root) != data["canonical_root"]
+            or manifest.profile.fingerprint != data["configuration_digest"]
+        ):
+            raise StorageFault("storage_schema_unsupported")
+        state = ReviewState(str(data["state"]))
+        reasons = {
+            ReviewState.PENDING: "approval_required",
+            ReviewState.APPROVED: "execution_unavailable",
+            ReviewState.DENIED: "approval_denied",
+            ReviewState.EXPIRED: "approval_expired",
+            ReviewState.INVALIDATED: "approval_invalidated",
+        }
+        return ReviewRecord.model_validate(
+            {
+                "sequence": data["sequence"],
+                "proposal_id": data["proposal_id"],
+                "approval_id": data["approval_id"],
+                "job_id": data["job_id"],
+                "manifest": manifest,
+                "manifest_digest": data["manifest_digest"],
+                "state": state,
+                "created_at_ms": data["created_at_ms"],
+                "expires_at_ms": data["expires_at_ms"],
+                "owner_instance_id": data["owner_instance_id"],
+                "job_state": "waiting_for_approval" if state == ReviewState.PENDING else "blocked",
+                "reason": reasons[state],
+            }
+        )
+
+    def _review_work(
+        self, connection: sqlite3.Connection, operation: ReviewOperation, root: int, fd: int
+    ) -> ExecutionData:
+        call = operation.call
+        if self.instance_id is None or operation.owner_instance_id != self.instance_id:
+            raise ReviewFault("execution_target_mismatch")
+        project, path = str(operation.project_id), str(operation.canonical_root)
+        if (
+            connection.execute(
+                "SELECT 1 FROM projects WHERE project_id=? AND canonical_root=?", (project, path)
+            ).fetchone()
+            is None
+        ):
+            raise ReviewFault("execution_target_mismatch")
+        self._begin_write(connection, root, fd)
+        now, mono, healthy = self._review_time()
+        active = connection.execute(
+            "SELECT proposal_id,expires_at_ms,owner_instance_id FROM execution_reviews "
+            "WHERE state IN ('pending','approved') LIMIT ?",
+            (LIVE_REVIEW_LIMIT + 1,),
+        ).fetchall()
+        if len(active) > LIVE_REVIEW_LIMIT:
+            raise StorageFault("storage_schema_unsupported")
+        for identifier, expires, owner in active:
+            reason = None
+            if (
+                not healthy
+                or owner != str(self.instance_id)
+                or identifier not in self._review_deadlines
+            ):
+                reason = "invalidated"
+            elif now >= expires or mono >= self._review_deadlines[identifier]:
+                reason = "expired"
+            if reason is not None:
+                connection.execute(
+                    "UPDATE execution_reviews SET state=? WHERE proposal_id=?", (reason, identifier)
+                )
+        if healthy:
+            cutoff = max(0, now - (self._retention_days or 30) * 86400000)
+            connection.execute(
+                "DELETE FROM execution_reviews WHERE sequence IN "
+                "(SELECT sequence FROM execution_reviews "
+                "WHERE state IN ('denied','expired','invalidated') AND created_at_ms<? LIMIT 100)",
+                (cutoff,),
+            )
+        mutating = call.operation in {"propose", "approve", "deny"}
+        payload_digest = fingerprint(
+            {
+                "call": call.model_dump(mode="json"),
+                "project": project,
+                "root": path,
+                "manifest": operation.manifest.fingerprint if operation.manifest else None,
+                "configuration": operation.configuration_fingerprint,
+            }
+        )
+        prior = (
+            connection.execute(
+                "SELECT project_id,canonical_root,payload_digest,proposal_id "
+                "FROM execution_operations WHERE request_id=?",
+                (str(call.request_id),),
+            ).fetchone()
+            if mutating
+            else None
+        )
+        if prior:
+            if prior[:3] != (project, path, payload_digest):
+                raise ReviewFault("execution_conflict")
+            row = connection.execute(
+                "SELECT " + _REVIEW_COLUMNS + " FROM execution_reviews WHERE proposal_id=?",
+                (prior[3],),
+            ).fetchone()
+            if row is None:
+                raise ReviewFault("execution_expired")
+            self._commit_write(connection, fd)
+            return ExecutionData(items=(self._review_record(row),))
+        if not healthy and call.operation in {"propose", "approve"}:
+            self._commit_write(connection, fd)
+            raise ReviewFault("execution_clock")
+        if call.operation == "propose":
+            manifest = operation.manifest
+            if (
+                manifest is None
+                or manifest.profile.project_id != operation.project_id
+                or manifest.canonical_root != operation.canonical_root
+            ):
+                raise ReviewFault("execution_target_mismatch")
+            if manifest.profile.fingerprint != operation.configuration_fingerprint:
+                raise ReviewFault("execution_target_mismatch")
+            total = connection.execute(
+                "SELECT count(*) FROM execution_operations WHERE operation='propose'"
+            ).fetchone()[0]
+            live = connection.execute(
+                "SELECT count(*) FROM execution_reviews WHERE state IN ('pending','approved')"
+            ).fetchone()[0]
+            if total >= REVIEW_RECORD_LIMIT or live >= LIVE_REVIEW_LIMIT:
+                raise ReviewFault("execution_capacity")
+            identifier, approval, job = str(uuid4()), str(uuid4()), str(uuid4())
+            connection.execute(
+                "INSERT INTO execution_reviews (proposal_id,approval_id,job_id,project_id,"
+                "canonical_root,owner_instance_id,manifest_json,manifest_digest,"
+                "configuration_digest,state,created_at_ms,expires_at_ms) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?)",
+                (
+                    identifier,
+                    approval,
+                    job,
+                    project,
+                    path,
+                    str(self.instance_id),
+                    canonical_bytes(manifest.model_dump(mode="json")).decode("ascii"),
+                    manifest.fingerprint,
+                    manifest.profile.fingerprint,
+                    now,
+                    now + REVIEW_TTL_SECONDS * 1000,
+                ),
+            )
+            row = connection.execute(
+                "SELECT " + _REVIEW_COLUMNS + " FROM execution_reviews WHERE proposal_id=?",
+                (identifier,),
+            ).fetchone()
+        elif call.operation in {"approve", "deny", "approval.show", "job.show"}:
+            column = "job_id" if call.operation == "job.show" else "approval_id"
+            row = connection.execute(
+                "SELECT "
+                + _REVIEW_COLUMNS
+                + " FROM execution_reviews WHERE "
+                + column
+                + "=? AND project_id=? AND canonical_root=?",
+                (str(call.object_id), project, path),
+            ).fetchone()
+            if row is None:
+                raise ReviewFault("execution_not_found")
+            current = self._review_record(row)
+            identifier = str(current.proposal_id)
+            if call.operation in {"approve", "deny"}:
+                if current.state != ReviewState.PENDING:
+                    self._commit_write(connection, fd)
+                    raise ReviewFault(
+                        "execution_expired"
+                        if current.state in {ReviewState.EXPIRED, ReviewState.INVALIDATED}
+                        else "execution_conflict"
+                    )
+                if (
+                    call.operation == "approve"
+                    and operation.configuration_fingerprint != current.manifest.profile.fingerprint
+                ):
+                    connection.execute(
+                        "UPDATE execution_reviews SET state='invalidated' WHERE proposal_id=?",
+                        (identifier,),
+                    )
+                    self._commit_write(connection, fd)
+                    raise ReviewFault("execution_target_mismatch")
+                state = "approved" if call.operation == "approve" else "denied"
+                connection.execute(
+                    "UPDATE execution_reviews SET state=? WHERE proposal_id=? AND state='pending'",
+                    (state, identifier),
+                )
+                row = connection.execute(
+                    "SELECT " + _REVIEW_COLUMNS + " FROM execution_reviews WHERE proposal_id=?",
+                    (identifier,),
+                ).fetchone()
+        else:
+            rows = connection.execute(
+                "SELECT "
+                + _REVIEW_COLUMNS
+                + " FROM execution_reviews WHERE project_id=? AND canonical_root=? "
+                "AND sequence>? ORDER BY sequence LIMIT ?",
+                (project, path, call.after, call.limit + 1),
+            ).fetchall()
+            self._commit_write(connection, fd)
+            return ExecutionData(
+                items=tuple(self._review_record(item) for item in rows[: call.limit]),
+                next_after=rows[call.limit - 1][0] if len(rows) > call.limit else None,
+            )
+        assert row is not None
+        result = self._review_record(row)
+        if mutating:
+            connection.execute(
+                "INSERT INTO execution_operations VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    str(call.request_id),
+                    project,
+                    path,
+                    call.operation,
+                    payload_digest,
+                    str(result.proposal_id),
+                    now,
+                    result.state.value,
+                ),
+            )
+        self._commit_write(connection, fd)
+        if call.operation == "propose":
+            self._review_deadlines[str(result.proposal_id)] = mono + REVIEW_TTL_SECONDS
+        return ExecutionData(items=(result,))
 
     @staticmethod
     def _receipt(row: tuple[object, ...]) -> Receipt:
@@ -1680,6 +2027,7 @@ class SQLiteStorage:
         try:
             settings, source = load_or_create_settings(self.owner)
             self._retention_days = settings.history.retention_days
+            self._execution_profiles = settings.execution.profiles
             with self.owner.store.directory(self.owner.store.layout.data_dir, create=False) as root:
                 connection, fd = self._open(root)
                 self._publish_retention(self._activity_meta(connection))
@@ -1737,11 +2085,15 @@ class SQLiteStorage:
                             try:
                                 if connection.in_transaction:
                                     self._rollback_write(connection, fd)
-                            except sqlite3.Error:
+                            except Exception:  # Resolve active work even if proof retirement fails.
                                 fault = StorageFault("storage_outcome_unconfirmed")
                                 self._failed(fault)
                                 self._closing.set()
                             else:
+                                if isinstance(error, ReviewFault):
+                                    if not work.result.done():
+                                        work.result.set_exception(error)
+                                    continue
                                 fault = _fault(error)
                             if fault.code not in (
                                 "storage_busy",

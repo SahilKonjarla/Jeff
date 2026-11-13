@@ -9,10 +9,10 @@ Owns concrete project files, private runtime state, native/authenticated IPC, li
 |`project_files.py`|No-follow bounded YAML/ignore reads, stable project identity and atomic per-file publication|
 |`runtime_paths.py`|Pure explicit layout resolution and fixed-role metadata snapshots; no state creation/content reads|
 |`runtime_state.py`|Operation-time namespace checks, lifetime ownership, diagnostic leases, existing key, endpoint/storage provenance|
-|`runtime_settings.py`|Strict bounded private YAML, exclusive defaults and byte-preserving existing-file reuse|
+|`runtime_settings.py`|Strict private settings2 with project-bound execution declarations; empty defaults; byte-preserving legacy settings1 reuse|
 |`runtime_ipc.py`|Strict framed native-peer/authenticated local IPC and owned client/stream connections|
 |`runtime_process.py`|Installed child launch, authenticated readiness/concurrent convergence and verified native stop|
-|`runtime_storage.py`|Single SQL-owner connection, checked adoption/migrations/registry/receipts/evidence/recovery/retirement|
+|`runtime_storage.py`|Single SQL-owner connection, checked DB5 migration/registry/receipts/evidence/recovery/retirement and durable review-only decisions|
 |`runtime_dispatch.py`|Four owned workers/16 pending, typed queueing and actual drain|
 |`runtime_events.py`|One serialized read pump, coalesced hints, retained pages/writers and committed-position invalidation|
 |`runtime_diagnostics.py`|One-budget finite doctor projection: cached live facts or safely leased stopped reads|
@@ -43,9 +43,13 @@ New DB marker/ledger and ordered migrations validate supported structures; exist
 
 Endpoint receipt1 authenticates exact native namespace/key/anchor/socket/self bindings, nonce/instance and no-clobber publication before accept. Explicit start alone may retire a proven stale pair or matching receipt-only residue after exclusive ownership and definite refusal; doctor merely observes residue. Responding/unconfirmed/foreign/unsafe proof remains preserved.
 
-Storage permit1 binds actual journal/DB/key/namespace/anchor/self identities before business DML on the same owner. BEGIN/real `user_version=4` journal priming/permit publication precede mutations; no-op writes roll back the primer. COMMIT/ROLLBACK cleanup retires only matching permission after SQLite removes its journal. Failure after COMMIT is not rollback proof.
+Storage permit1 binds actual journal/DB/key/namespace/anchor/self identities before business DML on the same owner. BEGIN/real source-schema journal priming/permit publication precede mutations: schema4 before the4→5 migration, schema5 before current business writes. Legacy schema4 HMAC format is retained; recovered authenticated source schema/catalog/ledger must validate before migration. No-op writes roll back the primer. COMMIT/ROLLBACK cleanup retires only matching permission after SQLite removes its journal. Failure after COMMIT is not rollback proof. Rollback/proof-retirement exceptions resolve the active caller as unconfirmed, fail storage and seal admission rather than escaping with an unresolved future. Four bounded source checks cover that failure, signed legacy-format/migration ordering, actual DDL rollback and pre-DDL publication refusal; they do not demonstrate physical-crash/hot-journal recovery of DB5.
 
 Startup authenticates/pins genuine hot DELETE-journal header/identities/bounds (recovery-only DB≤256MiB/journal≤16MiB) before writable SQLite recovery and current-schema/activity/integrity validation. WAL/SHM/super-journal, missing/replaced/unsupported proof and unproved creation/migration refuse. SQLite alone manages journals. No reset/rekey/manual journal deletion; project-file publication survives SQL rollback. Unknown prior-owner work is reconciled, never re-executed. [Recovery guidance](../../../docs/runbooks/m02-recovery.md).
+
+## Review-only work — M03 Phase2, acceptance pending
+
+Authenticated wire7 carries a separate typed review request through the existing bounded workers and single SQL owner. DB5 stores exact public manifests, project/root-bound proposal/approval/job identities and mutation UUID exclusion. Decisions are atomic, finite and permanently nonexecutable; approved jobs remain blocked, with no Docker/process adapter. The daemon loads private profiles once at startup. Restart invalidates unused review state; declarations are explicitly unverified and profiles are not repository-granted authority. Inspection may transactionally expire/retire review detail, unlike read-only M02 diagnostic/history interfaces.
 
 ## Evidence, retirement and streams
 

@@ -1,6 +1,6 @@
 # Application — tier1
 
-Owns use cases, typed public results, policy and narrow ports. Depends only on domain/application contracts, stdlib and Pydantic—not concrete sockets, processes, SQL/YAML adapters or bootstrap. M02 is delivered/accepted; general execution/approvals remain later work. [Tier map](../README.md).
+Owns use cases, typed public results, policy and narrow ports. Depends only on domain/application contracts, stdlib and Pydantic—not concrete sockets, processes, SQL/YAML adapters or bootstrap. M02 is delivered/accepted. M03 Phase2 adds durable review-only proposals/approvals/jobs locally; Phase2 acceptance and actual execution remain pending. [Tier map](../README.md).
 
 ## Interfaces
 
@@ -15,6 +15,7 @@ Owns use cases, typed public results, policy and narrow ports. Depends only on d
 |`dispatch.ActivityClient` / `ActivityStream`|Explicit owned subscription, one reader, finite frames, explicit resume/resync; EOF need not include a terminal frame|
 |`runtime.RuntimeControl`|Explicit start/status/stop; typed observations are not themselves process/authentication authority|
 |`diagnostics.RuntimeDiagnostics.inspect()`|Seven ordered finite checks/report; preserve unhealthy data, no lifecycle/repair work|
+|`execution.ExecutionService` / `ExecutionClient` / `ReviewStore`|Bind private project profiles, build exact public manifests and atomically propose/decide/inspect review records; no executor or launch authority|
 
 Protocols declare adapter obligations; model construction/declared budgets do not enforce native ownership, framing or cancellation. Bootstrap wires implementations. Help/syntax must not invoke factories or select installation paths.
 
@@ -42,9 +43,15 @@ Stream cursors are distinct from history cursors. Observed UUID filtering never 
 
 DB4 keeps UUID-only permanent tombstones, preserving registrations and unknown/unfinished ownership. Validated retention defaults30days, restart-loaded; same-owner scheduling retires≤100 eligible completed requests per≥60s interval. UTC chooses eligibility, monotonic time cadence; invalid/backward samples defer. `RetentionProgress`/`RetentionPosition` are cached internal facts, not SQL reads or another event journal. Checked committed epoch/generation/floor publication precedes hints; rollback/lost ACK cannot publish speculative positions. Setup/pages/suspended writers recheck invalidation independently of the global read pump. Already-sent bytes cannot be recalled; logical expiry is not secure erasure.
 
+## Review-only execution declarations — M03 Phase2
+
+Profiles bind project UUID/canonical root, declared local engine/endpoint, immutable image ID/platform/toolchain, absolute executable, denied network, sanitized read-only project view and finite resource/output limits. Phase2 does not verify an engine/image, publish a project view or launch user argv. Only fixed allowlisted public environment values are supported; known sensitive argument channels refuse, but arbitrary secret detection is not guaranteed. Exact public argv is durable and should never contain secrets.
+
+Reviews expire after600s, bind exact manifest/profile fingerprints and are invalidated by restart or approval-time configuration mismatch. The ledger allows16 live reviews and5000 lifetime proposal identities; details expire under bounded retention, not secure erasure. Request UUIDs exclude conflicting reuse. These are not M02 action receipts. Approved Phase2 jobs remain blocked: `review_only_v1` never becomes launch authority, even after Phase3 is implemented; fresh proposals/approvals will be required.
+
 ## Runtime and doctor values
 
-Wire6/DB4/settings1 are independent of package/local proof versions; no version negotiation/downgrade. `RuntimeLayout` derives fixed names from trusted host-selected roots; construction does not create state/authority. Inspection contains seven fixed roles and bounded metadata, never content. Native adapters enforce path/credential/peer/deadline/admission rules; PID/UUID/model fields alone authorize no lifecycle action.
+Current Phase2 development uses wire7/DB5/settings2 (accepted M02 used wire6/DB4/settings1). Legacy settings1 remains readable without rewriting. These are independent of package/local proof versions; no version negotiation/downgrade. `RuntimeLayout` derives fixed names from trusted host-selected roots; construction does not create state/authority. Inspection contains seven fixed roles and bounded metadata, never content. Native adapters enforce path/credential/peer/deadline/admission rules; PID/UUID/model fields alone authorize no lifecycle action.
 
 Doctor healthy requires verified full readiness/all supported capabilities; stopped facts require a non-creating lease and current settings/schema, not invented live identity. Live cached active retention differs from stopped configured inactive retention; huge values use `above_report_limit`. Output≤8KiB, safe unavailable/unhealthy reasons, no environment dump/recovery/provider start. Command-specific failures retain their report rather than discarding diagnostic data.
 

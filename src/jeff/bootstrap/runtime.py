@@ -17,6 +17,7 @@ from jeff.application.dispatch import (
     ProjectDispatcher,
     ProjectStatusService,
 )
+from jeff.application.execution import ExecutionClient, ExecutionService
 from jeff.application.projects import Failure, ProjectService
 from jeff.application.questions import QuestionService
 from jeff.application.runtime import (
@@ -95,6 +96,11 @@ def create_project_client() -> ProjectClient:
     )
 
 
+def create_execution_client() -> ExecutionClient:
+    """Review-only RPC client; no installation or backend access at construction."""
+    return RuntimeProjectClient(_selected_layout)
+
+
 def create_activity_client() -> ActivityClient:
     """Lazy installed subscription interface; no CLI/auto-start/cursor persistence."""
     return RuntimeProjectClient(_selected_layout)
@@ -153,7 +159,10 @@ async def _serve(
                     QuestionService(projects, GitRepositoryRead(process_runner=git_runner)),
                     storage,
                     identity,
-                )
+                ),
+                ExecutionService(
+                    projects, storage, lambda: storage.execution_profiles, identity.instance_id
+                ),
             )
             dispatcher.start()
             server.dispatcher = dispatcher

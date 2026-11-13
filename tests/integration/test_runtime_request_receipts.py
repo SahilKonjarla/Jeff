@@ -72,7 +72,7 @@ def test_receipt_claim_finish_lookup_and_restart_without_replay(tmp_path: Path) 
         again = SQLiteStorage(owner, instance_id=uuid4())
         again.start()
         try:
-            assert again.wait_ready(5).schema_version == 4
+            assert again.wait_ready(5).schema_version == 5
             recovered = again.inspect(scope, deadline=deadline())
             assert recovered is not None and recovered.state == "unknown"
             assert recovered.outcome_code == "interrupted"
@@ -119,7 +119,7 @@ def test_schema_one_registry_migrates_and_concurrent_claim_is_unique(tmp_path: P
         storage = SQLiteStorage(owner, instance_id=instance)
         storage.start()
         try:
-            assert storage.wait_ready(5).schema_version == 4
+            assert storage.wait_ready(5).schema_version == 5
             assert storage.lookup(project) == project
             claim = ReceiptClaim(
                 request_id=uuid4(),

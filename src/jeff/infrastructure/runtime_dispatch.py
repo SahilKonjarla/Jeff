@@ -18,10 +18,11 @@ from jeff.application.dispatch import (
     StreamReply,
     dispatch_failure,
 )
+from jeff.application.execution import ExecutionCall, ExecutionReply, ExecutionService
 from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS, ControlFault
 
-Call = ProjectCall | ReceiptQuery | EvidenceQuery | StreamQuery
-Reply = DispatchReply | ReceiptReply | EvidenceReply | StreamReply
+Call = ProjectCall | ReceiptQuery | EvidenceQuery | StreamQuery | ExecutionCall
+Reply = DispatchReply | ReceiptReply | EvidenceReply | StreamReply | ExecutionReply
 
 
 @dataclass
@@ -34,8 +35,11 @@ class _Work:
 class RuntimeDispatcher:
     """Keep blocking use cases off the control loop with finite, owned worker lifetimes."""
 
-    def __init__(self, dispatch: ProjectDispatcher) -> None:
+    def __init__(
+        self, dispatch: ProjectDispatcher, execution: ExecutionService | None = None
+    ) -> None:
         self.dispatch = dispatch
+        self.execution = execution
         self._queue: queue.Queue[_Work] = queue.Queue(DEFAULT_RUNTIME_LIMITS.pending_requests)
         self._closing = threading.Event()
         self._draining = False
@@ -127,6 +131,12 @@ class RuntimeDispatcher:
             if closing
             else "request_timeout"
         )
+        if isinstance(call, ExecutionCall):
+            return ExecutionReply(
+                request_id=call.request_id,
+                identity=self.dispatch.identity.instance_id,
+                result=error,
+            )
         if isinstance(call, StreamQuery):
             return StreamReply(error=error)
         if isinstance(call, ProjectCall):
@@ -160,6 +170,12 @@ class RuntimeDispatcher:
                     or time.monotonic() >= work.deadline
                 ):
                     result = self._refused(work.call, closing=self._draining)
+                elif isinstance(work.call, ExecutionCall):
+                    result = (
+                        self.execution.execute(work.call, work.deadline)
+                        if self.execution is not None
+                        else self._refused(work.call)
+                    )
                 elif isinstance(work.call, StreamQuery):
                     result = self.dispatch.read_stream(work.call, work.deadline)
                 elif isinstance(work.call, ProjectCall):

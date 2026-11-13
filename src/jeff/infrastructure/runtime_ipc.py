@@ -28,6 +28,7 @@ from jeff.application.dispatch import (
     EvidenceQuery,
     EvidenceReply,
     EvidenceRequest,
+    ExecutionRequest,
     ProjectCall,
     ProjectRequest,
     ProjectStatusService,
@@ -41,6 +42,7 @@ from jeff.application.dispatch import (
     SubscriptionRequest,
     dispatch_failure,
 )
+from jeff.application.execution import ExecutionCall, ExecutionReply, execution_failure
 from jeff.application.history import StreamCursor
 from jeff.application.projects import Failure
 from jeff.application.runtime import (
@@ -56,6 +58,7 @@ from jeff.application.runtime import (
     ControlResponse,
     RuntimeIdentityData,
     RuntimeLayout,
+    control_failure,
 )
 from jeff.application.storage import StorageReadiness
 from jeff.domain.runtime import RuntimeState
@@ -71,6 +74,7 @@ class RpcRequest(
             | ProjectRequest
             | ReceiptRequest
             | EvidenceRequest
+            | ExecutionRequest
             | SubscriptionRequest,
             Field(discriminator="kind"),
         ]
@@ -537,6 +541,44 @@ class RuntimeProjectClient:
             connection.connection.close()
             raise
 
+    def review(self, call: ExecutionCall) -> ExecutionReply:
+        deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
+        try:
+            # Enforce complete-envelope size before location/credential discovery.
+            encode_message(
+                ExecutionRequest(call=call, expected_instance_id=UUID(int=0)).model_dump(
+                    mode="json"
+                ),
+                DEFAULT_RUNTIME_LIMITS.request_bytes,
+            )
+        except ControlFault:
+            return ExecutionReply(
+                request_id=call.request_id, result=execution_failure("execution_invalid")
+            )
+        try:
+            with self._connect(deadline) as connection:
+                try:
+                    request = ExecutionRequest(
+                        call=call,
+                        expected_instance_id=connection.identity.instance_id,
+                        remaining_ms=max(1, int(_remaining(deadline) * 1000)),
+                    )
+                    reply = self._exchange(connection, request, ExecutionReply)
+                    if (
+                        reply.request_id != call.request_id
+                        or reply.identity != connection.identity.instance_id
+                    ):
+                        raise ControlFault("runtime_ownership_unconfirmed")
+                    return reply
+                except (OSError, ControlFault):
+                    return ExecutionReply(
+                        request_id=call.request_id,
+                        identity=connection.identity.instance_id,
+                        result=dispatch_failure("request_outcome_unknown"),
+                    )
+        except ControlFault as error:
+            return ExecutionReply(request_id=call.request_id, result=control_failure(error.code))
+
     def execute(self, call: ProjectCall) -> DispatchReply:
         """Exchange once; loss after connection leaves outcome unknown, never retried."""
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
@@ -664,7 +706,7 @@ class ControlServer:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Verify the kernel peer before secrets, then decode one bounded request."""
         project_slot = False
-        response: ControlResponse | DispatchReply | ReceiptReply | EvidenceReply
+        response: ControlResponse | DispatchReply | ReceiptReply | EvidenceReply | ExecutionReply
         try:
             uid, _ = peer_identity(cast(socket.socket, writer.get_extra_info("socket")))
             if uid != self.owner.store.layout.uid:
@@ -746,7 +788,9 @@ class ControlServer:
                     + min(request.remaining_ms / 1000, DEFAULT_RUNTIME_LIMITS.request_seconds),
                 )
                 return
-            if isinstance(request, (ProjectRequest, ReceiptRequest, EvidenceRequest)):
+            if isinstance(
+                request, (ProjectRequest, ReceiptRequest, EvidenceRequest, ExecutionRequest)
+            ):
                 if self._project_connections >= DEFAULT_RUNTIME_LIMITS.connections - 1:
                     response = self._project_refusal(request, busy=True)
                 else:
@@ -782,7 +826,15 @@ class ControlServer:
                         and self.events.ready
                     ),
                     storage=storage,
-                    available_operations=(*PROJECT_OPERATIONS, "activity.subscribe")
+                    available_operations=(
+                        *PROJECT_OPERATIONS,
+                        "activity.subscribe",
+                        *(
+                            ("execution.review",)
+                            if self.dispatcher is not None and self.dispatcher.execution is not None
+                            else ()
+                        ),
+                    )
                     if not self.stopping
                     and storage.state == "ready"
                     and self.dispatcher is not None
@@ -812,14 +864,18 @@ class ControlServer:
 
     def _project_refusal(
         self,
-        request: ProjectRequest | ReceiptRequest | EvidenceRequest,
+        request: ProjectRequest | ReceiptRequest | EvidenceRequest | ExecutionRequest,
         *,
         busy: bool = False,
         unknown: bool = False,
-    ) -> DispatchReply | ReceiptReply | EvidenceReply:
+    ) -> DispatchReply | ReceiptReply | EvidenceReply | ExecutionReply:
         error = dispatch_failure(
             "request_outcome_unknown" if unknown else "runtime_busy" if busy else "runtime_stopping"
         )
+        if isinstance(request, ExecutionRequest):
+            return ExecutionReply(
+                request_id=request.call.request_id, identity=self.identity.instance_id, result=error
+            )
         if isinstance(request, ProjectRequest):
             return DispatchReply(
                 request_id=request.call.request_id,
@@ -837,14 +893,16 @@ class ControlServer:
         return ReceiptReply(request_id=request.query.query_id, identity=self.identity, error=error)
 
     async def _project(
-        self, request: ProjectRequest | ReceiptRequest | EvidenceRequest, began: float
-    ) -> DispatchReply | ReceiptReply | EvidenceReply:
+        self,
+        request: ProjectRequest | ReceiptRequest | EvidenceRequest | ExecutionRequest,
+        began: float,
+    ) -> DispatchReply | ReceiptReply | EvidenceReply | ExecutionReply:
         if request.expected_instance_id != self.identity.instance_id:
             error = self._project_refusal(request)
             failure = dispatch_failure("project_target_mismatch")
             return (
                 error.model_copy(update={"result": failure})
-                if isinstance(error, DispatchReply)
+                if isinstance(error, (DispatchReply, ExecutionReply))
                 else error.model_copy(update={"error": failure})
             )
         if self.stopping:
@@ -857,7 +915,11 @@ class ControlServer:
             return self._project_refusal(request, busy=True)
         deadline = began + min(request.remaining_ms / 1000, DEFAULT_RUNTIME_LIMITS.request_seconds)
         try:
-            work = request.call if isinstance(request, ProjectRequest) else request.query
+            work = (
+                request.call
+                if isinstance(request, (ProjectRequest, ExecutionRequest))
+                else request.query
+            )
             future = self.dispatcher.submit(work, deadline)
         except ControlFault:
             return self._project_refusal(request, busy=True)

@@ -1,6 +1,6 @@
 # Domain — tier 0
 
-**Status:** M01 project identity, repository metadata and disclosure policy implemented; M02 slice-1 runtime value invariants added. Jobs/approvals remain unimplemented; the M02 internal control lifecycle uses these values without putting OS behavior in domain.
+**Status:** M01 project identity, repository metadata and disclosure policy implemented; M02 slice-1 runtime value invariants added. M03 Phase2 adds review-only states, bounds and canonical manifest fingerprints in `execution.py`; an executor remains unimplemented. The M02 internal control lifecycle uses these values without putting OS behavior in domain.
 
 **Ownership:** `projects.py` defines immutable `Project(project_id: UUID, root: Path)` and `ProjectError(code, message)`. Identity requires an absolute root; filesystem canonicalization and configuration parsing belong to adapters. Errors contain fixed actionable messages, not raw file/provider output.
 
@@ -12,7 +12,7 @@
 
 **Example question flow:** a Git adapter produces domain metadata, the application rejects protected paths on either side of renames, and branch/file names are escaped before crossing the public interface. No file contents are represented.
 
-**Configuration/events:** no user-configurable grants or events yet. No credentials, arbitrary settings, emitted events, jobs, or approvals are represented by this slice.
+**Configuration/events:** no user-configurable grants or events yet. No credentials, arbitrary settings or emitted events are represented. `execution.py` defines `ReviewState`, public-text/canonical JSON validation and finite review/argv/manifest limits; application models bind those rules to durable review-only jobs/approvals. Fingerprints represent exact declared public data, not verified engine/image identity or launch authority.
 
 ## Runtime values — M02 slice 1
 

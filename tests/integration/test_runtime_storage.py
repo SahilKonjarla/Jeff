@@ -33,7 +33,7 @@ def test_real_registry_commit_reopen_and_readonly_lookup(tmp_path: Path) -> None
         try:
             ready = storage.wait_ready(5)
             assert ready.state == "ready", ready
-            assert ready.schema_version == 4 and ready.retention_days == 30
+            assert ready.schema_version == 5 and ready.retention_days == 30
             assert storage.lookup(project) is None
             assert storage.index(project) == (project, True)
             assert storage.index(project) == (project, False)

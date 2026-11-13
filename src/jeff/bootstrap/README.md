@@ -4,6 +4,8 @@
 
 **Ownership:** `main.py` passes lazy `create_project_client`, `create_runtime_controller` and `create_runtime_diagnostics` factories to CLI presentation. No location selection, project discovery, credential read or connection happens for help/syntax. There is no client-local question adapter or fallback path. Only the daemon composes `QuestionService` with `GitRepositoryRead(process_runner=git_runner)` after actual storage initialization. The same owned runner is injected into discovery/filter/status; there is no daemon fallback to direct Git.
 
+**M03 Phase2 (acceptance pending):** `main.py` also supplies lazy `create_execution_client`. The daemon composes `ExecutionService` with the existing project service/SQL owner, instance identity and private startup-loaded profiles; the same bounded workers route wire7 review requests. DB5/settings2 readiness does not imply execution availability. Default profiles are empty, declarations remain unverified, and permanently review-only decisions never become launch authority. There is no Docker/process executor or inherited credential resolution.
+
 **Dependencies:** composition may import all tiers; only entry points/bootstrap import bootstrap. No project/domain/storage policy is implemented here.
 
 ## Public entry points
@@ -12,7 +14,7 @@
 
 `runtime.create_project_client() -> ProjectClient` supplies the authenticated RPC adapter with lazy layout selection and `ProjectStatusService`: the latter first validates local Git/YAML, then selects the runtime controller for read-only status. The local project service is never an init/config/ask fallback. Status preserves identity fields plus explicit runtime observations; invalid/unregistered projects retain their local errors before runtime selection.
 
-`runtime.create_runtime_controller() -> RuntimeControl` selects only the documented JEFF_DATA_DIR/JEFF_RUNTIME_DIR overrides and needed trusted host metadata. Both overrides skip home/temp lookup. Darwin TMPDIR selection avoids tempfile write probes; actual creation/validation is explicit startup only. Public start waits for authenticated matching-instance full application readiness (all ten supported operations including subscriptions, live workers and schema/settings readiness), not the startup pipe or control hello alone.
+`runtime.create_runtime_controller() -> RuntimeControl` selects only the documented JEFF_DATA_DIR/JEFF_RUNTIME_DIR overrides and needed trusted host metadata. Both overrides skip home/temp lookup. Darwin TMPDIR selection avoids tempfile write probes; actual creation/validation is explicit startup only. Public start waits for authenticated matching-instance full application readiness (all supported operations including review/subscriptions, live workers and schema/settings readiness), not the startup pipe or control hello alone.
 
 `runtime.create_runtime_diagnostics() -> RuntimeDiagnostics` composes the installation doctor without selecting locations eagerly. Its adapter reuses deadline-aware authenticated cached control while live and read-only existing settings/schema helpers only under stopped ownership. It never calls controller.status's30s/O_RDWR path, starts providers/daemon, opens a live SQLite reader or repairs state. Tool probes use fixed system Git and a minimal environment.
 

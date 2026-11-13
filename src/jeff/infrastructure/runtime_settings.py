@@ -11,7 +11,7 @@ from jeff.application.runtime import ControlFault
 from jeff.application.storage import SETTINGS_LIMIT, RuntimeSettings, StorageFault
 from jeff.infrastructure.runtime_state import DiagnosticLease, Ownership
 
-_DEFAULT_BYTES = b"schema_version: 1\nhistory:\n  retention_days: 30\n"
+_DEFAULT_BYTES = b"schema_version: 2\nhistory:\n  retention_days: 30\nexecution:\n  profiles: []\n"
 _FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 

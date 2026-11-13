@@ -16,6 +16,7 @@ from pydantic import (
     model_validator,
 )
 
+from jeff.application.execution import ExecutionCall
 from jeff.application.history import (
     ActivityEvent,
     ActivityMeta,
@@ -185,6 +186,16 @@ class ProjectCall(ProjectScope):
         if (self.operation == "ask") != (self.question is not None):
             raise ValueError("Only ask carries a transient question.")
         return self
+
+
+class ExecutionRequest(_DispatchModel):
+    revision: StrictInt = Field(
+        default=PROTOCOL_REVISION, ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION
+    )
+    kind: Literal["execution"] = "execution"
+    expected_instance_id: UUID
+    remaining_ms: StrictInt = Field(default=30000, gt=0, le=30000)
+    call: ExecutionCall
 
 
 class ReceiptQuery(ProjectScope):

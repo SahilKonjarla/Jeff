@@ -14,6 +14,7 @@ from pydantic import (
     model_validator,
 )
 
+from jeff.application.execution import ExecutionSettings
 from jeff.application.history import (
     ActivityCode,
     ActivityEvent,
@@ -31,8 +32,8 @@ from jeff.application.history import (
 from jeff.application.projects import ErrorData, Failure, ProjectService
 from jeff.domain.projects import Project
 
-SETTINGS_SCHEMA = 1
-DATABASE_SCHEMA = 4
+SETTINGS_SCHEMA = 2
+DATABASE_SCHEMA = 5
 RETIREMENT_BATCH_LIMIT = 100
 RETIREMENT_INTERVAL_SECONDS = 60
 DATABASE_APPLICATION_ID = int.from_bytes(b"JEFF", "big")
@@ -106,11 +107,18 @@ class HistorySettings(_StorageModel):
 
 
 class RuntimeSettings(_StorageModel):
-    schema_version: StrictInt = Field(ge=SETTINGS_SCHEMA, le=SETTINGS_SCHEMA)
+    schema_version: StrictInt = Field(ge=1, le=SETTINGS_SCHEMA)
     history: HistorySettings
+    execution: ExecutionSettings = ExecutionSettings()
+
+    @model_validator(mode="after")
+    def versioned_execution(self) -> Self:
+        if self.schema_version == 1 and "execution" in self.model_fields_set:
+            raise ValueError("Execution profiles require settings schema2.")
+        return self
 
 
-DEFAULT_SETTINGS = RuntimeSettings(schema_version=1, history=HistorySettings(retention_days=30))
+DEFAULT_SETTINGS = RuntimeSettings(schema_version=2, history=HistorySettings(retention_days=30))
 
 
 class StorageReadiness(_StorageModel):

@@ -95,7 +95,7 @@ class _RecoveryBindings(_ProofModel):
 
 class _RecoveryPermit(_ProofModel):
     version: StrictInt = Field(ge=1, le=1)
-    schema_version: StrictInt = Field(ge=4, le=4)
+    schema_version: StrictInt = Field(ge=4, le=5)
     nonce: str = Field(pattern=r"^[0-9a-f]{32}$")
     page_size: StrictInt = Field(ge=512, le=65536)
     original_pages: StrictInt = Field(gt=0, le=(1 << 32) - 1)
@@ -543,10 +543,18 @@ class Ownership:
         return permit
 
     def arm_storage_recovery(
-        self, database_fd: int, journal_fd: int, *, page_size: int, original_pages: int
+        self,
+        database_fd: int,
+        journal_fd: int,
+        *,
+        page_size: int,
+        original_pages: int,
+        schema_version: int = 4,
     ) -> _RecoveryPermit:
         """Bind the actual SQLite-created journal before any business DML; never create it."""
         self.check()
+        if type(schema_version) is not int or schema_version not in (4, 5):
+            raise ControlFault("runtime_ownership_unconfirmed")
         token = self.store.read_credential()
         with self.store.directory(self.store.layout.data_dir, create=False) as root:
             if _recovery_entry(root, self.store.layout.uid) is not None:
@@ -561,7 +569,7 @@ class Ownership:
                 bindings = self._storage_bindings(root, database_fd, journal, fd)
                 permit = _RecoveryPermit(
                     version=1,
-                    schema_version=4,
+                    schema_version=schema_version,
                     nonce=secrets.token_hex(16),
                     page_size=page_size,
                     original_pages=original_pages,

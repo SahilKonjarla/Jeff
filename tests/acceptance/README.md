@@ -1,6 +1,30 @@
 # Acceptance tests
 
-**Current:** M02 was independently reviewed and accepted. The post-acceptance cleanup has692 source-collected/290 installed-selected cases and112 source +9 installed affected passes, not a fresh full matrix. See the [test map](../README.md) for execution authority and artifact distinctions.
+**M03 Phase2:** `test_execution_review_cli.py` uses a real authenticated daemon/CLI and synthetic project-bound private profile with a nonexistent engine endpoint. It proposes an executable that would write a marker, approves only into blocked review state, inspects the manifest/job, restarts and verifies invalidation; the marker must remain absent. No Docker query/pull/execution or default-user state is involved. The fresh noneditable wheel passed this scenario and public lifecycle. A lead-supplied trailing `.` also collected stopped-no-fallback and client lost-reply/duplicate-UUID cases; all four passed, but the extra fault execution was outside that finite scope and is recorded, not retroactively authorized. No additional runtime tests follow from closeout approval. Human Phase2 acceptance remains pending. [Current evidence and limits](../../docs/jeff-progress.md).
+
+**Final artifact refresh:** the doctor report model was subsequently aligned with settings1/2, DB5 and wire7's eleven capabilities, using one separately approved combined pure-model red→green test. The refreshed offline wheel matches all35 current production modules and passes dependency/console/module checks. The earlier four installed native cases were **not rerun** against this refreshed wheel; do not present them as a new exact-artifact native pass. The handoff below selects the refreshed environment.
+
+### Sahil handoff — one explicit installed review scenario
+
+Run this yourself when ready, from the updated testing checkout. It uses the retained fresh noneditable environment, not the checkout's possibly older venv. The test creates its project/state under a new private outside-Git arena and stops its owned daemon. It does not register the testing checkout, touch your usual Jeff state or access Docker. Preserve the arena if anything fails; do not retry or clean it automatically. The retained environment is temporary/local and is not a distributed installation.
+
+```bash
+cd /Users/sahilkonjarla/Code/test/Jeff
+V=/private/tmp/jp2-t6EakwSh/installed2/app/bin/python
+A="$(mktemp -d /private/tmp/jeff-p2-manual.XXXXXXXX)"
+mkdir -m 700 "$A/h" "$A/t" "$A/c" "$A/x" "$A/d"
+env -i HOME="$A/h" TMPDIR="$A/t" XDG_CONFIG_HOME="$A/x" \
+  XDG_CACHE_HOME="$A/c" XDG_DATA_HOME="$A/d" \
+  JEFF_DATA_DIR="$A/d/jeff" JEFF_RUNTIME_DIR="$A/r" \
+  PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 \
+  "$V" -I -B -m pytest \
+  tests/acceptance/test_execution_review_cli.py::test_real_cli_proposes_reviews_and_restarts_without_launching_user_work \
+  -vv --basetemp="$A/t/cases" -o cache_dir="$A/c/pytest"
+```
+
+Select only the named node: **no trailing `.` or directory argument**. Expected: **one passed**. The assertions check pending proposal → approved/blocked job with no launch authority → durable restart invalidation, with the marker absent throughout. Denial/expiry/scoping have separate source evidence; this single human-run scenario does not newly cover every refusal or physical recovery. Send the result/arena path and explicitly accept or reject Phase2; Phase3 stays unstarted until acceptance and separate approval. The agent did not execute this handoff during final closeout.
+
+**Historical baseline:** M02 was independently reviewed and accepted. The post-acceptance cleanup has692 source-collected/290 installed-selected cases and112 source +9 installed affected passes, not a fresh full matrix. See the [test map](../README.md) for execution authority and artifact distinctions.
 
 **Historical6C checkpoint (not current status):** Mac validation passed679 source IDs and325 fresh noneditable installed IDs (overlap),0 skips, including idle/hot-journal recovery, COMMIT/receipt/retirement truth and init publication windows.32 production modules match source/build/wheel/site; zero downloads.25/25 actual6C daemon crashes accounted, with earlier failures retained. An interrupted installed batch required authenticated cooperative fixture cleanup; it was excluded from passes and incomplete coverage resumed under new labels. This is not ordinary successful test teardown or an unexplained timeout being relabelled. M02 acceptance, independent review and active-client/native Git-child lifetime evidence were subsequently recorded. These6C receipts remain historical, not a fresh post-cleanup run. M01 acceptance and hosted success are not inferred.
 

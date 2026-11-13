@@ -117,9 +117,9 @@ def stopped_payload() -> dict[str, Any]:
     value = report().model_dump(mode="json")
     value.update(
         summary="stopped",
-        settings_schema_version=1,
+        settings_schema_version=2,
         configured_retention_days=17,
-        database_schema_version=4,
+        database_schema_version=5,
     )
     value["checks"] = [
         {"name": name, "status": "ok", "code": None, "required": True}
@@ -158,6 +158,29 @@ def test_valid_oversized_configuration_uses_finite_marker_not_active_retention()
     assert result.data.configured_retention_days == "above_report_limit"
 
 
+def test_phase2_doctor_accepts_current_and_legacy_settings_and_current_live_readiness() -> None:
+    stopped = DoctorReport.model_validate(stopped_payload())
+    assert doctor_result(stopped).ok
+    assert stopped.settings_schema_version == 2 and stopped.database_schema_version == 5
+    legacy = DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 1})
+    assert doctor_result(legacy).ok and legacy.settings_schema_version == 1
+    live = DoctorReport.model_validate(
+        {
+            **stopped_payload(),
+            "summary": "healthy",
+            "settings_schema_version": None,
+            "configured_retention_days": None,
+            "runtime": live_payload(),
+        }
+    )
+    assert doctor_result(live).ok and live.runtime is not None
+    assert "execution.review" in live.runtime.available_operations
+    with pytest.raises(ValidationError):
+        DoctorReport.model_validate({**stopped_payload(), "database_schema_version": 4})
+    with pytest.raises(ValidationError):
+        DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 3})
+
+
 def live_payload() -> dict[str, Any]:
     return {
         "state": "running",
@@ -175,6 +198,7 @@ def live_payload() -> dict[str, Any]:
             "debug.last",
             "history.list",
             "activity.subscribe",
+            "execution.review",
         ],
         "storage_state": "ready",
         "storage_error": None,
