@@ -1,5 +1,6 @@
-"""Declared review-only actions and narrow use-case ports; no executor or Docker I/O."""
+"""Legacy review-only actions and fresh internal authority ports; no executor or Docker I/O."""
 
+import re
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol, Self
@@ -8,8 +9,19 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 from jeff.application.projects import ErrorData, Failure, ProjectService
-from jeff.domain.execution import ARGV_BYTES, ARGV_COUNT, ReviewState, fingerprint, public_text
+from jeff.domain.execution import (
+    ARGV_BYTES,
+    ARGV_COUNT,
+    PREPARED_FILE_BYTES,
+    PREPARED_FILE_LIMIT,
+    PREPARED_TOTAL_BYTES,
+    AuthorityState,
+    ReviewState,
+    fingerprint,
+    public_text,
+)
 from jeff.domain.projects import Project
+from jeff.domain.repository import protected_path
 
 
 class _Model(BaseModel):
@@ -281,6 +293,7 @@ def execution_failure(code: str) -> Failure:
         "execution_expired": "The review expired or was invalidated; fresh review is required.",
         "execution_capacity": "The bounded review ledger is full; no additional review admitted.",
         "execution_clock": "Review clock is unconfirmed; no approval was granted.",
+        "execution_outcome_unknown": "A prior launch is unconfirmed; new claims are quarantined.",
         "storage_busy": "Storage admission is busy; no automatic retry was made.",
         "storage_closing": "Storage is closing; inspect existing facts after restart.",
         "storage_outcome_unconfirmed": "Storage outcome is unknown; inspect rather than retry.",
@@ -363,3 +376,474 @@ class ExecutionService:
         except ValueError:
             result = execution_failure("execution_invalid")
         return ExecutionReply(request_id=call.request_id, identity=self.instance_id, result=result)
+
+
+class PreparedFile(_Model):
+    path: str = Field(min_length=1, max_length=1023)
+    size: StrictInt = Field(ge=0, le=PREPARED_FILE_BYTES)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("path")
+    @classmethod
+    def safe_relative_file(cls, value: str) -> str:
+        path = PurePosixPath(public_text(value, 1023))
+        if (
+            path.is_absolute()
+            or ".." in path.parts
+            or str(path) != value
+            or value == "."
+            or "\\" in value
+            or protected_path(value)
+            or any(character in value for character in "*?[]")
+        ):
+            raise ValueError("Only literal unprotected relative files are supported.")
+        return value
+
+
+class PreparedInputs(_Model):
+    """Inventory assertions, not proof that bytes were safely copied or verified."""
+
+    snapshot_id: UUID = Field(default_factory=uuid4)
+    policy: Literal["literal_files_v1"] = "literal_files_v1"
+    files: tuple[PreparedFile, ...] = Field(default=(), max_length=PREPARED_FILE_LIMIT)
+
+    @model_validator(mode="after")
+    def bounded_inventory(self) -> Self:
+        names = [item.path for item in self.files]
+        if names != sorted(names) or len({n.casefold() for n in names}) != len(names):
+            raise ValueError("Inventory must be sorted and have no colliding paths.")
+        if self.total_bytes > PREPARED_TOTAL_BYTES:
+            raise ValueError("Prepared input byte budget exceeded.")
+        return self
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(item.size for item in self.files)
+
+    @property
+    def digest(self) -> str:
+        return fingerprint({"policy": self.policy, "files": [f.model_dump() for f in self.files]})
+
+
+class ExecutionManifest(_Model):
+    """Fresh action identity; the trusted verifier must still check target and inputs.
+
+    Not a subclass or reinterpretation of the permanently review-only ActionManifest.
+    No RPC/CLI route admits this type until real target/input verification exists.
+    """
+
+    authority_kind: Literal["execution_v1"] = "execution_v1"
+    verification: Literal["required_before_authority"] = "required_before_authority"
+    profile: ExecutionProfile
+    argv: tuple[str, ...] = Field(min_length=1, max_length=ARGV_COUNT)
+    inputs: PreparedInputs
+
+    @model_validator(mode="after")
+    def coherent_action(self) -> Self:
+        ActionManifest(profile=self.profile, argv=self.argv)
+        fingerprint(self.model_dump(mode="json"))
+        return self
+
+    @property
+    def fingerprint(self) -> str:
+        return fingerprint(self.model_dump(mode="json"))
+
+
+class AuthorityOperation(_Model):
+    """Trusted installation-internal port; current digest is a verifier obligation.
+
+    Digest equality alone does not establish actual engine or input verification.
+    The future verifier must check these before propose, approve and worker claim.
+    """
+
+    operation: Literal["propose", "approve", "deny", "show", "claim"]
+    request_id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    canonical_root: Path
+    owner_instance_id: UUID
+    approval_id: UUID | None = None
+    manifest: ExecutionManifest | None = None
+    current_manifest_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("canonical_root")
+    @classmethod
+    def root(cls, value: Path) -> Path:
+        return absolute_path(value)
+
+    @model_validator(mode="after")
+    def shape(self) -> Self:
+        if (self.operation == "propose") != (self.manifest is not None):
+            raise ValueError("Only a fresh proposal carries a manifest.")
+        if (self.operation != "propose") != (self.approval_id is not None):
+            raise ValueError("Only targeted operations carry approval identity.")
+        if (self.operation in {"propose", "approve", "claim"}) != (
+            self.current_manifest_digest is not None
+        ):
+            raise ValueError("Authority changes require a current verifier binding.")
+        return self
+
+
+class AuthorityRecord(_Model):
+    proposal_id: UUID
+    approval_id: UUID
+    job_id: UUID
+    project_id: UUID
+    canonical_root: Path
+    owner_instance_id: UUID
+    manifest: ExecutionManifest
+    manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    state: AuthorityState
+    created_at_ms: StrictInt = Field(ge=0)
+    expires_at_ms: StrictInt = Field(ge=0)
+    claim_id: UUID | None = None
+    claim_state: Literal["claimed", "unknown", "finished"] | None = None
+    claimed_at_ms: StrictInt | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        if (
+            self.manifest_digest != self.manifest.fingerprint
+            or self.project_id != self.manifest.profile.project_id
+            or self.canonical_root != self.manifest.profile.canonical_root
+            or self.expires_at_ms < self.created_at_ms
+        ):
+            raise ValueError("Authority identity or manifest facts disagree.")
+        consumed = self.state == AuthorityState.CONSUMED
+        if any(
+            (item is not None) != consumed
+            for item in (self.claim_id, self.claim_state, self.claimed_at_ms)
+        ):
+            raise ValueError("Only consumed authority carries a complete launch claim.")
+        if self.claimed_at_ms is not None and not (
+            self.created_at_ms <= self.claimed_at_ms < self.expires_at_ms
+        ):
+            raise ValueError("Claim time must be within the original approval lifetime.")
+        return self
+
+
+class AuthorityResult(_Model):
+    record: AuthorityRecord
+    # First confirmed claim response only. Never a replayable public bearer token.
+    launch_claim: UUID | None = None
+
+    @model_validator(mode="after")
+    def fresh_claim(self) -> Self:
+        if self.launch_claim is not None and (
+            self.launch_claim != self.record.claim_id or self.record.claim_state != "claimed"
+        ):
+            raise ValueError("Fresh claim does not match consumed authority.")
+        return self
+
+
+class AuthorityStore(Protocol):
+    def authority(self, operation: AuthorityOperation, *, deadline: float) -> AuthorityResult: ...
+
+
+class DockerTargetDeclaration(_Model):
+    """Explicit public image defaults, separate from all persisted manifest schemas.
+
+    These declarations are not automatic environment discovery or secret detection.
+    Future creation must override image argv/user/cwd and verify the effective config.
+    """
+
+    profile: ExecutionProfile
+    image_environment: tuple[tuple[str, str], ...] = Field(default=(), max_length=32)
+    image_user: str = Field(default="", max_length=128)
+    image_entrypoint: tuple[str, ...] = Field(default=(), max_length=ARGV_COUNT)
+    image_command: tuple[str, ...] = Field(default=(), max_length=ARGV_COUNT)
+    image_working_dir: str = Field(default="", max_length=1023)
+
+    @model_validator(mode="after")
+    def public_defaults(self) -> Self:
+        names = [name for name, _ in self.image_environment]
+        if names != sorted(names) or len(names) != len(set(names)):
+            raise ValueError("Image environment must be sorted and unique.")
+        for name, value in self.image_environment:
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", name) or re.search(
+                r"(?:PASSWORD|PASSWD|TOKEN|SECRET|CREDENTIAL|API_?KEY|ACCESS_KEY|AUTHORIZATION)",
+                name,
+            ):
+                raise ValueError("Sensitive environment channels are unsupported.")
+            public_text(value)
+        for value in (
+            self.image_user,
+            self.image_working_dir,
+            *self.image_entrypoint,
+            *self.image_command,
+        ):
+            public_text(value)
+        fingerprint(self.model_dump(mode="json"))
+        return self
+
+    @property
+    def fingerprint(self) -> str:
+        return fingerprint(self.model_dump(mode="json"))
+
+
+class DockerCLIIdentity(_Model):
+    path: Path
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size: StrictInt = Field(gt=0, le=268435456)
+
+    @field_validator("path")
+    @classmethod
+    def canonical_path(cls, value: Path) -> Path:
+        return absolute_path(value)
+
+
+class VerifiedDockerTarget(_Model):
+    """Observed metadata, not isolation proof, input verification or launch authority."""
+
+    declaration_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    profile_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    binary: DockerCLIIdentity
+    endpoint: str = Field(max_length=1023)
+    engine_id: str = Field(min_length=1, max_length=128)
+    image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    platform: Literal["linux/arm64", "linux/amd64"]
+    client_version: str = Field(max_length=64)
+    server_version: str = Field(max_length=64)
+    image_configuration_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    effective_environment: tuple[tuple[str, str], ...] = Field(max_length=35)
+    isolation_verified: Literal[False] = False
+    inputs_verified: Literal[False] = False
+    launch_authority_issued: Literal[False] = False
+
+    @property
+    def fingerprint(self) -> str:
+        return fingerprint(self.model_dump(mode="json"))
+
+
+class DockerFailureFacts(_Model):
+    """Bounded allowlisted failure metadata; never raw CLI text or arbitrary field names."""
+
+    returncode: StrictInt = Field(ge=-255, le=255)
+    stdout_bytes: StrictInt = Field(ge=0, le=65536)
+    stderr_bytes: StrictInt = Field(ge=0, le=65536)
+    category: Literal["template_field_unavailable", "stderr_on_success", "other_cli_failure"]
+    field_name: (
+        Literal[
+            "ID",
+            "Id",
+            "OS",
+            "Os",
+            "Architecture",
+            "Variant",
+            "Config",
+            "Env",
+            "User",
+            "Entrypoint",
+            "Cmd",
+            "WorkingDir",
+            "Volumes",
+            "Healthcheck",
+            "OnBuild",
+        ]
+        | None
+    ) = None
+
+    @model_validator(mode="after")
+    def bounded(self) -> Self:
+        if self.stdout_bytes + self.stderr_bytes > 65536 or (
+            (self.category == "template_field_unavailable") != (self.field_name is not None)
+        ):
+            raise ValueError("Inconsistent bounded Docker failure metadata.")
+        return self
+
+
+class DockerBackendFault(Exception):
+    """Fixed non-secret refusal; never attach raw CLI output or parser exceptions."""
+
+    def __init__(
+        self,
+        code: Literal[
+            "docker_unavailable",
+            "docker_unsafe_configuration",
+            "docker_target_mismatch",
+            "docker_unsupported",
+            "docker_protocol_error",
+            "docker_output_limit",
+            "docker_output_failed",
+            "docker_timeout",
+            "docker_command_failed",
+            "docker_cleanup_unconfirmed",
+            "docker_busy",
+            "docker_authority_required",
+            "docker_ownership_unconfirmed",
+            "docker_policy_mismatch",
+            "docker_mutation_unconfirmed",
+            "docker_journal_unconfirmed",
+        ],
+        *,
+        diagnostics: DockerFailureFacts | None = None,
+        observed_container_id: str | None = None,
+    ) -> None:
+        if (
+            observed_container_id is not None
+            and re.fullmatch(r"[0-9a-f]{64}", observed_container_id) is None
+        ):
+            raise ValueError("Unconfirmed container identity must be bounded.")
+        self.code = code
+        self.diagnostics = diagnostics
+        self.observed_container_id = observed_container_id
+        super().__init__(code)
+
+
+class DockerTargetVerifier(Protocol):
+    def verify_target(
+        self, declaration: DockerTargetDeclaration, *, deadline: float
+    ) -> VerifiedDockerTarget: ...
+
+
+class PreparedInputBinding(_Model):
+    """Trusted verifier's live binding, not permission to mount an arbitrary client path."""
+
+    snapshot_id: UUID
+    inventory_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    path: Path
+
+    @field_validator("path")
+    @classmethod
+    def mount_path(cls, value: Path) -> Path:
+        absolute_path(value)
+        if any(character in str(value) for character in ',"'):
+            raise ValueError("Ambiguous mount-path encoding is unsupported.")
+        return value
+
+
+class PreparedInputVerifier(Protocol):
+    def verify(self, manifest: ExecutionManifest, *, deadline: float) -> PreparedInputBinding: ...
+    def check(
+        self, binding: PreparedInputBinding, manifest: ExecutionManifest, *, deadline: float
+    ) -> None: ...
+
+
+class DockerLaunchIntent(_Model):
+    """Durable facts only: deliberately excludes transient AuthorityResult.launch_claim."""
+
+    attempt_id: UUID
+    record: AuthorityRecord
+    target: VerifiedDockerTarget
+    inputs: PreparedInputBinding
+    nonce: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+    @model_validator(mode="after")
+    def bound(self) -> Self:
+        profile = self.record.manifest.profile
+        if (
+            self.record.state != AuthorityState.CONSUMED
+            or self.record.claim_state != "claimed"
+            or self.target.profile_digest != profile.fingerprint
+            or self.target.engine_id != profile.engine_id
+            or self.target.endpoint != profile.endpoint
+            or self.target.image_id != profile.image_id
+            or self.target.platform != profile.platform
+            or self.inputs.snapshot_id != self.record.manifest.inputs.snapshot_id
+            or self.inputs.inventory_digest != self.record.manifest.inputs.digest
+        ):
+            raise ValueError("Launch intent is not bound to consumed fresh authority.")
+        return self
+
+    @property
+    def fingerprint(self) -> str:
+        return fingerprint(
+            {
+                "attempt": str(self.attempt_id),
+                "claim": str(self.record.claim_id),
+                "job": str(self.record.job_id),
+                "owner": str(self.record.owner_instance_id),
+                "manifest": self.record.manifest_digest,
+                "target": self.target.fingerprint,
+                "inputs": self.inputs.model_dump(mode="json"),
+                "nonce": self.nonce,
+            }
+        )
+
+
+class DockerOwnedContainer(_Model):
+    """Observation only. Controller-minted object identity is required for live control.
+
+    Deserializing this model never adopts a container or reconstructs launch authority.
+    """
+
+    intent: DockerLaunchIntent
+    container_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    created_at: str = Field(min_length=20, max_length=64, pattern=r"^[0-9TZ:.+\-]+$")
+
+
+class DockerLaunchEvent(_Model):
+    intent: DockerLaunchIntent
+    phase: Literal["create_intent", "created", "start_intent", "exited", "cleaned", "unknown"]
+    container_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    created_at: str | None = Field(
+        default=None, min_length=20, max_length=64, pattern=r"^[0-9TZ:.+\-]+$"
+    )
+    # A captured create reply without verified birth/ownership is evidence only.
+    observed_container_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    exit_code: StrictInt | None = Field(default=None, ge=0, le=255)
+
+    @model_validator(mode="after")
+    def shape(self) -> Self:
+        if (self.container_id is None) != (self.created_at is None):
+            raise ValueError("Owned identity and birth must be paired.")
+        if self.phase == "create_intent" and (
+            self.container_id is not None or self.observed_container_id is not None
+        ):
+            raise ValueError("Create intent cannot assert a container already exists.")
+        if self.observed_container_id is not None and (
+            self.phase != "unknown" or self.container_id is not None
+        ):
+            raise ValueError("Partial create replies are uncertainty observations only.")
+        if self.phase not in {"create_intent", "unknown"} and self.container_id is None:
+            raise ValueError("Observed lifecycle facts require exact container identity.")
+        if self.phase not in {"create_intent", "unknown"} and self.created_at is None:
+            raise ValueError("Observed lifecycle facts require creation identity.")
+        if (self.phase == "exited") != (self.exit_code is not None):
+            raise ValueError("Only observed exit carries an exit code.")
+        return self
+
+
+class DockerLaunchJournal(Protocol):
+    """Must durably validate transition/claim uniqueness before returning; ACK loss raises.
+
+    Enforce current owner/scope/manifest binding, original expiry at create/start,
+    and permanent one-attempt exclusion. No default implementation: lifecycle must
+    stay unwired until the SQL owner implements these obligations.
+    """
+
+    def record(self, event: DockerLaunchEvent, *, deadline: float) -> None: ...
+
+
+class DockerOutputSink(Protocol):
+    """Trusted bounded, nonblocking memory-only filter. Never persist raw input chunks."""
+
+    retention_limit: int
+
+    def accept(self, stream: Literal["stdout", "stderr"], data: bytes) -> None: ...
+    def finish(self, stream: Literal["stdout", "stderr"]) -> None: ...
+
+
+class DockerJobOutcome(_Model):
+    exit_code: StrictInt | None = Field(default=None, ge=0, le=255)
+    timed_out: bool = False
+    outcome_unknown: bool = False
+    cleanup_verified: bool = False
+
+
+class DockerLifecycleBackend(Protocol):
+    """Installation-internal Docker I/O seam; never caller-supplied CLI arguments."""
+
+    identity: DockerCLIIdentity
+
+    def engine_id(self, endpoint: str, *, deadline: float) -> str: ...
+    def create(self, intent: DockerLaunchIntent, *, deadline: float) -> str: ...
+    def inspect(
+        self, endpoint: str, container_id: str, *, deadline: float
+    ) -> dict[str, object]: ...
+    def attach(
+        self, endpoint: str, container_id: str, sink: DockerOutputSink, *, deadline: float
+    ) -> int: ...
+    def stop(self, endpoint: str, container_id: str, *, deadline: float) -> None: ...
+    def kill(self, endpoint: str, container_id: str, *, deadline: float) -> None: ...
+    def remove(self, endpoint: str, container_id: str, *, deadline: float) -> None: ...
+    def absent(self, endpoint: str, container_id: str, *, deadline: float) -> bool: ...

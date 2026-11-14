@@ -29,4 +29,7 @@ From the repository root after [installation](../../README.md):
 .venv/bin/python -m pytest tests/unit -q
 ```
 
-**Owning milestones:** M01 (formal acceptance separate) and M02 foundation only. Real control lifecycle is tested separately under integration/acceptance. Unit contracts/codec alone prove no runtime ownership/readiness. Approvals/jobs/providers remain unimplemented. Read-only Git-question rules remain covered. Fixtures contain only synthetic data, no credentials or environment files. Extend through real public contracts rather than test-only execution paths. See [test map](../README.md).
+- [test_docker_owned_lifecycle.py](test_docker_owned_lifecycle.py): grouped internal-controller cases for fresh one-attempt admission, copied-handle refusal, drift, ambiguity, timeout and exact owned cleanup; fake backend/journal/input/output ports only.
+- [test_docker_lifecycle_transport.py](test_docker_lifecycle_transport.py): fixed CLI argv/environment, bounded chunks, captured-CLI failure cleanup and post-control guard uncertainty; real pipes/local UDS with fake Popen, no Docker/native child.
+
+**Owning milestones:** M01 (formal acceptance separate), M02 foundation and M03 source slices. Real control lifecycle is tested separately under integration/acceptance. Unit contracts/codec alone prove no runtime ownership/readiness. Review-only approvals/jobs are delivered; executable Phase3 composition and providers remain unimplemented. Read-only Git-question rules remain covered. Fixtures contain only synthetic data, no credentials or environment files. Extend through real public contracts rather than test-only execution paths. See [test map](../README.md).

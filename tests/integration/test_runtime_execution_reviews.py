@@ -330,11 +330,14 @@ def schema4_registry(root: Path) -> Iterator[tuple[Ownership, Project]]:
         initial = SQLiteStorage(owner)
         initial.start()
         try:
-            assert initial.wait_ready(5).schema_version == 5
+            assert initial.wait_ready(5).schema_version == 6
             initial.index(project)
         finally:
             initial.close(timeout=5)
         with closing(sqlite3.connect(layout.database)) as fixture, fixture:
+            fixture.execute("DROP TABLE execution_authority_operations")
+            fixture.execute("DROP TABLE execution_authorities")
+            fixture.execute("DELETE FROM schema_migrations WHERE version=6")
             fixture.execute("DROP TABLE execution_reviews")
             fixture.execute("DROP TABLE execution_operations")
             fixture.execute("DELETE FROM schema_migrations WHERE version=5")
@@ -394,7 +397,12 @@ def test_schema4_signed_format_and_migration_commit_retirement_order(
                     events.append("legacy-permit-before-ddl")
                     migrating.append(self)
                 result = super().execute(sql, parameters)
-                if sql == "COMMIT" and migrating and self is migrating[0]:
+                if (
+                    sql == "COMMIT"
+                    and migrating
+                    and self is migrating[0]
+                    and events == ["legacy-permit-before-ddl"]
+                ):
                     assert not self.in_transaction
                     events.append("commit")
                 return result
@@ -403,7 +411,11 @@ def test_schema4_signed_format_and_migration_commit_retirement_order(
             return original_connect(*args, **kwargs, factory=ObservedMigration)
 
         def unlink(path: Any, *args: Any, **kwargs: Any) -> None:
-            if path == "recovery.json" and migrating:
+            if (
+                path == "recovery.json"
+                and migrating
+                and events == ["legacy-permit-before-ddl", "commit"]
+            ):
                 assert events == ["legacy-permit-before-ddl", "commit"]
                 assert not migrating[0].in_transaction
                 events.append("retire")
@@ -415,7 +427,7 @@ def test_schema4_signed_format_and_migration_commit_retirement_order(
             storage = SQLiteStorage(owner)
             storage.start()
             try:
-                assert storage.wait_ready(5).schema_version == 5
+                assert storage.wait_ready(5).schema_version == 6
                 assert storage.lookup(project) == project
                 assert events == ["legacy-permit-before-ddl", "commit", "retire"]
                 assert not (layout.data_dir / "recovery.json").exists()
@@ -568,12 +580,15 @@ def test_clean_schema4_migrates_without_losing_project_or_rewriting_v1_settings(
         initial = SQLiteStorage(owner)
         initial.start()
         try:
-            assert initial.wait_ready(5).schema_version == 5
+            assert initial.wait_ready(5).schema_version == 6
             initial.index(project)
         finally:
             initial.close()
         # Construct only this disposable legacy fixture, not a real installation.
-        with sqlite3.connect(layout.database) as fixture:
+        with closing(sqlite3.connect(layout.database)) as fixture, fixture:
+            fixture.execute("DROP TABLE execution_authority_operations")
+            fixture.execute("DROP TABLE execution_authorities")
+            fixture.execute("DELETE FROM schema_migrations WHERE version=6")
             fixture.execute("DROP TABLE execution_reviews")
             fixture.execute("DROP TABLE execution_operations")
             fixture.execute("DELETE FROM schema_migrations WHERE version=5")
@@ -583,7 +598,7 @@ def test_clean_schema4_migrates_without_losing_project_or_rewriting_v1_settings(
         migrated = SQLiteStorage(owner)
         migrated.start()
         try:
-            assert migrated.wait_ready(5).schema_version == 5
+            assert migrated.wait_ready(5).schema_version == 6
             assert migrated.lookup(project) == project
             assert layout.settings.read_bytes() == old_settings
         finally:

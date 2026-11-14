@@ -55,7 +55,7 @@ def test_review_request_is_an_explicit_bounded_wire_kind() -> None:
         expected_instance_id=UUID("00000000-0000-4000-8000-000000000002"), call=call
     )
     assert request.kind == "execution"
-    assert request.revision == PROTOCOL_REVISION == 7
+    assert request.revision == PROTOCOL_REVISION == 8
     assert request.call == call
 
 

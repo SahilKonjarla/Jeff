@@ -13,6 +13,9 @@ REVIEW_TTL_SECONDS = 600
 LIVE_REVIEW_LIMIT = 16
 REVIEW_RECORD_LIMIT = 5000
 REVIEW_PAGE_LIMIT = 32
+PREPARED_FILE_LIMIT = 64
+PREPARED_FILE_BYTES = 1048576
+PREPARED_TOTAL_BYTES = 8388608
 
 
 class ReviewState(StrEnum):
@@ -21,6 +24,15 @@ class ReviewState(StrEnum):
     DENIED = "denied"
     EXPIRED = "expired"
     INVALIDATED = "invalidated"
+
+
+class AuthorityState(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXPIRED = "expired"
+    INVALIDATED = "invalidated"
+    CONSUMED = "consumed"
 
 
 def public_text(value: str, maximum: int = 4096) -> str:
