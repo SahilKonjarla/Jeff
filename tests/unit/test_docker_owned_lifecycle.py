@@ -3,6 +3,7 @@
 import copy
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
@@ -15,9 +16,12 @@ from jeff.application.execution import (
     AuthorityResult,
     DockerBackendFault,
     DockerCLIIdentity,
+    DockerCompletion,
+    DockerExecutionResult,
     DockerLaunchEvent,
     DockerLaunchIntent,
     DockerOutputSink,
+    DockerPolicyFacts,
     DockerTargetDeclaration,
     ExecutionManifest,
     ExecutionProfile,
@@ -27,6 +31,7 @@ from jeff.application.execution import (
 )
 from jeff.domain.execution import AuthorityState
 from jeff.infrastructure.runtime_execution import DockerJobController, create_arguments
+from jeff.infrastructure.runtime_output import GuardedOutputCollector
 
 
 def labels(intent: DockerLaunchIntent) -> dict[str, str]:
@@ -100,6 +105,7 @@ class Backend:
         self.stop_leaves_running = False
         self.remove_reply_lost = False
         self.attach_status: int | None = None
+        self.fail_after_eof = False
         self.state_override: dict[str, object] | None = None
         self.inspect_unavailable = False
         self.entered: threading.Event | None = None
@@ -210,6 +216,8 @@ class Backend:
         sink.accept("stdout", b"synthetic-output")
         sink.finish("stdout")
         sink.finish("stderr")
+        if self.fail_after_eof:
+            raise DockerBackendFault("docker_target_mismatch")
         return self.exit_code if self.attach_status is None else self.attach_status
 
     def stop(self, endpoint: str, container_id: str, *, deadline: float) -> None:
@@ -306,6 +314,366 @@ def setup_controller() -> tuple[
     return controller, backend, journal, claim, declaration
 
 
+def test_controller_completion_is_live_bound_and_one_shot_even_when_ack_is_lost() -> None:
+    class Results:
+        def __init__(self, lose: bool) -> None:
+            self.calls: list[DockerCompletion] = []
+            self.lose = lose
+
+        def complete_execution(
+            self, completion: DockerCompletion, *, deadline: float
+        ) -> DockerExecutionResult:
+            self.calls.append(completion)
+            if self.lose:
+                raise DockerBackendFault("docker_journal_unconfirmed")
+            return DockerExecutionResult(
+                owned=completion.owned,
+                outcome=completion.outcome,
+                output_facts=completion.output_facts,
+                output_digest=completion.output_digest,
+                completion_digest=completion.fingerprint,
+                disposition="completed" if completion.confirmed else "quarantined",
+                sequence=1,
+                recorded_at_ms=1,
+                payload_state="retained",
+                output=completion.output,
+            )
+
+    for lose, post_eof_failure, timeout in (
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+    ):
+        controller, backend, journal, claim, declaration = setup_controller()
+        handle = controller.create(
+            claim,
+            declaration,
+            deadline=time.monotonic() + 5,
+            cleanup_deadline=time.monotonic() + 10,
+        )
+        sink = GuardedOutputCollector(claim.record.manifest.profile.output_bytes)
+        backend.fail_after_eof = post_eof_failure
+        backend.timeout_attach = timeout
+        if not (lose or post_eof_failure or timeout):
+            backend.exit_code = 0
+        controller.run(
+            handle, sink, deadline=time.monotonic() + 5, cleanup_deadline=time.monotonic() + 10
+        )
+        results = Results(lose)
+        with pytest.raises(DockerBackendFault):
+            controller.complete(handle.model_copy(), sink, results, deadline=time.monotonic() + 5)
+        with pytest.raises(DockerBackendFault):
+            controller.complete(
+                handle,
+                GuardedOutputCollector(sink.retention_limit),
+                results,
+                deadline=time.monotonic() + 5,
+            )
+        if lose:
+            with pytest.raises(DockerBackendFault):
+                controller.complete(handle, sink, results, deadline=time.monotonic() + 5)
+        else:
+            result = controller.complete(handle, sink, results, deadline=time.monotonic() + 5)
+            assert result.disposition == (
+                "quarantined" if post_eof_failure or timeout else "completed"
+            )
+        with pytest.raises(DockerBackendFault):
+            controller.complete(handle, sink, results, deadline=time.monotonic() + 5)
+        assert len(results.calls) == 1 and results.calls[0].output.complete == (not timeout)
+        if timeout:
+            assert results.calls[0].output.aborted
+        assert backend.calls == (
+            ["create", "attach", "stop", "remove"] if timeout else ["create", "attach", "remove"]
+        )
+        if lose:
+            assert (
+                journal.events[-1].phase == "cleaned"
+            )  # Never overwrite a possibly committed finish.
+
+
+def test_mount_listing_and_exact_tmpfs_declaration_agree_without_broadening_mounts() -> None:
+    # Characterize the captured boolean shape, not a retained raw inspect:
+    # project bind listed; scratch declared in exact HostConfig.Tmpfs.
+    # Also retain the originally supported explicit scratch representation.
+    for listed in (False, True):
+        controller, backend, journal, claim, declaration = setup_controller()
+        original = backend.inspect
+
+        def inspect(
+            endpoint: str,
+            container_id: str,
+            *,
+            deadline: float,
+            read: Callable[..., dict[str, object]] = original,
+            scratch_listed: bool = listed,
+        ) -> dict[str, object]:
+            raw = read(endpoint, container_id, deadline=deadline)
+            if not scratch_listed:
+                entries = raw["Mounts"]
+                assert isinstance(entries, list)
+                raw["Mounts"] = [entry for entry in entries if entry["Destination"] == "/project"]
+            return raw
+
+        backend.inspect = inspect  # type: ignore[method-assign]
+        handle = controller.create(
+            claim, declaration, deadline=time.monotonic() + 2, cleanup_deadline=time.monotonic() + 4
+        )
+        outcome = controller.run(
+            handle, Sink(), deadline=time.monotonic() + 2, cleanup_deadline=time.monotonic() + 4
+        )
+        assert outcome.exit_code == 7 and outcome.cleanup_verified and not outcome.outcome_unknown
+        assert backend.calls == ["create", "attach", "remove"]
+        assert [event.phase for event in journal.events] == [
+            "create_intent",
+            "created",
+            "start_intent",
+            "exited",
+            "cleaned",
+        ]
+
+    def changed(
+        case: str,
+    ) -> tuple[
+        DockerJobController, Backend, Journal, AuthorityResult, DockerTargetDeclaration, list[bool]
+    ]:
+        controller, backend, journal, claim, declaration = setup_controller()
+        original = backend.inspect
+        active = [False]
+
+        def inspect(endpoint: str, container_id: str, *, deadline: float) -> dict[str, object]:
+            raw = original(endpoint, container_id, deadline=deadline)
+            entries = raw["Mounts"]
+            host = raw["HostConfig"]
+            assert isinstance(entries, list) and isinstance(host, dict)
+            if not case.startswith("explicit_"):
+                entries = entries[:1]
+                raw["Mounts"] = entries
+            if not active[0]:
+                return raw
+            project = entries[0]
+            tmpfs = host["Tmpfs"]
+            assert isinstance(project, dict) and isinstance(tmpfs, dict)
+            if case in ("missing_tmpfs", "explicit_missing_tmpfs"):
+                host.pop("Tmpfs")
+            elif case in ("changed_tmpfs", "explicit_changed_tmpfs"):
+                tmpfs["/scratch"] = "rw,exec,mode=0777"
+            elif case == "extra_tmpfs":
+                tmpfs["/other"] = "rw"
+            elif case == "foreign_source":
+                project["Source"] = "/synthetic/unreviewed"
+            elif case == "writable_project":
+                project["RW"] = True
+            elif case == "integer_project_rw":
+                project["RW"] = 0
+            elif case == "propagation":
+                project["Propagation"] = "rshared"
+            elif case == "project_type":
+                project["Type"] = "volume"
+            elif case == "duplicate_project":
+                entries.append(copy.deepcopy(project))
+            elif case == "foreign_destination":
+                entries.append({"Destination": "/other", "Type": "tmpfs", "RW": True})
+            elif case == "malformed_destination":
+                project["Destination"] = []
+            elif case == "empty_mounts":
+                raw["Mounts"] = []
+            elif case == "extra_mounts":
+                entries.extend([copy.deepcopy(project), copy.deepcopy(project)])
+            elif case == "explicit_type":
+                entries[1]["Type"] = "bind"
+            elif case == "explicit_rw":
+                entries[1]["RW"] = False
+            elif case == "explicit_integer_rw":
+                entries[1]["RW"] = 1
+            elif case == "explicit_missing_scratch":
+                entries[1]["Destination"] = "/other"
+            elif case == "explicit_empty":
+                entries[1] = {}
+            else:
+                raise AssertionError("unknown synthetic case")
+            return raw
+
+        backend.inspect = inspect  # type: ignore[method-assign]
+        return controller, backend, journal, claim, declaration, active
+
+    # Selected adversarial groups, not a cross-product matrix. Scratch declaration
+    # remains compulsory even when its Mounts entry is absent or present.
+    for case in (
+        "missing_tmpfs",
+        "changed_tmpfs",
+        "extra_tmpfs",
+        "foreign_source",
+        "writable_project",
+        "integer_project_rw",
+        "propagation",
+        "project_type",
+        "duplicate_project",
+        "foreign_destination",
+        "malformed_destination",
+        "empty_mounts",
+        "extra_mounts",
+        "explicit_type",
+        "explicit_rw",
+        "explicit_integer_rw",
+        "explicit_missing_scratch",
+        "explicit_missing_tmpfs",
+        "explicit_changed_tmpfs",
+        "explicit_empty",
+    ):
+        controller, backend, journal, claim, declaration, active = changed(case)
+        active[0] = True
+        with pytest.raises(DockerBackendFault) as caught:
+            controller.create(
+                claim,
+                declaration,
+                deadline=time.monotonic() + 2,
+                cleanup_deadline=time.monotonic() + 4,
+            )
+        assert caught.value.code == "docker_policy_mismatch"
+        assert backend.calls == ["create", "remove"] and journal.events[-1].phase == "cleaned"
+
+    for case in ("changed_tmpfs", "foreign_source", "explicit_rw"):
+        controller, backend, journal, claim, declaration, active = changed(case)
+        handle = controller.create(
+            claim, declaration, deadline=time.monotonic() + 2, cleanup_deadline=time.monotonic() + 4
+        )
+        active[0] = True
+        outcome = controller.run(
+            handle, Sink(), deadline=time.monotonic() + 2, cleanup_deadline=time.monotonic() + 4
+        )
+        assert outcome.outcome_unknown and outcome.cleanup_verified and outcome.exit_code is None
+        assert backend.calls == ["create", "remove"]
+        assert "start_intent" not in [event.phase for event in journal.events]
+
+
+def test_policy_diagnostics_identify_configuration_checks_without_raw_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for kind, expected in (
+        ("user", "Config.User"),
+        ("environment", "Config.Env.values"),
+        ("tmpfs", "HostConfig.Tmpfs"),
+        ("missing_tmpfs", "HostConfig.Tmpfs"),
+        ("mount_count", "Mounts.count"),
+        ("host_shape", "HostConfig"),
+        ("mount_shape", "Mounts.entry"),
+    ):
+        controller, backend, journal, claim, declaration = setup_controller()
+        original = backend.inspect
+        changed = [False]
+
+        def inspect(
+            endpoint: str,
+            container_id: str,
+            *,
+            deadline: float,
+            mode: str = kind,
+            read: Callable[..., dict[str, object]] = original,
+            once: list[bool] = changed,
+        ) -> dict[str, object]:
+            raw = read(endpoint, container_id, deadline=deadline)
+            if not once[0]:
+                once[0] = True
+                config = raw["Config"]
+                host = raw["HostConfig"]
+                assert isinstance(config, dict) and isinstance(host, dict)
+                if mode == "user":
+                    config["User"] = "SYNTHETIC_PRIVATE_VALUE"
+                if mode == "environment":
+                    config["Env"] = ["SYNTHETIC_PRIVATE_KEY=SYNTHETIC_PRIVATE_VALUE"]
+                if mode == "tmpfs":
+                    host["Tmpfs"] = {"SYNTHETIC_PRIVATE_KEY": "SYNTHETIC_PRIVATE_VALUE"}
+                if mode == "missing_tmpfs":
+                    host.pop("Tmpfs")
+                if mode == "mount_count":
+                    raw["Mounts"] = []
+                if mode == "host_shape":
+                    raw["HostConfig"] = None
+                if mode == "mount_shape":
+                    raw["Mounts"] = ["SYNTHETIC_PRIVATE_VALUE", {}]
+            return raw
+
+        with monkeypatch.context() as patch:
+            patch.setattr(backend, "inspect", inspect)
+            with pytest.raises(DockerBackendFault) as caught:
+                controller.create(
+                    claim,
+                    declaration,
+                    deadline=time.monotonic() + 5,
+                    cleanup_deadline=time.monotonic() + 10,
+                )
+        assert caught.value.code == "docker_policy_mismatch" and caught.value.policy is not None
+        facts = caught.value.policy
+        assert facts.check_id == expected and facts.matches is False
+        assert facts.present == (kind != "missing_tmpfs")
+        assert facts.type_ok == (kind not in {"host_shape", "mount_shape", "missing_tmpfs"})
+        assert "SYNTHETIC_PRIVATE" not in facts.model_dump_json() + str(caught.value)
+        assert len(facts.model_dump_json().encode()) < 256
+        assert backend.calls == ["create", "remove"] and journal.events[-1].phase == "cleaned"
+
+
+def test_policy_diagnostics_cover_initial_state_and_reject_untrusted_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for kind, expected in (
+        ("status", "State.Status"),
+        ("running", "State.Running"),
+        ("mapping", "State"),
+    ):
+        controller, backend, journal, claim, declaration = setup_controller()
+        original = backend.inspect
+        changed = [False]
+
+        def inspect(
+            endpoint: str,
+            container_id: str,
+            *,
+            deadline: float,
+            mode: str = kind,
+            read: Callable[..., dict[str, object]] = original,
+            once: list[bool] = changed,
+        ) -> dict[str, object]:
+            raw = read(endpoint, container_id, deadline=deadline)
+            if not once[0]:
+                once[0] = True
+                if mode == "mapping":
+                    raw["State"] = None
+                else:
+                    state = raw["State"]
+                    assert isinstance(state, dict)
+                    state["Status" if mode == "status" else "Running"] = (
+                        "SYNTHETIC_PRIVATE_VALUE" if mode == "status" else 0
+                    )
+            return raw
+
+        with monkeypatch.context() as patch:
+            patch.setattr(backend, "inspect", inspect)
+            with pytest.raises(DockerBackendFault) as caught:
+                controller.create(
+                    claim,
+                    declaration,
+                    deadline=time.monotonic() + 5,
+                    cleanup_deadline=time.monotonic() + 10,
+                )
+        assert caught.value.policy is not None and caught.value.policy.check_id == expected
+        assert caught.value.policy.type_ok == (kind == "status")
+        assert backend.calls == ["create", "remove"] and journal.events[-1].phase == "cleaned"
+    facts = DockerPolicyFacts(check_id="State.Status", present=True, type_ok=True, matches=False)
+    for bad in (
+        {"check_id": "SYNTHETIC_PRIVATE_VALUE"},
+        {"actual_value": "SYNTHETIC_PRIVATE_VALUE"},
+        {"present": 1},
+        {"type_ok": "false"},
+        {"matches": True},
+    ):
+        with pytest.raises(ValidationError) as caught_model:
+            DockerPolicyFacts.model_validate({**facts.model_dump(), **bad})
+        assert "SYNTHETIC_PRIVATE_VALUE" not in str(caught_model.value)
+    with pytest.raises(ValueError):
+        DockerBackendFault("docker_unavailable", policy=facts)
+
+
 def test_owned_nonzero_run_records_intents_and_removal_is_verified() -> None:
     controller, backend, journal, claim, declaration = setup_controller()
     handle = controller.create(
@@ -315,12 +683,14 @@ def test_owned_nonzero_run_records_intents_and_removal_is_verified() -> None:
     assert args[0] == "create" and "--pull=never" in args
     assert "--read-only" in args and "--cap-drop=ALL" in args and "--no-healthcheck" in args
     assert "none" in args and "65532:65532" in args
-    sink = Sink()
+    sink = GuardedOutputCollector(claim.record.manifest.profile.output_bytes)
     result = controller.run(
         handle, sink, deadline=time.monotonic() + 5, cleanup_deadline=time.monotonic() + 10
     )
     assert result.exit_code == 7 and result.cleanup_verified and not result.outcome_unknown
-    assert sink.count == len(b"synthetic-output")
+    output = sink.seal()
+    assert output.stdout == "synthetic-output" and output.complete
+    assert output.stdout_source_bytes == len(b"synthetic-output")
     assert backend.calls == ["create", "attach", "remove"]
     assert [event.phase for event in journal.events] == [
         "create_intent",
@@ -446,10 +816,23 @@ def test_ambiguous_create_and_copied_handles_never_adopt_or_restart() -> None:
         claim, declaration, deadline=time.monotonic() + 5, cleanup_deadline=time.monotonic() + 10
     )
     backend.attach_status = 125
+    sink = GuardedOutputCollector(claim.record.manifest.profile.output_bytes)
     outcome = controller.run(
-        handle, Sink(), deadline=time.monotonic() + 5, cleanup_deadline=time.monotonic() + 10
+        handle, sink, deadline=time.monotonic() + 5, cleanup_deadline=time.monotonic() + 10
     )
     assert outcome.exit_code == 7 and outcome.outcome_unknown and outcome.cleanup_verified
+    assert sink.seal().complete  # Both EOFs are not controller/transport confirmation.
+    controller, backend, journal, claim, declaration = setup_controller()
+    handle = controller.create(
+        claim, declaration, deadline=time.monotonic() + 5, cleanup_deadline=time.monotonic() + 10
+    )
+    backend.fail_after_eof = True
+    sink = GuardedOutputCollector(claim.record.manifest.profile.output_bytes)
+    uncertain = controller.run(
+        handle, sink, deadline=time.monotonic() + 5, cleanup_deadline=time.monotonic() + 10
+    )
+    assert sink.seal().complete and uncertain.outcome_unknown and uncertain.cleanup_verified
+    assert uncertain.exit_code is None
 
 
 def test_configuration_input_and_ownership_drift_fail_closed() -> None:

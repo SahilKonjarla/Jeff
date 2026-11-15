@@ -2,11 +2,20 @@
 
 import re
 from collections.abc import Callable
+from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol, Self
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from jeff.application.projects import ErrorData, Failure, ProjectService
 from jeff.domain.execution import (
@@ -651,6 +660,89 @@ class DockerFailureFacts(_Model):
         return self
 
 
+DockerPolicyCheckId = Literal[
+    "Config",
+    "HostConfig",
+    "Config.User",
+    "Config.WorkingDir",
+    "Config.Entrypoint",
+    "Config.Cmd",
+    "Config.Labels",
+    "Config.StopSignal",
+    "Config.OpenStdin",
+    "Config.AttachStdin",
+    "Config.Tty",
+    "Config.Healthcheck",
+    "Config.Env.type",
+    "Config.Env.values",
+    "Image",
+    "Path",
+    "Args",
+    "HostConfig.NetworkMode",
+    "HostConfig.IpcMode",
+    "HostConfig.CgroupnsMode",
+    "HostConfig.Memory",
+    "HostConfig.MemorySwap",
+    "HostConfig.NanoCpus",
+    "HostConfig.PidsLimit",
+    "HostConfig.ShmSize",
+    "HostConfig.CapDrop",
+    "HostConfig.Tmpfs",
+    "HostConfig.ReadonlyRootfs",
+    "HostConfig.Privileged",
+    "HostConfig.AutoRemove",
+    "HostConfig.PublishAllPorts",
+    "HostConfig.CapAdd",
+    "HostConfig.Devices",
+    "HostConfig.DeviceRequests",
+    "HostConfig.DeviceCgroupRules",
+    "HostConfig.PortBindings",
+    "HostConfig.Links",
+    "HostConfig.VolumesFrom",
+    "HostConfig.ExtraHosts",
+    "HostConfig.Binds",
+    "HostConfig.PidMode",
+    "HostConfig.UTSMode",
+    "HostConfig.Runtime",
+    "HostConfig.SecurityOpt",
+    "HostConfig.RestartPolicy",
+    "HostConfig.RestartPolicy.Name",
+    "HostConfig.LogConfig",
+    "HostConfig.LogConfig.Type",
+    "Mounts.type",
+    "Mounts.count",
+    "Mounts.entry",
+    "Mounts.project.Type",
+    "Mounts.project.Source",
+    "Mounts.project.RW",
+    "Mounts.project.Propagation",
+    "Mounts.scratch.Type",
+    "Mounts.scratch.RW",
+    "State",
+    "State.Status",
+    "State.Running",
+]
+
+
+class DockerPolicyFacts(_Model):
+    """First rejected predicate only: fixed identifier and booleans, never raw values.
+
+    `type_ok` reports the expected structural kind, not acceptance. `matches` is
+    always false; neither these facts nor synthetic fixtures establish live cause.
+    """
+
+    check_id: DockerPolicyCheckId
+    present: StrictBool
+    type_ok: StrictBool
+    matches: StrictBool = False
+
+    @model_validator(mode="after")
+    def rejected(self) -> Self:
+        if self.matches:
+            raise ValueError("Policy failure facts must describe a rejected predicate.")
+        return self
+
+
 class DockerBackendFault(Exception):
     """Fixed non-secret refusal; never attach raw CLI output or parser exceptions."""
 
@@ -676,6 +768,7 @@ class DockerBackendFault(Exception):
         ],
         *,
         diagnostics: DockerFailureFacts | None = None,
+        policy: DockerPolicyFacts | None = None,
         observed_container_id: str | None = None,
     ) -> None:
         if (
@@ -683,7 +776,10 @@ class DockerBackendFault(Exception):
             and re.fullmatch(r"[0-9a-f]{64}", observed_container_id) is None
         ):
             raise ValueError("Unconfirmed container identity must be bounded.")
+        if policy is not None and code != "docker_policy_mismatch":
+            raise ValueError("Policy facts require a policy refusal.")
         self.code = code
+        self.policy = policy
         self.diagnostics = diagnostics
         self.observed_container_id = observed_container_id
         super().__init__(code)
@@ -709,6 +805,34 @@ class PreparedInputBinding(_Model):
         if any(character in str(value) for character in ',"'):
             raise ValueError("Ambiguous mount-path encoding is unsupported.")
         return value
+
+
+class PreparedInputFault(Exception):
+    """Fixed public-safe refusal; never include source paths, bytes or OS diagnostics."""
+
+    def __init__(
+        self,
+        code: Literal[
+            "input_invalid",
+            "input_unsafe",
+            "input_changed",
+            "input_limit",
+            "input_capacity",
+            "input_timeout",
+            "input_busy",
+            "input_unsealed",
+            "input_scope_mismatch",
+            "input_unconfirmed",
+        ],
+    ) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class PreparedInputPreparer(Protocol):
+    def prepare(
+        self, project: Project, paths: tuple[str, ...], *, deadline: float
+    ) -> PreparedInputs: ...
 
 
 class PreparedInputVerifier(Protocol):
@@ -803,21 +927,107 @@ class DockerLaunchEvent(_Model):
         return self
 
 
+class DockerLaunchScope(_Model):
+    project_id: UUID
+    canonical_root: Path
+    claim_id: UUID
+
+    @field_validator("canonical_root")
+    @classmethod
+    def root(cls, value: Path) -> Path:
+        return absolute_path(value)
+
+
+class DockerLaunchSnapshot(_Model):
+    """Historical observations only; never a controller handle or replay permission."""
+
+    intent: DockerLaunchIntent
+    phases: tuple[
+        Literal["create_intent", "created", "start_intent", "exited", "cleaned", "unknown"], ...
+    ] = Field(max_length=6)
+    container_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    created_at: str | None = Field(
+        default=None, min_length=20, max_length=64, pattern=r"^[0-9TZ:.+\-]+$"
+    )
+    observed_container_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    exit_code: StrictInt | None = Field(default=None, ge=0, le=255)
+    claim_state: Literal["claimed", "unknown", "finished"]
+    uncertain: bool
+
+    @model_validator(mode="after")
+    def shape(self) -> Self:
+        if (
+            (self.container_id is None) != (self.created_at is None)
+            or len(self.phases) != len(set(self.phases))
+            or self.uncertain != (self.claim_state == "unknown" or "unknown" in self.phases)
+            or (("exited" in self.phases) != (self.exit_code is not None))
+        ):
+            raise ValueError("Inconsistent durable lifecycle observations.")
+        return self
+
+
 class DockerLaunchJournal(Protocol):
     """Must durably validate transition/claim uniqueness before returning; ACK loss raises.
 
     Enforce current owner/scope/manifest binding, original expiry at create/start,
-    and permanent one-attempt exclusion. No default implementation: lifecycle must
-    stay unwired until the SQL owner implements these obligations.
+    and permanent one-attempt exclusion. Only the SQL owner implements durability;
+    no default/fallback journal or public route is granted by this port. Cleanup facts
+    alone do not release admission before completion/output integration exists.
     """
 
     def record(self, event: DockerLaunchEvent, *, deadline: float) -> None: ...
 
 
+OutputGuardReason = Literal[
+    "none", "sensitive_channel", "line_limit", "deferred_limit", "invalid_utf8"
+]
+
+
+class DockerOutputSnapshot(_Model):
+    """Sanitized descriptive output, never completion or launch authority.
+
+    Text is plain ASCII with LF only; visible escapes must not be interpreted again.
+    EOF completeness is not controller/transport/cleanup confirmation.
+    """
+
+    policy: Literal["guarded_output_v1"] = "guarded_output_v1"
+    retention_limit: StrictInt = Field(ge=1, le=1048576)
+    stdout: str = Field(max_length=1048576)
+    stderr: str = Field(max_length=1048576)
+    retained_bytes: StrictInt = Field(ge=0, le=1048576)
+    stdout_source_bytes: StrictInt = Field(ge=0, le=9223372036854775807)
+    stderr_source_bytes: StrictInt = Field(ge=0, le=9223372036854775807)
+    stdout_eof: StrictBool
+    stderr_eof: StrictBool
+    aborted: StrictBool
+    truncated: StrictBool
+    guard_reason: OutputGuardReason
+
+    @model_validator(mode="after")
+    def bounded_safe_text(self) -> Self:
+        if (
+            self.retained_bytes != len(self.stdout) + len(self.stderr)
+            or self.retained_bytes > self.retention_limit
+            or any(
+                char != "\n" and not 32 <= ord(char) <= 126
+                for text in (self.stdout, self.stderr)
+                for char in text
+            )
+            or (not self.aborted and not (self.stdout_eof and self.stderr_eof))
+        ):
+            raise ValueError("Inconsistent bounded sanitized output.")
+        return self
+
+    @property
+    def complete(self) -> bool:
+        return self.stdout_eof and self.stderr_eof and not self.aborted
+
+
 class DockerOutputSink(Protocol):
     """Trusted bounded, nonblocking memory-only filter. Never persist raw input chunks."""
 
-    retention_limit: int
+    @property
+    def retention_limit(self) -> int: ...
 
     def accept(self, stream: Literal["stdout", "stderr"], data: bytes) -> None: ...
     def finish(self, stream: Literal["stdout", "stderr"]) -> None: ...
@@ -828,6 +1038,164 @@ class DockerJobOutcome(_Model):
     timed_out: bool = False
     outcome_unknown: bool = False
     cleanup_verified: bool = False
+
+
+class DockerOutputCapture(DockerOutputSink, Protocol):
+    def seal(self, *, abort: bool = False) -> DockerOutputSnapshot: ...
+
+
+class DockerOutputFacts(_Model):
+    """Original capture facts survive logical text retirement; never authority."""
+
+    policy: Literal["guarded_output_v1"]
+    retention_limit: StrictInt = Field(ge=1, le=1048576)
+    retained_bytes: StrictInt = Field(ge=0, le=1048576)
+    stdout_source_bytes: StrictInt = Field(ge=0, le=9223372036854775807)
+    stderr_source_bytes: StrictInt = Field(ge=0, le=9223372036854775807)
+    stdout_eof: StrictBool
+    stderr_eof: StrictBool
+    aborted: StrictBool
+    truncated: StrictBool
+    guard_reason: OutputGuardReason
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        if self.retained_bytes > self.retention_limit or (
+            not self.aborted and not (self.stdout_eof and self.stderr_eof)
+        ):
+            raise ValueError("Inconsistent captured output facts.")
+        return self
+
+
+class DockerCompletion(_Model):
+    """Trusted controller-to-SQL observation, not a public request or replay permit."""
+
+    owned: DockerOwnedContainer
+    outcome: DockerJobOutcome
+    output: DockerOutputSnapshot
+
+    @property
+    def confirmed(self) -> bool:
+        return (
+            self.output.complete
+            and not self.outcome.outcome_unknown
+            and not self.outcome.timed_out
+            and self.outcome.cleanup_verified
+            and self.outcome.exit_code is not None
+        )
+
+    @property
+    def output_facts(self) -> DockerOutputFacts:
+        return DockerOutputFacts.model_validate(
+            self.output.model_dump(exclude={"stdout", "stderr"})
+        )
+
+    @property
+    def output_digest(self) -> str:
+        # Unlike canonical metadata (32KiB), sanitized output can be1MiB.
+        return sha256(self.output.model_dump_json().encode("utf-8")).hexdigest()
+
+    @property
+    def fingerprint(self) -> str:
+        return completion_digest(self.owned, self.outcome, self.output_facts, self.output_digest)
+
+
+def completion_digest(
+    owned: DockerOwnedContainer,
+    outcome: DockerJobOutcome,
+    facts: DockerOutputFacts,
+    output_digest: str,
+) -> str:
+    return fingerprint(
+        {
+            "intent": owned.intent.fingerprint,
+            "container": owned.container_id,
+            "birth": owned.created_at,
+            "outcome": outcome.model_dump(mode="json"),
+            "facts": facts.model_dump(mode="json"),
+            "output": output_digest,
+        }
+    )
+
+
+class DockerExecutionResult(_Model):
+    """Facts-only view; retired text is explicitly absent, not an empty capture."""
+
+    owned: DockerOwnedContainer
+    outcome: DockerJobOutcome
+    output_facts: DockerOutputFacts
+    output_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    completion_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    disposition: Literal["completed", "quarantined"]
+    sequence: StrictInt = Field(ge=1, le=9223372036854775807)
+    recorded_at_ms: StrictInt = Field(ge=0, le=9223372036854775807)
+    payload_state: Literal["retained", "retired", "expired", "clock_unconfirmed"]
+    retirement_reason: Literal["age", "capacity"] | None = None
+    output: DockerOutputSnapshot | None
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        if (self.payload_state == "retained") != (
+            self.output is not None
+        ) or self.completion_digest != completion_digest(
+            self.owned, self.outcome, self.output_facts, self.output_digest
+        ):
+            raise ValueError("Inconsistent completion facts.")
+        if (self.payload_state == "retired") != (self.retirement_reason is not None):
+            raise ValueError("Inconsistent payload retirement.")
+        if self.disposition == "completed" and (
+            self.outcome.outcome_unknown
+            or self.outcome.timed_out
+            or not self.outcome.cleanup_verified
+            or self.outcome.exit_code is None
+            or self.output_facts.aborted
+            or not (self.output_facts.stdout_eof and self.output_facts.stderr_eof)
+        ):
+            raise ValueError("Unconfirmed completion.")
+        if self.output is not None:
+            observed = DockerCompletion(owned=self.owned, outcome=self.outcome, output=self.output)
+            if (
+                observed.output_digest != self.output_digest
+                or observed.output_facts != self.output_facts
+            ):
+                raise ValueError("Inconsistent retained output.")
+        return self
+
+
+class DockerCompletionStore(Protocol):
+    def complete_execution(
+        self, completion: DockerCompletion, *, deadline: float
+    ) -> DockerExecutionResult: ...
+
+
+class DockerExecutionController(Protocol):
+    """Owned lifecycle interface for internal orchestration, not public handle adoption."""
+
+    def create(
+        self,
+        claim: AuthorityResult,
+        declaration: DockerTargetDeclaration,
+        *,
+        deadline: float,
+        cleanup_deadline: float,
+    ) -> DockerOwnedContainer: ...
+    def run(
+        self,
+        handle: DockerOwnedContainer,
+        sink: DockerOutputSink,
+        *,
+        deadline: float,
+        cleanup_deadline: float,
+    ) -> DockerJobOutcome: ...
+    def complete(
+        self,
+        handle: DockerOwnedContainer,
+        capture: DockerOutputCapture,
+        store: DockerCompletionStore,
+        *,
+        deadline: float,
+    ) -> DockerExecutionResult: ...
+    def terminate_remove_owned(self, handle: DockerOwnedContainer, *, deadline: float) -> bool: ...
 
 
 class DockerLifecycleBackend(Protocol):

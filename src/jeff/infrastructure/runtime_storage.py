@@ -4,6 +4,7 @@ Python SQLite opens a pathname, not our checked descriptor. Private ancestry plu
 before/after identity checks narrow races; this is not a hostile same-user/ACL proof.
 """
 
+import json
 import math
 import os
 import queue
@@ -25,6 +26,15 @@ from jeff.application.execution import (
     AuthorityOperation,
     AuthorityRecord,
     AuthorityResult,
+    DockerBackendFault,
+    DockerCompletion,
+    DockerExecutionResult,
+    DockerLaunchEvent,
+    DockerLaunchIntent,
+    DockerLaunchScope,
+    DockerLaunchSnapshot,
+    DockerOutputSnapshot,
+    DockerOwnedContainer,
     ExecutionData,
     ExecutionManifest,
     ExecutionProfile,
@@ -204,6 +214,46 @@ _AUTHORITY_COLUMNS = (
     "proposal_id,approval_id,job_id,project_id,canonical_root,owner_instance_id,manifest_json,"
     "manifest_digest,state,created_at_ms,expires_at_ms,claim_id,claim_state,claimed_at_ms"
 )
+_LAUNCHES = (
+    "CREATE TABLE execution_launches (attempt_id TEXT PRIMARY KEY, "
+    "claim_id TEXT NOT NULL UNIQUE REFERENCES execution_authorities(claim_id), "
+    "intent_json TEXT NOT NULL CHECK(length(CAST(intent_json AS BLOB))<=131072), "
+    "intent_digest TEXT NOT NULL CHECK(length(intent_digest)=64), "
+    "container_id TEXT, created_at TEXT, observed_container_id TEXT, exit_code INTEGER, "
+    "CHECK((container_id IS NULL)=(created_at IS NULL)), "
+    "CHECK(container_id IS NULL OR length(container_id)=64), "
+    "CHECK(created_at IS NULL OR length(created_at)<=64), "
+    "CHECK(observed_container_id IS NULL OR length(observed_container_id)=64), "
+    "CHECK(exit_code IS NULL OR exit_code BETWEEN 0 AND 255))"
+)
+_LAUNCH_EVENTS = (
+    "CREATE TABLE execution_launch_events (attempt_id TEXT NOT NULL "
+    "REFERENCES execution_launches(attempt_id), phase TEXT NOT NULL "
+    "CHECK(phase IN ('create_intent','created','start_intent','exited','cleaned','unknown')), "
+    "sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 6), "
+    "event_digest TEXT NOT NULL CHECK(length(event_digest)=64), "
+    "PRIMARY KEY(attempt_id,phase), UNIQUE(attempt_id,sequence))"
+)
+_RESULTS = (
+    "CREATE TABLE execution_results (sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "attempt_id TEXT NOT NULL UNIQUE REFERENCES execution_launches(attempt_id), "
+    "disposition TEXT NOT NULL CHECK(disposition IN ('completed','quarantined')), "
+    "recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms>=0), "
+    "metadata_json TEXT NOT NULL CHECK(length(CAST(metadata_json AS BLOB))<=8192), "
+    "completion_digest TEXT NOT NULL CHECK(length(completion_digest)=64), "
+    "stdout TEXT, stderr TEXT, retirement_reason TEXT "
+    "CHECK(retirement_reason IN ('age','capacity')), "
+    "CHECK((stdout IS NULL)=(stderr IS NULL)), "
+    "CHECK((stdout IS NULL)=(retirement_reason IS NOT NULL)), "
+    "CHECK(stdout IS NULL OR length(CAST(stdout AS BLOB))+length(CAST(stderr AS BLOB))<=1048576))"
+)
+_RESULT_PAYLOADS = (
+    "CREATE INDEX execution_result_payloads ON execution_results(sequence) WHERE stdout IS NOT NULL"
+)
+_RESULT_QUARANTINE = (
+    "CREATE UNIQUE INDEX execution_result_quarantine ON execution_results(disposition) "
+    "WHERE disposition='quarantined' AND stdout IS NOT NULL"
+)
 _SIDECARS = ("state.sqlite3-journal", "state.sqlite3-wal", "state.sqlite3-shm")
 _FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
@@ -252,7 +302,7 @@ def _schema(connection: sqlite3.Connection) -> int:
     if connection.execute("PRAGMA application_id").fetchone() != (DATABASE_APPLICATION_ID,):
         raise StorageFault("storage_unrecognized")
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version not in (0, 1, 2, 3, 4, 5, DATABASE_SCHEMA):
+    if version not in (0, 1, 2, 3, 4, 5, 6, 7, DATABASE_SCHEMA):
         raise StorageFault("storage_schema_unsupported")
     if connection.execute("PRAGMA journal_mode").fetchone() != ("delete",):
         raise StorageFault("storage_recovery_required")
@@ -280,6 +330,13 @@ def _schema(connection: sqlite3.Connection) -> int:
     if version >= 6:
         expected["execution_authorities"] = ("table", _AUTHORITIES)
         expected["execution_authority_operations"] = ("table", _AUTHORITY_OPS)
+    if version >= 7:
+        expected["execution_launches"] = ("table", _LAUNCHES)
+        expected["execution_launch_events"] = ("table", _LAUNCH_EVENTS)
+    if version >= 8:
+        expected["execution_results"] = ("table", _RESULTS)
+        expected["execution_result_payloads"] = ("index", _RESULT_PAYLOADS)
+        expected["execution_result_quarantine"] = ("index", _RESULT_QUARANTINE)
     found = connection.execute(
         "SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT ?",
         (len(expected) + 1,),
@@ -307,6 +364,8 @@ def _schema(connection: sqlite3.Connection) -> int:
             (4, "retention_v4"),
             (5, "execution_review_v5"),
             (6, "execution_authority_v6"),
+            (7, "execution_launch_v7"),
+            (8, "execution_results_v8"),
         )
         if number <= version
     ]:
@@ -387,6 +446,10 @@ class _Work:
         "retire",
         "review",
         "authority",
+        "launch_record",
+        "launch_status",
+        "execution_complete",
+        "execution_result",
     ]
     payload: (
         Project
@@ -399,6 +462,9 @@ class _Work:
         | HistoryScope
         | ReviewOperation
         | AuthorityOperation
+        | DockerLaunchEvent
+        | DockerLaunchScope
+        | DockerCompletion
         | None
     )
     deadline: float
@@ -596,6 +662,41 @@ class SQLiteStorage:
         except StorageFault as error:
             raise ReviewFault(error.code) from None
 
+    def record(self, event: DockerLaunchEvent, *, deadline: float) -> None:
+        """Private journal seam. Unconfirmed SQL never authorizes a repeated mutation."""
+        try:
+            self._submit("launch_record", event, deadline)
+        except StorageFault:
+            raise DockerBackendFault("docker_journal_unconfirmed") from None
+
+    def launch_status(self, scope: DockerLaunchScope, *, deadline: float) -> DockerLaunchSnapshot:
+        try:
+            return cast(DockerLaunchSnapshot, self._submit("launch_status", scope, deadline))
+        except StorageFault:
+            raise DockerBackendFault("docker_journal_unconfirmed") from None
+
+    def complete_execution(
+        self, completion: DockerCompletion, *, deadline: float
+    ) -> DockerExecutionResult:
+        try:
+            completion = DockerCompletion.model_validate(completion.model_dump(mode="json"))
+        except ValueError:
+            raise DockerBackendFault("docker_output_failed") from None
+        try:
+            return cast(
+                DockerExecutionResult, self._submit("execution_complete", completion, deadline)
+            )
+        except StorageFault:
+            raise DockerBackendFault("docker_journal_unconfirmed") from None
+
+    def execution_result(
+        self, scope: DockerLaunchScope, *, deadline: float
+    ) -> DockerExecutionResult:
+        try:
+            return cast(DockerExecutionResult, self._submit("execution_result", scope, deadline))
+        except StorageFault:
+            raise DockerBackendFault("docker_journal_unconfirmed") from None
+
     def _submit(
         self,
         operation: Literal[
@@ -614,6 +715,10 @@ class SQLiteStorage:
             "retire",
             "review",
             "authority",
+            "launch_record",
+            "launch_status",
+            "execution_complete",
+            "execution_result",
         ],
         payload: Project
         | ReceiptClaim
@@ -625,6 +730,9 @@ class SQLiteStorage:
         | HistoryScope
         | ReviewOperation
         | AuthorityOperation
+        | DockerLaunchEvent
+        | DockerLaunchScope
+        | DockerCompletion
         | None,
         deadline: float | None,
     ) -> object:
@@ -673,7 +781,7 @@ class SQLiteStorage:
     ) -> None:
         """Arm the actual DELETE journal before business DML, on the same SQL owner."""
         self._check(root, fd)
-        if source_schema not in (4, 5, 6) or _schema(connection) != source_schema:
+        if source_schema not in (4, 5, 6, 7, 8) or _schema(connection) != source_schema:
             raise StorageFault("storage_schema_unsupported")
         try:
             self.owner.store.read_credential()  # Existing authority only, never rekey residue.
@@ -968,6 +1076,23 @@ class SQLiteStorage:
                 )
                 connection.execute("PRAGMA user_version=6")
                 self._commit_write(connection, fd)
+            if version < 7:
+                self._begin_write(connection, root, fd, source_schema=6)
+                connection.execute(_LAUNCHES)
+                connection.execute(_LAUNCH_EVENTS)
+                connection.execute("INSERT INTO schema_migrations VALUES (7,'execution_launch_v7')")
+                connection.execute("PRAGMA user_version=7")
+                self._commit_write(connection, fd)
+            if version < 8:
+                self._begin_write(connection, root, fd, source_schema=7)
+                connection.execute(_RESULTS)
+                connection.execute(_RESULT_PAYLOADS)
+                connection.execute(_RESULT_QUARANTINE)
+                connection.execute(
+                    "INSERT INTO schema_migrations VALUES (8,'execution_results_v8')"
+                )
+                connection.execute("PRAGMA user_version=8")
+                self._commit_write(connection, fd)
             _schema(connection)
             self._activity_meta(connection)
             if connection.execute(
@@ -1010,6 +1135,19 @@ class SQLiteStorage:
 
     def _execute(self, connection: sqlite3.Connection, work: _Work, root: int, fd: int) -> object:
         self._check(root, fd)
+        if work.operation == "execution_complete":
+            assert isinstance(work.payload, DockerCompletion)
+            return self._complete_execution(connection, work.payload, root, fd)
+        if work.operation == "execution_result":
+            assert isinstance(work.payload, DockerLaunchScope)
+            return self._execution_result(connection, work.payload)
+        if work.operation == "launch_record":
+            assert isinstance(work.payload, DockerLaunchEvent)
+            self._launch_record(connection, work.payload, root, fd)
+            return None
+        if work.operation == "launch_status":
+            assert isinstance(work.payload, DockerLaunchScope)
+            return self._launch_status(connection, work.payload)
         if work.operation == "authority":
             assert isinstance(work.payload, AuthorityOperation)
             return self._authority_work(connection, work.payload, root, fd)
@@ -1065,6 +1203,395 @@ class SQLiteStorage:
                 raise StorageFault("storage_outcome_unconfirmed") from None
             raise
         return created if writing else bool(rows)
+
+    def _execution_result(
+        self, connection: sqlite3.Connection, scope: DockerLaunchScope
+    ) -> DockerExecutionResult:
+        launch = self._launch_status(connection, scope)
+        row = connection.execute(
+            "SELECT sequence,disposition,recorded_at_ms,metadata_json,completion_digest,"
+            "stdout,stderr,retirement_reason FROM execution_results WHERE attempt_id=?",
+            (str(launch.intent.attempt_id),),
+        ).fetchone()
+        if row is None:
+            raise DockerBackendFault("docker_mutation_unconfirmed")
+        try:
+            metadata = json.loads(row[3])
+            expected = "finished" if row[1] == "completed" else "unknown"
+            if launch.claim_state != expected or (
+                row[1] == "completed"
+                and (launch.uncertain or "cleaned" not in launch.phases or launch.exit_code is None)
+            ):
+                raise ValueError("Inconsistent completion state.")
+            output = (
+                None
+                if row[5] is None
+                else DockerOutputSnapshot.model_validate(
+                    {**metadata["output_facts"], "stdout": row[5], "stderr": row[6]}
+                )
+            )
+            result = DockerExecutionResult.model_validate(
+                {
+                    **metadata,
+                    "owned": DockerOwnedContainer.model_validate(
+                        {
+                            "intent": launch.intent,
+                            "container_id": launch.container_id,
+                            "created_at": launch.created_at,
+                        }
+                    ),
+                    "sequence": row[0],
+                    "disposition": row[1],
+                    "recorded_at_ms": row[2],
+                    "completion_digest": row[4],
+                    "payload_state": "retired" if output is None else "retained",
+                    "retirement_reason": row[7],
+                    "output": output,
+                }
+            )
+            now = self._sample_retention_wall()
+            if result.output is not None and (
+                now is None
+                or result.recorded_at_ms < max(0, now - (self._retention_days or 30) * 86400000)
+            ):
+                result = result.model_copy(
+                    update={
+                        "output": None,
+                        "payload_state": "clock_unconfirmed" if now is None else "expired",
+                    }
+                )
+            return result
+        except (ValueError, TypeError, KeyError):
+            raise StorageFault("storage_schema_unsupported") from None
+
+    @staticmethod
+    def _retire_execution_payloads(
+        connection: sqlite3.Connection, cutoff: int, *, age_limit: int = 4
+    ) -> int:
+        # Bounded page churn under the existing16MiB recovery-journal ceiling.
+        # No claim of physical-crash proof follows from this logical byte budget.
+        rows = connection.execute(
+            "SELECT sequence,disposition,recorded_at_ms FROM execution_results "
+            "WHERE stdout IS NOT NULL ORDER BY sequence LIMIT 19"
+        ).fetchall()
+        if len(rows) > 18:
+            raise StorageFault("storage_schema_unsupported")
+        retired = 0
+        expired = sorted(
+            (row for row in rows if row[2] < cutoff),
+            key=lambda row: (row[1] != "quarantined", row[0]),
+        )[:age_limit]
+        removed = {row[0] for row in expired}
+        for sequence, _kind, _recorded in expired:
+            connection.execute(
+                "UPDATE execution_results SET stdout=NULL,stderr=NULL,retirement_reason='age' "
+                "WHERE sequence=?",
+                (sequence,),
+            )
+            retired += 1
+        completed = [
+            seq for seq, kind, _recorded in rows if kind == "completed" and seq not in removed
+        ]
+        for sequence in completed[:-16]:
+            connection.execute(
+                "UPDATE execution_results SET stdout=NULL,stderr=NULL,retirement_reason='capacity' "
+                "WHERE sequence=?",
+                (sequence,),
+            )
+            retired += 1
+        return retired
+
+    def _complete_execution(
+        self, connection: sqlite3.Connection, completion: DockerCompletion, root: int, fd: int
+    ) -> DockerExecutionResult:
+        owned = completion.owned
+        intent = owned.intent
+        supplied = intent.record
+        if self.instance_id is None or supplied.owner_instance_id != self.instance_id:
+            raise DockerBackendFault("docker_authority_required")
+        scope = DockerLaunchScope.model_validate(
+            {
+                "project_id": supplied.project_id,
+                "canonical_root": supplied.canonical_root,
+                "claim_id": supplied.claim_id,
+            }
+        )
+        observed = self._launch_status(connection, scope)
+        authority_row = connection.execute(
+            "SELECT " + _AUTHORITY_COLUMNS + " FROM execution_authorities WHERE claim_id=?",
+            (str(supplied.claim_id),),
+        ).fetchone()
+        if authority_row is None:
+            raise DockerBackendFault("docker_authority_required")
+        current = self._authority_record(authority_row)
+        if (
+            current.model_dump(exclude={"claim_state"})
+            != supplied.model_dump(exclude={"claim_state"})
+            or observed.intent != intent
+            or observed.container_id != owned.container_id
+            or observed.created_at != owned.created_at
+            or observed.claim_state not in {"claimed", "unknown"}
+            or completion.output.retention_limit != supplied.manifest.profile.output_bytes
+            or (
+                completion.outcome.exit_code is not None
+                and observed.exit_code is not None
+                and completion.outcome.exit_code != observed.exit_code
+            )
+            or connection.execute(
+                "SELECT 1 FROM projects WHERE project_id=? AND canonical_root=?",
+                (str(supplied.project_id), str(supplied.canonical_root)),
+            ).fetchone()
+            is None
+            or connection.execute(
+                "SELECT 1 FROM execution_results WHERE attempt_id=?", (str(intent.attempt_id),)
+            ).fetchone()
+            is not None
+        ):
+            raise DockerBackendFault("docker_authority_required")
+        if completion.confirmed and (
+            observed.uncertain
+            or observed.phases != ("create_intent", "created", "start_intent", "exited", "cleaned")
+            or observed.exit_code != completion.outcome.exit_code
+        ):
+            raise DockerBackendFault("docker_mutation_unconfirmed")
+        now = self._sample_retention_wall()
+        if now is None:
+            raise DockerBackendFault("docker_mutation_unconfirmed")
+        cutoff = max(0, now - (self._retention_days or 30) * 86400000)
+        if (
+            not completion.confirmed
+            and connection.execute(
+                "SELECT 1 FROM execution_results WHERE disposition='quarantined' "
+                "AND stdout IS NOT NULL AND recorded_at_ms>=? LIMIT 1",
+                (cutoff,),
+            ).fetchone()
+        ):
+            raise DockerBackendFault("docker_busy")
+        metadata = json.dumps(
+            {
+                "outcome": completion.outcome.model_dump(mode="json"),
+                "output_facts": completion.output_facts.model_dump(mode="json"),
+                "output_digest": completion.output_digest,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if len(metadata.encode("utf-8")) > 8192:
+            raise DockerBackendFault("docker_output_failed")
+        self._begin_write(connection, root, fd)
+        self._retire_execution_payloads(connection, cutoff, age_limit=1)
+        if not completion.confirmed and "unknown" not in observed.phases:
+            event = DockerLaunchEvent(
+                intent=intent,
+                phase="unknown",
+                container_id=owned.container_id,
+                created_at=owned.created_at,
+            )
+            digest = fingerprint(
+                {"intent": intent.fingerprint, **event.model_dump(mode="json", exclude={"intent"})}
+            )
+            connection.execute(
+                "INSERT INTO execution_launch_events VALUES (?,?,?,?)",
+                (str(intent.attempt_id), "unknown", len(observed.phases) + 1, digest),
+            )
+        connection.execute(
+            "INSERT INTO execution_results (attempt_id,disposition,recorded_at_ms,metadata_json,"
+            "completion_digest,stdout,stderr) VALUES (?,?,?,?,?,?,?)",
+            (
+                str(intent.attempt_id),
+                "completed" if completion.confirmed else "quarantined",
+                now,
+                metadata,
+                completion.fingerprint,
+                completion.output.stdout,
+                completion.output.stderr,
+            ),
+        )
+        connection.execute(
+            "UPDATE execution_authorities SET claim_state=? WHERE claim_id=?",
+            ("finished" if completion.confirmed else "unknown", str(supplied.claim_id)),
+        )
+        self._retire_execution_payloads(connection, cutoff, age_limit=0)
+        self._commit_write(connection, fd)
+        return self._execution_result(connection, scope)
+
+    def _launch_status(
+        self, connection: sqlite3.Connection, scope: DockerLaunchScope
+    ) -> DockerLaunchSnapshot:
+        if self.instance_id is None:
+            raise DockerBackendFault("docker_authority_required")
+        row = connection.execute(
+            "SELECT l.intent_json,l.intent_digest,l.container_id,l.created_at,"
+            "l.observed_container_id,l.exit_code,a.claim_state FROM execution_launches l "
+            "JOIN execution_authorities a ON a.claim_id=l.claim_id "
+            "WHERE l.claim_id=? AND a.project_id=? AND a.canonical_root=?",
+            (str(scope.claim_id), str(scope.project_id), str(scope.canonical_root)),
+        ).fetchone()
+        if row is None:
+            raise DockerBackendFault("docker_ownership_unconfirmed")
+        try:
+            intent = DockerLaunchIntent.model_validate_json(row[0])
+            if intent.fingerprint != row[1] or intent.record.claim_id != scope.claim_id:
+                raise ValueError("Invalid persisted launch binding.")
+            events = connection.execute(
+                "SELECT phase,sequence FROM execution_launch_events WHERE attempt_id=? "
+                "ORDER BY sequence LIMIT 7",
+                (str(intent.attempt_id),),
+            ).fetchall()
+            if not events or any(number != index for index, (_, number) in enumerate(events, 1)):
+                raise ValueError("Invalid persisted lifecycle order.")
+            phases = tuple(phase for phase, _ in events)
+            return DockerLaunchSnapshot.model_validate(
+                {
+                    "intent": intent,
+                    "phases": phases,
+                    "container_id": row[2],
+                    "created_at": row[3],
+                    "observed_container_id": row[4],
+                    "exit_code": row[5],
+                    "claim_state": row[6],
+                    "uncertain": row[6] == "unknown" or "unknown" in phases,
+                }
+            )
+        except ValueError:
+            raise StorageFault("storage_schema_unsupported") from None
+
+    def _launch_record(
+        self, connection: sqlite3.Connection, event: DockerLaunchEvent, root: int, fd: int
+    ) -> None:
+        intent = event.intent
+        supplied = intent.record
+        if self.instance_id is None or supplied.owner_instance_id != self.instance_id:
+            raise DockerBackendFault("docker_authority_required")
+        row = connection.execute(
+            "SELECT " + _AUTHORITY_COLUMNS + " FROM execution_authorities WHERE claim_id=?",
+            (str(supplied.claim_id),),
+        ).fetchone()
+        if row is None:
+            raise DockerBackendFault("docker_authority_required")
+        current = self._authority_record(row)
+        if (
+            current.state != AuthorityState.CONSUMED
+            or current.claim_state not in {"claimed", "unknown"}
+            or current.model_dump(exclude={"claim_state"})
+            != supplied.model_dump(exclude={"claim_state"})
+            or connection.execute(
+                "SELECT 1 FROM projects WHERE project_id=? AND canonical_root=?",
+                (str(current.project_id), str(current.canonical_root)),
+            ).fetchone()
+            is None
+        ):
+            raise DockerBackendFault("docker_authority_required")
+        try:
+            binding = intent.fingerprint
+            payload = intent.model_dump_json()
+            if len(payload.encode("utf-8")) > 131072:
+                raise ValueError("Launch metadata exceeds its bound.")
+            digest = fingerprint(
+                {"intent": binding, **event.model_dump(mode="json", exclude={"intent"})}
+            )
+        except ValueError:
+            raise DockerBackendFault("docker_policy_mismatch") from None
+        self._begin_write(connection, root, fd)
+        existing = connection.execute(
+            "SELECT attempt_id,intent_digest FROM execution_launches WHERE claim_id=?",
+            (str(current.claim_id),),
+        ).fetchone()
+        if existing is not None and existing != (str(intent.attempt_id), binding):
+            raise DockerBackendFault("docker_authority_required")
+        if event.phase in {"create_intent", "start_intent"}:
+            now, mono, healthy = self._review_time()
+            original = self._authority_deadlines.get(str(current.proposal_id))
+            if (
+                current.claim_state != "claimed"
+                or not healthy
+                or original is None
+                or now >= current.expires_at_ms
+                or mono >= original
+            ):
+                raise DockerBackendFault("docker_authority_required")
+        if existing is None:
+            if event.phase not in {"create_intent", "unknown"}:
+                raise DockerBackendFault("docker_authority_required")
+            if connection.execute(
+                "SELECT 1 FROM execution_launches WHERE attempt_id=?", (str(intent.attempt_id),)
+            ).fetchone():
+                raise DockerBackendFault("docker_authority_required")
+            connection.execute(
+                "INSERT INTO execution_launches (attempt_id,claim_id,intent_json,"
+                "intent_digest) VALUES (?,?,?,?)",
+                (str(intent.attempt_id), str(current.claim_id), payload, binding),
+            )
+        elif event.phase == "create_intent":
+            raise DockerBackendFault("docker_mutation_unconfirmed")
+        prior = connection.execute(
+            "SELECT event_digest FROM execution_launch_events WHERE attempt_id=? AND phase=?",
+            (str(intent.attempt_id), event.phase),
+        ).fetchone()
+        if prior is not None:
+            if event.phase == "start_intent" or prior[0] != digest:
+                raise DockerBackendFault("docker_mutation_unconfirmed")
+            self._commit_write(connection, fd)
+            return  # Observation deduplication never reopens a mutation gate.
+        phases = {
+            item[0]
+            for item in connection.execute(
+                "SELECT phase FROM execution_launch_events WHERE attempt_id=?",
+                (str(intent.attempt_id),),
+            )
+        }
+        owned = connection.execute(
+            "SELECT container_id,created_at,observed_container_id,exit_code "
+            "FROM execution_launches WHERE attempt_id=?",
+            (str(intent.attempt_id),),
+        ).fetchone()
+        assert owned is not None
+        if (
+            (
+                event.phase in {"created", "start_intent"}
+                and ("unknown" in phases or "cleaned" in phases or current.claim_state != "claimed")
+            )
+            or (
+                event.phase == "created"
+                and ("create_intent" not in phases or "start_intent" in phases)
+            )
+            or (event.phase == "start_intent" and "created" not in phases)
+            or (event.phase == "exited" and ("start_intent" not in phases or "cleaned" in phases))
+            or (event.phase == "cleaned" and owned[0] is None)
+        ):
+            raise DockerBackendFault("docker_authority_required")
+        values = (
+            event.container_id,
+            event.created_at,
+            event.observed_container_id,
+            event.exit_code,
+        )
+        if any(
+            old is not None and new is not None and old != new
+            for old, new in zip(owned, values, strict=True)
+        ):
+            raise DockerBackendFault("docker_ownership_unconfirmed")
+        container = event.container_id or owned[0]
+        observed = event.observed_container_id or owned[2]
+        if container is not None and observed is not None and container != observed:
+            raise DockerBackendFault("docker_ownership_unconfirmed")
+        connection.execute(
+            "UPDATE execution_launches SET container_id=coalesce(container_id,?),"
+            "created_at=coalesce(created_at,?),observed_container_id=coalesce(observed_container_id,?),"
+            "exit_code=coalesce(exit_code,?) WHERE attempt_id=?",
+            (*values, str(intent.attempt_id)),
+        )
+        connection.execute(
+            "INSERT INTO execution_launch_events VALUES (?,?,?,?)",
+            (str(intent.attempt_id), event.phase, len(phases) + 1, digest),
+        )
+        if event.phase == "unknown":
+            connection.execute(
+                "UPDATE execution_authorities SET claim_state='unknown' WHERE claim_id=?",
+                (str(current.claim_id),),
+            )
+        # Cleanup facts alone cannot release admission before completion/output integration.
+        self._commit_write(connection, fd)
 
     @staticmethod
     def _authority_record(row: tuple[object, ...]) -> AuthorityRecord:
@@ -1259,7 +1786,7 @@ class SQLiteStorage:
         )  # Failure/unknown acknowledgement returns no launch claim.
         if operation.operation == "propose":
             self._authority_deadlines[identifier] = mono + REVIEW_TTL_SECONDS
-        elif operation.operation in {"claim", "deny"}:
+        elif operation.operation == "deny":
             self._authority_deadlines.pop(identifier, None)
         return result
 
@@ -1963,6 +2490,7 @@ class SQLiteStorage:
             connection.execute("DELETE FROM activity_events WHERE request_id=?", (request_id,))
             connection.execute("DELETE FROM activity_requests WHERE request_id=?", (request_id,))
             connection.execute("DELETE FROM request_receipts WHERE request_id=?", (request_id,))
+        payload_retired = self._retire_execution_payloads(connection, cutoff)
         if selected:
             connection.execute(
                 "UPDATE activity_meta SET generation=generation+1,replay_floor=? WHERE singleton=1",
@@ -1971,11 +2499,17 @@ class SQLiteStorage:
         result = RetirementBatch(
             **self._activity_meta(connection).model_dump(),
             retired_count=len(selected),
-            has_more=len(rows) > RETIREMENT_BATCH_LIMIT,
+            has_more=len(rows) > RETIREMENT_BATCH_LIMIT
+            or connection.execute(
+                "SELECT 1 FROM execution_results WHERE stdout IS NOT NULL "
+                "AND recorded_at_ms<? LIMIT 1",
+                (cutoff,),
+            ).fetchone()
+            is not None,
         )
         self._check(root, fd)
         try:
-            if selected:
+            if selected or payload_retired:
                 self._commit_write(connection, fd)
             else:
                 self._rollback_write(connection, fd)
@@ -2368,7 +2902,7 @@ class SQLiteStorage:
                                 self._failed(fault)
                                 self._closing.set()
                             else:
-                                if isinstance(error, ReviewFault):
+                                if isinstance(error, (ReviewFault, DockerBackendFault)):
                                     if not work.result.done():
                                         work.result.set_exception(error)
                                     continue

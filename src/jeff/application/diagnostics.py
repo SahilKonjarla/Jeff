@@ -140,7 +140,7 @@ class DoctorReport(_DoctorModel):
     paths: RuntimePathInspection | None = None
     settings_schema_version: StrictInt | None = Field(default=None, ge=1, le=2)
     configured_retention_days: ConfiguredRetentionDays | None = None
-    database_schema_version: StrictInt | None = Field(default=None, ge=0, le=6)
+    database_schema_version: StrictInt | None = Field(default=None, ge=0, le=8)
     python_version: str | None = Field(
         default=None, min_length=1, max_length=32, pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$"
     )
@@ -163,7 +163,7 @@ class DoctorReport(_DoctorModel):
             self.runtime is not None
             or self.settings_schema_version not in (1, 2)
             or self.configured_retention_days is None
-            or self.database_schema_version != 6
+            or self.database_schema_version != 8
         ):
             raise ValueError(
                 "Stopped health requires current validated facts without live identity."
@@ -175,7 +175,7 @@ class DoctorReport(_DoctorModel):
         if self.summary == "healthy" and (
             self.runtime is None
             or not self.runtime.application_ready
-            or self.database_schema_version != 6
+            or self.database_schema_version != 8
         ):
             raise ValueError("Healthy requires authenticated full cached readiness.")
         return self

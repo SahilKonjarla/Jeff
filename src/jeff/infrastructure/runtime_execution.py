@@ -18,13 +18,18 @@ from uuid import UUID, uuid4
 from jeff.application.execution import (
     AuthorityResult,
     DockerBackendFault,
+    DockerCompletion,
+    DockerCompletionStore,
+    DockerExecutionResult,
     DockerJobOutcome,
     DockerLaunchEvent,
     DockerLaunchIntent,
     DockerLaunchJournal,
     DockerLifecycleBackend,
+    DockerOutputCapture,
     DockerOutputSink,
     DockerOwnedContainer,
+    DockerPolicyFacts,
     DockerTargetDeclaration,
     DockerTargetVerifier,
     PreparedInputVerifier,
@@ -107,6 +112,34 @@ def _mapping(value: object) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
+def _policy_fault(check_id: str, present: bool, type_ok: bool) -> DockerBackendFault:
+    # Construct facts only after the existing predicate rejected. Diagnostics must
+    # never replace/refine acceptance or leak arbitrary names/values on failure.
+    try:
+        facts = DockerPolicyFacts.model_validate(
+            {"check_id": check_id, "present": present, "type_ok": type_ok, "matches": False}
+        )
+    except (ValueError, TypeError):
+        return DockerBackendFault("docker_policy_mismatch")
+    return DockerBackendFault("docker_policy_mismatch", policy=facts)
+
+
+def _policy_mapping(value: object, check_id: str, present: bool) -> dict[str, object]:
+    try:
+        return _mapping(value)
+    except DockerBackendFault:
+        raise _policy_fault(check_id, present, False) from None
+
+
+def _state_fault(state: dict[str, object]) -> DockerBackendFault:
+    key = "Status" if state.get("Status") != "created" else "Running"
+    return _policy_fault(
+        "State." + key,
+        key in state,
+        isinstance(state.get(key), str) if key == "Status" else type(state.get(key)) is bool,
+    )
+
+
 @dataclass
 class _Session:
     handle: DockerOwnedContainer
@@ -115,6 +148,9 @@ class _Session:
     stop_attempted: bool = False
     kill_attempted: bool = False
     remove_attempted: bool = False
+    sink: DockerOutputSink | None = None
+    outcome: DockerJobOutcome | None = None
+    completion_attempted: bool = False
 
 
 class DockerJobController:
@@ -237,7 +273,8 @@ class DockerJobController:
     def _safe_config(handle: DockerOwnedContainer, raw: dict[str, object]) -> None:
         intent, manifest = handle.intent, handle.intent.record.manifest
         p = manifest.profile
-        config, host = _mapping(raw.get("Config")), _mapping(raw.get("HostConfig"))
+        config = _policy_mapping(raw.get("Config"), "Config", "Config" in raw)
+        host = _policy_mapping(raw.get("HostConfig"), "HostConfig", "HostConfig" in raw)
         expected = {
             "User": "65532:65532",
             "WorkingDir": "/project",
@@ -247,23 +284,33 @@ class DockerJobController:
             "StopSignal": "SIGTERM",
         }
         if any(config.get(k) != v for k, v in expected.items()):
-            raise DockerBackendFault("docker_policy_mismatch")
+            key = next(k for k, v in expected.items() if config.get(k) != v)
+            raise _policy_fault(
+                "Config." + key, key in config, type(config.get(key)) is type(expected[key])
+            )
         if any(config.get(k) is not False for k in ("OpenStdin", "AttachStdin", "Tty")):
-            raise DockerBackendFault("docker_policy_mismatch")
+            key = next(k for k in ("OpenStdin", "AttachStdin", "Tty") if config.get(k) is not False)
+            raise _policy_fault("Config." + key, key in config, type(config.get(key)) is bool)
         if config.get("Healthcheck") not in (None, {"Test": ["NONE"]}):
-            raise DockerBackendFault("docker_policy_mismatch")
+            raise _policy_fault(
+                "Config.Healthcheck",
+                "Healthcheck" in config,
+                isinstance(config.get("Healthcheck"), dict),
+            )
         environment = config.get("Env")
         if not isinstance(environment, list) or not all(isinstance(v, str) for v in environment):
-            raise DockerBackendFault("docker_policy_mismatch")
+            raise _policy_fault("Config.Env.type", "Env" in config, False)
         wanted_env = sorted(f"{k}={v}" for k, v in intent.target.effective_environment)
         if sorted(environment) != wanted_env:
-            raise DockerBackendFault("docker_policy_mismatch")
+            raise _policy_fault("Config.Env.values", "Env" in config, True)
         if (
             raw.get("Image") != p.image_id
             or raw.get("Path") != p.executable
             or raw.get("Args") != list(manifest.argv[1:])
         ):
-            raise DockerBackendFault("docker_policy_mismatch")
+            commands = {"Image": p.image_id, "Path": p.executable, "Args": list(manifest.argv[1:])}
+            key = next(k for k, v in commands.items() if raw.get(k) != v)
+            raise _policy_fault(key, key in raw, type(raw.get(key)) is type(commands[key]))
         fixed = {
             "NetworkMode": "none",
             "IpcMode": "private",
@@ -280,11 +327,27 @@ class DockerJobController:
             host.get(k) != v or (type(v) is int and type(host.get(k)) is not int)
             for k, v in fixed.items()
         ):
-            raise DockerBackendFault("docker_policy_mismatch")
+            key = next(
+                k
+                for k, v in fixed.items()
+                if host.get(k) != v or (type(v) is int and type(host.get(k)) is not int)
+            )
+            raise _policy_fault(
+                "HostConfig." + key, key in host, type(host.get(key)) is type(fixed[key])
+            )
         if host.get("ReadonlyRootfs") is not True or any(
             host.get(k) is not False for k in ("Privileged", "AutoRemove", "PublishAllPorts")
         ):
-            raise DockerBackendFault("docker_policy_mismatch")
+            key = (
+                "ReadonlyRootfs"
+                if host.get("ReadonlyRootfs") is not True
+                else next(
+                    k
+                    for k in ("Privileged", "AutoRemove", "PublishAllPorts")
+                    if host.get(k) is not False
+                )
+            )
+            raise _policy_fault("HostConfig." + key, key in host, type(host.get(key)) is bool)
         if any(
             host.get(k) not in (None, [], {})
             for k in (
@@ -299,34 +362,131 @@ class DockerJobController:
                 "Binds",
             )
         ):
-            raise DockerBackendFault("docker_policy_mismatch")
+            key = next(
+                k
+                for k in (
+                    "CapAdd",
+                    "Devices",
+                    "DeviceRequests",
+                    "DeviceCgroupRules",
+                    "PortBindings",
+                    "Links",
+                    "VolumesFrom",
+                    "ExtraHosts",
+                    "Binds",
+                )
+                if host.get(k) not in (None, [], {})
+            )
+            raise _policy_fault(
+                "HostConfig." + key,
+                key in host,
+                host.get(key) is None or isinstance(host.get(key), (list, dict)),
+            )
         if (
             host.get("PidMode") not in ("", "private")
             or host.get("UTSMode") not in ("", "private")
             or host.get("Runtime") not in ("", "runc")
         ):
-            raise DockerBackendFault("docker_policy_mismatch")
+            permitted = {
+                "PidMode": ("", "private"),
+                "UTSMode": ("", "private"),
+                "Runtime": ("", "runc"),
+            }
+            key = next(k for k, v in permitted.items() if host.get(k) not in v)
+            raise _policy_fault("HostConfig." + key, key in host, isinstance(host.get(key), str))
         if host.get("SecurityOpt") not in (["no-new-privileges"], ["no-new-privileges=true"]):
-            raise DockerBackendFault("docker_policy_mismatch")
+            raise _policy_fault(
+                "HostConfig.SecurityOpt",
+                "SecurityOpt" in host,
+                isinstance(host.get("SecurityOpt"), list),
+            )
         if (
-            _mapping(host.get("RestartPolicy")).get("Name") != "no"
-            or _mapping(host.get("LogConfig")).get("Type") != "none"
+            _policy_mapping(
+                host.get("RestartPolicy"), "HostConfig.RestartPolicy", "RestartPolicy" in host
+            ).get("Name")
+            != "no"
+            or _policy_mapping(
+                host.get("LogConfig"), "HostConfig.LogConfig", "LogConfig" in host
+            ).get("Type")
+            != "none"
         ):
-            raise DockerBackendFault("docker_policy_mismatch")
+            restart = _mapping(host.get("RestartPolicy"))
+            if restart.get("Name") != "no":
+                raise _policy_fault(
+                    "HostConfig.RestartPolicy.Name",
+                    "Name" in restart,
+                    isinstance(restart.get("Name"), str),
+                )
+            log = _mapping(host.get("LogConfig"))
+            raise _policy_fault(
+                "HostConfig.LogConfig.Type", "Type" in log, isinstance(log.get("Type"), str)
+            )
         mounts = raw.get("Mounts")
-        if not isinstance(mounts, list) or len(mounts) != 2:
-            raise DockerBackendFault("docker_policy_mismatch")
-        by_target = {_mapping(m).get("Destination"): _mapping(m) for m in mounts}
-        project, scratch = by_target.get("/project", {}), by_target.get("/scratch", {})
+        # Legacy --tmpfs is declared in HostConfig.Tmpfs (checked exactly above),
+        # and need not be repeated in Mounts. Accept only the project bind or the
+        # project bind plus an explicitly described scratch tmpfs, never extras.
+        if not isinstance(mounts, list) or len(mounts) not in (1, 2):
+            raise _policy_fault(
+                "Mounts.count" if isinstance(mounts, list) else "Mounts.type",
+                "Mounts" in raw,
+                isinstance(mounts, list),
+            )
+        entries = [_policy_mapping(m, "Mounts.entry", True) for m in mounts]
+        projects = [m for m in entries if m.get("Destination") == "/project"]
+        scratches = [m for m in entries if m.get("Destination") == "/scratch"]
+        # Count before selecting: a dictionary must not hide duplicate or foreign
+        # destinations, and malformed destinations never become dictionary keys.
+        if len(projects) != 1 or len(scratches) != len(mounts) - 1:
+            raise _policy_fault(
+                "Mounts.entry",
+                True,
+                all(isinstance(m.get("Destination"), str) for m in entries),
+            )
+        project, scratch = projects[0], scratches[0] if len(mounts) == 2 else {}
         if (
             project.get("Type") != "bind"
             or project.get("Source") != str(intent.inputs.path)
             or project.get("RW") is not False
             or project.get("Propagation") != "rprivate"
-            or scratch.get("Type") != "tmpfs"
-            or scratch.get("RW") is not True
+            or (
+                len(mounts) == 2
+                and (scratch.get("Type") != "tmpfs" or scratch.get("RW") is not True)
+            )
         ):
-            raise DockerBackendFault("docker_policy_mismatch")
+            observations = (
+                ("Mounts.project.Type", project, "Type", project.get("Type") == "bind", str),
+                (
+                    "Mounts.project.Source",
+                    project,
+                    "Source",
+                    project.get("Source") == str(intent.inputs.path),
+                    str,
+                ),
+                ("Mounts.project.RW", project, "RW", project.get("RW") is False, bool),
+                (
+                    "Mounts.project.Propagation",
+                    project,
+                    "Propagation",
+                    project.get("Propagation") == "rprivate",
+                    str,
+                ),
+                (
+                    "Mounts.scratch.Type",
+                    scratch,
+                    "Type",
+                    len(mounts) == 1 or scratch.get("Type") == "tmpfs",
+                    str,
+                ),
+                (
+                    "Mounts.scratch.RW",
+                    scratch,
+                    "RW",
+                    len(mounts) == 1 or scratch.get("RW") is True,
+                    bool,
+                ),
+            )
+            check, entry, key, _matched, kind = next(row for row in observations if not row[3])
+            raise _policy_fault(check, key in entry, isinstance(entry.get(key), kind))
 
     def _session(self, handle: DockerOwnedContainer) -> _Session:
         session = self._sessions.get(handle.container_id)
@@ -396,9 +556,9 @@ class DockerJobController:
                 self._sessions[container_id] = _Session(handle)
                 self._record(intent, "created", deadline=deadline, handle=handle)
                 self._safe_config(handle, raw)
-                state = _mapping(raw.get("State"))
+                state = _policy_mapping(raw.get("State"), "State", "State" in raw)
                 if state.get("Status") != "created" or state.get("Running") is not False:
-                    raise DockerBackendFault("docker_policy_mismatch")
+                    raise _state_fault(state)
                 return handle
             except Exception as error:
                 self._quarantined = True
@@ -466,7 +626,8 @@ class DockerJobController:
             try:
                 self._record(intent, "cleaned", deadline=deadline, handle=handle)
             except DockerBackendFault:
-                pass  # Physical cleanup known; durable acknowledgement still unknown/quarantined.
+                # Keep durable uncertainty as well as memory quarantine when time remains.
+                self._unknown(intent, deadline, handle)
             return True
         except Exception:
             self._unknown(intent, deadline, handle)
@@ -496,6 +657,7 @@ class DockerJobController:
             session.start_attempted = (
                 True  # Before journal/transport: uncertainty never reopens start.
             )
+            session.sink = sink
             exit_code: int | None = None
             timed_out = unknown = False
             try:
@@ -549,12 +711,63 @@ class DockerJobController:
                 timed_out = isinstance(error, DockerBackendFault) and error.code == "docker_timeout"
                 self._unknown(handle.intent, cleanup_deadline, handle)
             cleaned = self._cleanup(session, cleanup_deadline)
-            return DockerJobOutcome(
+            session.outcome = DockerJobOutcome(
                 exit_code=exit_code,
                 timed_out=timed_out,
                 outcome_unknown=unknown or self._journal_lost or not cleaned,
                 cleanup_verified=cleaned,
             )
+            return session.outcome
+
+    def complete(
+        self,
+        handle: DockerOwnedContainer,
+        capture: DockerOutputCapture,
+        store: DockerCompletionStore,
+        *,
+        deadline: float,
+    ) -> DockerExecutionResult:
+        """One-shot finalization of this controller's actual run, never a DTO setter.
+
+        Lost acknowledgement fences this caller; only facts inspection may discover
+        a committed finish. In particular, never write unknown over that finish.
+        """
+        with self._operation():
+            session = self._session(handle)
+            if (
+                session.sink is not capture
+                or session.outcome is None
+                or session.completion_attempted
+            ):
+                raise DockerBackendFault("docker_authority_required")
+            session.completion_attempted = True
+            try:
+                self._deadline(deadline)
+                try:
+                    output = capture.seal()
+                except DockerBackendFault:
+                    output = capture.seal(abort=True)
+                request = DockerCompletion(owned=handle, outcome=session.outcome, output=output)
+                result = store.complete_execution(request, deadline=deadline)
+                self._deadline(deadline)
+                if result.completion_digest != request.fingerprint or result.disposition != (
+                    "completed" if request.confirmed else "quarantined"
+                ):
+                    raise DockerBackendFault("docker_journal_unconfirmed")
+                if result.disposition == "quarantined":
+                    self._quarantined = True
+                return result
+            except Exception:
+                self._quarantined = True
+                try:
+                    capture.seal(abort=True)
+                except Exception:
+                    pass
+                raise DockerBackendFault("docker_journal_unconfirmed") from None
+            finally:
+                session.sink = (
+                    None  # Do not retain1MiB sealed captures for every historical handle.
+                )
 
     def _declaration(self, handle: DockerOwnedContainer) -> dict[str, object]:
         return self._declarations[handle.intent.attempt_id].model_dump(mode="python")

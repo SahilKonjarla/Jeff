@@ -17,7 +17,13 @@ from jeff.application.dispatch import (
     ProjectDispatcher,
     ProjectStatusService,
 )
-from jeff.application.execution import ExecutionClient, ExecutionService
+from jeff.application.execution import (
+    DockerBackendFault,
+    DockerTargetDeclaration,
+    ExecutionClient,
+    ExecutionService,
+)
+from jeff.application.execution_coordinator import ExecutionCoordinator
 from jeff.application.projects import Failure, ProjectService
 from jeff.application.questions import QuestionService
 from jeff.application.runtime import (
@@ -31,21 +37,78 @@ from jeff.application.runtime import (
     StartupResult,
 )
 from jeff.application.storage import StorageFault
+from jeff.infrastructure.docker_cli import DockerLifecycleCLI, DockerTargetInspector
+from jeff.infrastructure.prepared_inputs import FilePreparedInputStore
 from jeff.infrastructure.project_files import FileProjectStore
 from jeff.infrastructure.runtime_dispatch import RuntimeDispatcher
 from jeff.infrastructure.runtime_events import RuntimeEvents
+from jeff.infrastructure.runtime_execution import DockerJobController
 from jeff.infrastructure.runtime_ipc import (
     ControlServer,
     RuntimeProjectClient,
     _stream_send,
     encode_message,
 )
+from jeff.infrastructure.runtime_output import GuardedOutputCollector
 from jeff.infrastructure.runtime_paths import resolve_layout
 from jeff.infrastructure.runtime_process import RuntimeController
 from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
 from jeff.infrastructure.runtime_storage import SQLiteStorage
 from jeff.integrations.git import GitProjectDiscovery, GitRepositoryRead
 from jeff.integrations.git.worker import OwnedGitRunner
+
+
+def create_internal_execution(
+    *,
+    owner: Ownership,
+    storage: SQLiteStorage,
+    projects: ProjectService,
+    instance_id: UUID,
+    binary: Path,
+    config: Path,
+    metadata_home: Path,
+    lifecycle_home: Path,
+    declarations: tuple[DockerTargetDeclaration, ...],
+) -> ExecutionCoordinator:
+    """Explicit internal composition only; never invoked by startup/CLI/RPC.
+
+    Caller supplies already owned/ready SQL and private CLI/config/fresh HOME paths.
+    Construction validates those explicit resources but never queries/launches Docker,
+    creates directories, loads default user state or starts another worker.
+    """
+    owner.check()
+    if (
+        storage.owner is not owner
+        or storage.instance_id != instance_id
+        or storage.snapshot().state != "ready"
+    ):
+        raise DockerBackendFault("docker_authority_required")
+    if (
+        metadata_home == lifecycle_home
+        or metadata_home in lifecycle_home.parents
+        or lifecycle_home in metadata_home.parents
+    ):
+        raise DockerBackendFault("docker_unsafe_configuration")
+    inputs = FilePreparedInputStore(owner)
+    verifier = DockerTargetInspector(binary, config, home=metadata_home)
+    backend = DockerLifecycleCLI(binary, config, lifecycle_home)
+    controller = DockerJobController(
+        verifier, backend, inputs, storage, owner_instance_id=instance_id
+    )
+    return ExecutionCoordinator(
+        projects,
+        storage,
+        storage,
+        inputs,
+        inputs,
+        verifier,
+        controller,
+        storage,
+        GuardedOutputCollector,
+        profiles=lambda: storage.execution_profiles,
+        declarations=declarations,
+        instance_id=instance_id,
+    )
 
 
 def _selected_layout() -> RuntimeLayout:
