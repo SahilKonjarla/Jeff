@@ -1,5 +1,11 @@
 # Unit tests
 
+Current Step3 source uses wire11/DB8/settings3(default2), with opt-in bootstrap activation covered by four integration groups (217 selected passes); default remains disabled and no installed/live Docker proof follows. New fresh request/reply group rejects legacy kind/current proof/claim/control extras, malformed conditional fields and mismatched operation/admission/UUID payloads; previous10 and future12 refuse. New CLI group verifies help/syntax factory laziness, separate `execution` namespace, literal argv/repeated files, required reviewed digest and typed unavailable output. Legacy run remains review-only.213 finite selected source cases passed with scoped review/static checks; production backend and installed/live proofs remain gated.
+
+Settings3 integration adds grouped parser/owned-file cases in `test_runtime_settings.py` for exact whole-profile binding, disabled absence/null, strict version dispatch, legacy backend refusal, same old serialization/default bytes and existing file preservation. Existing doctor/storage-contract groups now cover schema3/scalar-only health, future4 refusal and unchanged legacy/default models. Real ready/disabled/legacy/failed-database cache + stopped-doctor behavior is covered by one integration group.201 selected source cases passed; no schema3 installed/Docker/public activation proof.
+
+Step3's added `test_execution_authority_contracts.py` group covers standalone private backend declarations: required explicit fields, cold Path operations, roundtrip/freezing,1–16/aggregate32KiB limits, duplicate project/profile and path-overlap rejection, malformed identity/unknown credentials with hidden canary errors. Missing type was red before implementation; prior authority case is unchanged. This does not exercise settings3 storage, actual filesystem verification, daemon activation or Docker.199 selected source cases passed; existing settings/manifest defaults remain unchanged.
+
 **Status:** M01 CLI/domain/application tests and M02 runtime/control contracts, pure paths, strict wire6 codec and private settings/storage contracts implemented.
 
 - [test_demo_safety.py](test_demo_safety.py): generator preflight/refusal, symlinks/traversal/markers, no writes or Git on preserved repos, missing Git, partial-state refusal, and prevention of parent-repository Git fallback.

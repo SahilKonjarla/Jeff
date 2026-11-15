@@ -16,7 +16,7 @@ from pydantic import (
     model_validator,
 )
 
-from jeff.application.execution import ExecutionCall
+from jeff.application.execution import ExecutionCall, FreshExecutionCall
 from jeff.application.history import (
     ActivityEvent,
     ActivityMeta,
@@ -196,6 +196,16 @@ class ExecutionRequest(_DispatchModel):
     expected_instance_id: UUID
     remaining_ms: StrictInt = Field(default=30000, gt=0, le=30000)
     call: ExecutionCall
+
+
+class FreshExecutionRequest(_DispatchModel):
+    revision: StrictInt = Field(
+        default=PROTOCOL_REVISION, ge=PROTOCOL_REVISION, le=PROTOCOL_REVISION
+    )
+    kind: Literal["execution.v1"] = "execution.v1"
+    expected_instance_id: UUID
+    remaining_ms: StrictInt = Field(default=30000, gt=0, le=30000)
+    call: FreshExecutionCall
 
 
 class ReceiptQuery(ProjectScope):

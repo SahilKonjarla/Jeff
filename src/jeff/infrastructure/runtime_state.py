@@ -6,11 +6,13 @@ import fcntl
 import hashlib
 import hmac
 import json
+import math
 import os
 import secrets
 import socket
 import stat
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -21,6 +23,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
 
 from jeff.application.diagnostics import DiagnosticDeadlineExceeded
+from jeff.application.execution import DockerBackendFault
 from jeff.application.projects import Failure
 from jeff.application.runtime import ControlFault, ControlIssueCode, RuntimeLayout
 from jeff.infrastructure.runtime_paths import inspect_layout
@@ -455,6 +458,7 @@ class Ownership:
         self.store = store
         self.fd = fd
         self.directory_fd = directory_fd
+        self._execution_homes_lock = threading.Lock()
 
     def __enter__(self) -> Self:
         return self
@@ -485,6 +489,98 @@ class Ownership:
                     raise ControlFault("runtime_ownership_unconfirmed")
         except OSError:
             raise ControlFault("runtime_ownership_unconfirmed") from None
+
+    @contextmanager
+    def execution_homes(self, instance_id: UUID, *, deadline: float) -> Iterator[tuple[Path, Path]]:
+        """New bounded private generation only; paths are facts, never launch authority."""
+        if not isinstance(instance_id, UUID):
+            raise DockerBackendFault("docker_unsafe_configuration")
+        if not self._execution_homes_lock.acquire(blocking=False):
+            raise DockerBackendFault("docker_busy")
+
+        def budget() -> None:
+            if not math.isfinite(deadline) or time.monotonic() >= deadline:
+                raise DockerBackendFault("docker_timeout")
+
+        def stable(parent: int, name: str, fd: int) -> None:
+            current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (
+                _identity(current) != _identity(os.fstat(fd))
+                or stat.S_IMODE(current.st_mode) != 0o700
+                or current.st_uid != self.store.layout.uid
+            ):
+                raise DockerBackendFault("docker_unsafe_configuration")
+
+        try:
+            budget()
+            self.check()
+            with ExitStack() as stack:
+
+                def child(parent: int, name: str, *, existing: bool = False) -> int:
+                    budget()
+                    created = False
+                    try:
+                        os.mkdir(name, 0o700, dir_fd=parent)
+                        created = True
+                    except FileExistsError:
+                        if not existing:
+                            raise DockerBackendFault("docker_unsafe_configuration") from None
+                    before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    mode = stat.S_IMODE(before.st_mode)
+                    if (
+                        not stat.S_ISDIR(before.st_mode)
+                        or before.st_uid != self.store.layout.uid
+                        or (mode & ~0o700 if created else mode != 0o700)
+                    ):
+                        raise DockerBackendFault("docker_unsafe_configuration")
+                    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | _FILE_FLAGS, dir_fd=parent)
+                    stack.callback(os.close, fd)
+                    if _identity(before) != _identity(os.fstat(fd)):
+                        raise DockerBackendFault("docker_unsafe_configuration")
+                    if created:
+                        os.fchmod(fd, 0o700)
+                    stable(parent, name, fd)
+                    stack.callback(stable, parent, name, fd)
+                    if created:
+                        os.fsync(fd)
+                        os.fsync(parent)
+                    return fd
+
+                base = child(self.directory_fd, "execution-backend", existing=True)
+                count = 0
+                with os.scandir(base) as entries:
+                    for entry in entries:
+                        budget()
+                        count += 1
+                        if count > 16:
+                            raise DockerBackendFault("docker_home_capacity")
+                        try:
+                            valid_name = str(UUID(entry.name)) == entry.name
+                        except ValueError:
+                            valid_name = False
+                        info = entry.stat(follow_symlinks=False)
+                        if (
+                            not valid_name
+                            or not stat.S_ISDIR(info.st_mode)
+                            or info.st_uid != self.store.layout.uid
+                            or stat.S_IMODE(info.st_mode) != 0o700
+                        ):
+                            raise DockerBackendFault("docker_unsafe_configuration")
+                if count >= 16:
+                    raise DockerBackendFault("docker_home_capacity")
+                generation = child(base, str(instance_id))
+                child(generation, "metadata")
+                child(generation, "lifecycle")
+                budget()
+                self.check()
+                path = self.store.layout.runtime_dir / "execution-backend" / str(instance_id)
+                yield path / "metadata", path / "lifecycle"
+                budget()
+                self.check()
+        except OSError:
+            raise DockerBackendFault("docker_unsafe_configuration") from None
+        finally:
+            self._execution_homes_lock.release()
 
     def _storage_file(self, root: int, name: str, descriptor: int) -> _FileIdentity:
         held = os.fstat(descriptor)

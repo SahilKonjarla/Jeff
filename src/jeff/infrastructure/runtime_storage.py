@@ -26,6 +26,7 @@ from jeff.application.execution import (
     AuthorityOperation,
     AuthorityRecord,
     AuthorityResult,
+    DockerBackendConfiguration,
     DockerBackendFault,
     DockerCompletion,
     DockerExecutionResult,
@@ -36,8 +37,11 @@ from jeff.application.execution import (
     DockerOutputSnapshot,
     DockerOwnedContainer,
     ExecutionData,
+    ExecutionInspection,
+    ExecutionInspectionScope,
     ExecutionManifest,
     ExecutionProfile,
+    ProposalRequestScope,
     ReviewFault,
     ReviewOperation,
     ReviewRecord,
@@ -69,6 +73,7 @@ from jeff.application.storage import (
     RETIREMENT_BATCH_LIMIT,
     RETIREMENT_INTERVAL_SECONDS,
     STORAGE_PENDING_LIMIT,
+    ConfiguredRuntimeSettings,
     Receipt,
     ReceiptClaim,
     ReceiptClaimResult,
@@ -446,6 +451,8 @@ class _Work:
         "retire",
         "review",
         "authority",
+        "proposal_lookup",
+        "execution_inspect",
         "launch_record",
         "launch_status",
         "execution_complete",
@@ -462,6 +469,8 @@ class _Work:
         | HistoryScope
         | ReviewOperation
         | AuthorityOperation
+        | ProposalRequestScope
+        | ExecutionInspectionScope
         | DockerLaunchEvent
         | DockerLaunchScope
         | DockerCompletion
@@ -496,6 +505,7 @@ class SQLiteStorage:
         self._review_deadlines: dict[str, float] = {}
         self._authority_deadlines: dict[str, float] = {}
         self._execution_profiles: tuple[ExecutionProfile, ...] = ()
+        self._execution_backend: DockerBackendConfiguration | None = None
         self._retention_monotonic = retention_monotonic or time.monotonic
         self._retention_progress = RetentionProgress(enabled=scheduled_retention)
         self._retention_position: RetentionPosition | None = None
@@ -649,6 +659,14 @@ class SQLiteStorage:
     def execution_profiles(self) -> tuple[ExecutionProfile, ...]:
         return self._execution_profiles
 
+    @property
+    def execution_backend(self) -> DockerBackendConfiguration | None:
+        """Startup snapshot only, not verification, activation or revocable authority."""
+        with self._mutex:
+            if self._state.state != "ready" or not self._accepting or self._closing.is_set():
+                return None
+            return self._execution_backend
+
     def review(self, operation: ReviewOperation, *, deadline: float) -> ExecutionData:
         try:
             return cast(ExecutionData, self._submit("review", operation, deadline))
@@ -659,6 +677,23 @@ class SQLiteStorage:
         """Internal verified-worker seam only; deliberately absent from RPC/CLI routing."""
         try:
             return cast(AuthorityResult, self._submit("authority", operation, deadline))
+        except StorageFault as error:
+            raise ReviewFault(error.code) from None
+
+    def inspect_execution(
+        self, scope: ExecutionInspectionScope, *, deadline: float
+    ) -> ExecutionInspection:
+        try:
+            return cast(ExecutionInspection, self._submit("execution_inspect", scope, deadline))
+        except StorageFault as error:
+            raise ReviewFault(error.code) from None
+
+    def lookup_proposal(
+        self, scope: ProposalRequestScope, *, deadline: float
+    ) -> AuthorityRecord | None:
+        """Scoped DB8 operation facts only, never permission or a new preparation."""
+        try:
+            return cast(AuthorityRecord | None, self._submit("proposal_lookup", scope, deadline))
         except StorageFault as error:
             raise ReviewFault(error.code) from None
 
@@ -715,6 +750,8 @@ class SQLiteStorage:
             "retire",
             "review",
             "authority",
+            "proposal_lookup",
+            "execution_inspect",
             "launch_record",
             "launch_status",
             "execution_complete",
@@ -730,6 +767,8 @@ class SQLiteStorage:
         | HistoryScope
         | ReviewOperation
         | AuthorityOperation
+        | ProposalRequestScope
+        | ExecutionInspectionScope
         | DockerLaunchEvent
         | DockerLaunchScope
         | DockerCompletion
@@ -1148,6 +1187,12 @@ class SQLiteStorage:
         if work.operation == "launch_status":
             assert isinstance(work.payload, DockerLaunchScope)
             return self._launch_status(connection, work.payload)
+        if work.operation == "execution_inspect":
+            assert isinstance(work.payload, ExecutionInspectionScope)
+            return self._inspect_execution(connection, work.payload, root, fd)
+        if work.operation == "proposal_lookup":
+            assert isinstance(work.payload, ProposalRequestScope)
+            return self._lookup_proposal(connection, work.payload)
         if work.operation == "authority":
             assert isinstance(work.payload, AuthorityOperation)
             return self._authority_work(connection, work.payload, root, fd)
@@ -1599,6 +1644,118 @@ class SQLiteStorage:
         values["manifest"] = ExecutionManifest.model_validate_json(str(values.pop("manifest_json")))
         return AuthorityRecord.model_validate(values)
 
+    @staticmethod
+    def _authority_payload_digest(operation: AuthorityOperation) -> str:
+        project, path = str(operation.project_id), str(operation.canonical_root)
+        return fingerprint(
+            {
+                "operation": operation.operation,
+                "request": str(operation.request_id),
+                "project": project,
+                "root": path,
+                "owner": str(operation.owner_instance_id),
+                "approval": str(operation.approval_id) if operation.approval_id else None,
+                "manifest": operation.manifest.fingerprint if operation.manifest else None,
+                "current": operation.current_manifest_digest,
+            }
+        )
+
+    def _inspect_execution(
+        self, connection: sqlite3.Connection, scope: ExecutionInspectionScope, root: int, fd: int
+    ) -> ExecutionInspection:
+        # One actor turn: completion cannot race an authority read on this SQL owner.
+        record = self._authority_work(
+            connection,
+            AuthorityOperation(
+                operation="show",
+                project_id=scope.project_id,
+                canonical_root=scope.canonical_root,
+                owner_instance_id=scope.owner_instance_id,
+                approval_id=scope.approval_id,
+            ),
+            root,
+            fd,
+        ).record
+        if record.owner_instance_id != scope.owner_instance_id:
+            raise ReviewFault("execution_target_mismatch")
+        if record.claim_id is None:
+            return ExecutionInspection(record=record, completion_state="not_claimed")
+        launch_row = connection.execute(
+            "SELECT 1 FROM execution_launches WHERE claim_id=?", (str(record.claim_id),)
+        ).fetchone()
+        if launch_row is None:
+            if record.claim_state == "finished":
+                raise StorageFault("storage_schema_unsupported")
+            return ExecutionInspection(record=record, completion_state="claim_only")
+        launch_scope = DockerLaunchScope(
+            project_id=scope.project_id,
+            canonical_root=scope.canonical_root,
+            claim_id=record.claim_id,
+        )
+        launch = self._launch_status(connection, launch_scope)
+        result_row = connection.execute(
+            "SELECT 1 FROM execution_results WHERE attempt_id=?", (str(launch.intent.attempt_id),)
+        ).fetchone()
+        if result_row is None:
+            if record.claim_state == "finished":
+                raise StorageFault("storage_schema_unsupported")
+            return ExecutionInspection(record=record, completion_state="launch_without_result")
+        return ExecutionInspection(
+            record=record,
+            completion_state="recorded",
+            result=self._execution_result(connection, launch_scope),
+        )
+
+    def _lookup_proposal(
+        self, connection: sqlite3.Connection, scope: ProposalRequestScope
+    ) -> AuthorityRecord | None:
+        if self.instance_id is None or scope.owner_instance_id != self.instance_id:
+            raise ReviewFault("execution_target_mismatch")
+        if (
+            connection.execute(
+                "SELECT 1 FROM projects WHERE project_id=? AND canonical_root=?",
+                (str(scope.project_id), str(scope.canonical_root)),
+            ).fetchone()
+            is None
+        ):
+            raise ReviewFault("execution_target_mismatch")
+        if connection.execute(
+            "SELECT 1 FROM execution_operations WHERE request_id=?", (str(scope.request_id),)
+        ).fetchone():
+            raise ReviewFault("execution_conflict")
+        prior = connection.execute(
+            "SELECT payload_digest,proposal_id FROM execution_authority_operations "
+            "WHERE request_id=?",
+            (str(scope.request_id),),
+        ).fetchone()
+        if prior is None:
+            return None
+        row = connection.execute(
+            "SELECT " + _AUTHORITY_COLUMNS + " FROM execution_authorities WHERE proposal_id=?",
+            (prior[1],),
+        ).fetchone()
+        if row is None:
+            raise StorageFault("storage_schema_unsupported")
+        record = self._authority_record(row)
+        if (record.project_id, record.canonical_root, record.owner_instance_id) != (
+            scope.project_id,
+            scope.canonical_root,
+            scope.owner_instance_id,
+        ):
+            raise ReviewFault("execution_conflict")
+        original = AuthorityOperation(
+            operation="propose",
+            request_id=scope.request_id,
+            project_id=scope.project_id,
+            canonical_root=scope.canonical_root,
+            owner_instance_id=scope.owner_instance_id,
+            manifest=record.manifest,
+            current_manifest_digest=record.manifest_digest,
+        )
+        if self._authority_payload_digest(original) != prior[0]:
+            raise ReviewFault("execution_conflict")
+        return record
+
     def _authority_work(
         self, connection: sqlite3.Connection, operation: AuthorityOperation, root: int, fd: int
     ) -> AuthorityResult:
@@ -1637,18 +1794,7 @@ class SQLiteStorage:
                     (state, identifier),
                 )
         mutating = operation.operation != "show"
-        digest = fingerprint(
-            {
-                "operation": operation.operation,
-                "request": str(operation.request_id),
-                "project": project,
-                "root": path,
-                "owner": str(operation.owner_instance_id),
-                "approval": str(operation.approval_id) if operation.approval_id else None,
-                "manifest": operation.manifest.fingerprint if operation.manifest else None,
-                "current": operation.current_manifest_digest,
-            }
-        )
+        digest = self._authority_payload_digest(operation)
         if (
             mutating
             and connection.execute(
@@ -2832,6 +2978,7 @@ class SQLiteStorage:
             self._accepting = False
             self._state = StorageReadiness(state="failed", error=fault.code)
             self._retention_position = None
+            self._execution_backend = None
 
     def _run(self) -> None:
         connection = None
@@ -2861,6 +3008,11 @@ class SQLiteStorage:
                                     "next_attempt_at": ready_at + RETIREMENT_INTERVAL_SECONDS,
                                 }
                             )
+                        self._execution_backend = (
+                            settings.backend
+                            if isinstance(settings, ConfiguredRuntimeSettings)
+                            else None
+                        )
                         self._state = StorageReadiness(
                             state="ready",
                             schema_version=DATABASE_SCHEMA,
@@ -2935,6 +3087,7 @@ class SQLiteStorage:
             self._release(connection, fd)
             with self._mutex:
                 self._accepting = False
+                self._execution_backend = None
             self._initialized.set()
             while True:
                 try:

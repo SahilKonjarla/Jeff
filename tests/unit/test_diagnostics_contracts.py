@@ -164,6 +164,8 @@ def test_phase2_doctor_accepts_current_and_legacy_settings_and_current_live_read
     assert stopped.settings_schema_version == 2 and stopped.database_schema_version == 8
     legacy = DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 1})
     assert doctor_result(legacy).ok and legacy.settings_schema_version == 1
+    configured = DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 3})
+    assert doctor_result(configured).ok and configured.settings_schema_version == 3
     live = DoctorReport.model_validate(
         {
             **stopped_payload(),
@@ -178,7 +180,7 @@ def test_phase2_doctor_accepts_current_and_legacy_settings_and_current_live_read
     with pytest.raises(ValidationError):
         DoctorReport.model_validate({**stopped_payload(), "database_schema_version": 4})
     with pytest.raises(ValidationError):
-        DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 3})
+        DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 4})
 
 
 def live_payload() -> dict[str, Any]:

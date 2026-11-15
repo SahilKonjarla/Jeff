@@ -1,9 +1,10 @@
-"""Finite worker admission and staged actual drain; no SQL/transport/lifetime executor."""
+"""Finite owned workers with distinct admission replies and actual action drainage."""
 
 import queue
 import threading
 import time
-from concurrent.futures import Future
+from collections.abc import Callable
+from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass
 
 from jeff.application.dispatch import (
@@ -18,11 +19,47 @@ from jeff.application.dispatch import (
     StreamReply,
     dispatch_failure,
 )
-from jeff.application.execution import ExecutionCall, ExecutionReply, ExecutionService
+from jeff.application.execution import (
+    ExecutionAdmission,
+    ExecutionCall,
+    ExecutionReply,
+    ExecutionService,
+    ExecutionStartCall,
+    ExecutionStarter,
+    ExecutionStartReply,
+    FreshExecutionCall,
+    FreshExecutionReply,
+    FreshExecutionService,
+)
+from jeff.application.projects import Failure
 from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS, ControlFault
 
-Call = ProjectCall | ReceiptQuery | EvidenceQuery | StreamQuery | ExecutionCall
-Reply = DispatchReply | ReceiptReply | EvidenceReply | StreamReply | ExecutionReply
+Call = (
+    ProjectCall
+    | ReceiptQuery
+    | EvidenceQuery
+    | StreamQuery
+    | ExecutionCall
+    | ExecutionStartCall
+    | FreshExecutionCall
+)
+Reply = (
+    DispatchReply
+    | ReceiptReply
+    | EvidenceReply
+    | StreamReply
+    | ExecutionReply
+    | ExecutionStartReply
+    | FreshExecutionReply
+)
+
+
+def _is_start(call: Call) -> bool:
+    return (
+        isinstance(call, ExecutionStartCall)
+        or isinstance(call, FreshExecutionCall)
+        and call.operation == "start"
+    )
 
 
 @dataclass
@@ -36,10 +73,27 @@ class RuntimeDispatcher:
     """Keep blocking use cases off the control loop with finite, owned worker lifetimes."""
 
     def __init__(
-        self, dispatch: ProjectDispatcher, execution: ExecutionService | None = None
+        self,
+        dispatch: ProjectDispatcher,
+        execution: ExecutionService | None = None,
+        *,
+        starter: ExecutionStarter | None = None,
+        fresh: FreshExecutionService | None = None,
+        fresh_factory: Callable[[], FreshExecutionService | Failure] | None = None,
     ) -> None:
         self.dispatch = dispatch
         self.execution = execution
+        self.starter = starter
+        if fresh is not None and fresh_factory is not None:
+            raise ValueError("Supply a fresh service or a startup factory, not both.")
+        self.fresh = fresh
+        self.fresh_issue: Failure | None = None
+        self._fresh_factory = fresh_factory
+        self.initialization: Future[None] = Future()
+        self.initialization.set_running_or_notify_cancel()
+        if fresh_factory is None:
+            self.initialization.set_result(None)
+        self._execution_reserved = False
         self._queue: queue.Queue[_Work] = queue.Queue(DEFAULT_RUNTIME_LIMITS.pending_requests)
         self._closing = threading.Event()
         self._draining = False
@@ -53,6 +107,8 @@ class RuntimeDispatcher:
         with self._mutex:
             return (
                 self._ready
+                and self.initialization.done()
+                and self.initialization.exception() is None
                 and not self._draining
                 and not self._closing.is_set()
                 and len(self._threads) == DEFAULT_RUNTIME_LIMITS.active_requests
@@ -62,7 +118,7 @@ class RuntimeDispatcher:
     @property
     def actions_drained(self) -> bool:
         with self._mutex:
-            return self._outstanding_actions == 0
+            return self._outstanding_actions == 0 and self.initialization.done()
 
     @property
     def closed(self) -> bool:
@@ -75,13 +131,18 @@ class RuntimeDispatcher:
             try:
                 for number in range(DEFAULT_RUNTIME_LIMITS.active_requests):
                     thread = threading.Thread(
-                        target=self._run, name=f"jeff-project-{number}", daemon=False
+                        target=self._run,
+                        kwargs={"initialize": number == 0},
+                        name=f"jeff-project-{number}",
+                        daemon=False,
                     )
                     thread.start()
                     self._threads.append(thread)
                 self._ready = True
             except Exception:
                 self._closing.set()
+                if not self._threads and not self.initialization.done():
+                    self.initialization.set_exception(ControlFault("runtime_start_failed"))
                 raise ControlFault("runtime_start_failed") from None
 
     def submit(self, call: Call, deadline: float) -> Future[Reply]:
@@ -90,14 +151,25 @@ class RuntimeDispatcher:
         with self._mutex:
             if (
                 not self._ready
+                or not self.initialization.done()
+                or self.initialization.exception() is not None
                 or self._closing.is_set()
                 or (self._draining and not isinstance(call, StreamQuery))
             ):
                 raise ControlFault("runtime_busy")
+            if isinstance(call, FreshExecutionCall) and self.fresh is None:
+                raise ControlFault("runtime_capability_unavailable")
+            if _is_start(call):
+                if isinstance(call, ExecutionStartCall) and self.starter is None:
+                    raise ControlFault("runtime_capability_unavailable")
+                if self._execution_reserved:
+                    raise ControlFault("runtime_busy")
             try:
                 self._queue.put_nowait(_Work(call, deadline, result))
             except queue.Full:
                 raise ControlFault("runtime_busy") from None
+            if _is_start(call):
+                self._execution_reserved = True
             if not isinstance(call, StreamQuery):
                 self._outstanding_actions += 1
         return result
@@ -113,6 +185,8 @@ class RuntimeDispatcher:
             self._draining = True
             self._closing.set()
             self._ready = False
+            if not self._threads and not self.initialization.done():
+                self.initialization.set_exception(ControlFault("runtime_start_failed"))
 
     def close(self, timeout: float = DEFAULT_RUNTIME_LIMITS.stop_seconds) -> None:
         """Join owned threads within one budget, reporting unconfirmed exit on timeout."""
@@ -131,6 +205,18 @@ class RuntimeDispatcher:
             if closing
             else "request_timeout"
         )
+        if isinstance(call, FreshExecutionCall):
+            return FreshExecutionReply(
+                ok=False,
+                request_id=call.request_id,
+                operation=call.operation,
+                identity=self.dispatch.identity.instance_id,
+                error=error,
+            )
+        if isinstance(call, ExecutionStartCall):
+            return ExecutionStartReply(
+                request_id=call.request_id, identity=self.dispatch.identity.instance_id, error=error
+            )
         if isinstance(call, ExecutionCall):
             return ExecutionReply(
                 request_id=call.request_id,
@@ -155,7 +241,70 @@ class RuntimeDispatcher:
             )
         return ReceiptReply(request_id=call.query_id, identity=self.dispatch.identity, error=error)
 
-    def _run(self) -> None:
+    def _start_execution(self, work: _Work) -> None:
+        call = work.call
+        if not isinstance(call, (ExecutionStartCall, FreshExecutionCall)):
+            raise ControlFault("runtime_capability_unavailable")
+        service = self.fresh if isinstance(call, FreshExecutionCall) else self.starter
+        if service is None or call.approval_id is None or call.reviewed_manifest_digest is None:
+            raise ControlFault("runtime_capability_unavailable")
+
+        def admitted(observation: ExecutionAdmission) -> None:
+            if not work.result.done():
+                try:
+                    reply: Reply = (
+                        FreshExecutionReply(
+                            ok=True,
+                            operation=call.operation,
+                            request_id=call.request_id,
+                            identity=self.dispatch.identity.instance_id,
+                            admission=observation,
+                        )
+                        if isinstance(call, FreshExecutionCall)
+                        else ExecutionStartReply(
+                            request_id=call.request_id,
+                            identity=self.dispatch.identity.instance_id,
+                            admission=observation,
+                        )
+                    )
+                    work.result.set_result(reply)
+                except InvalidStateError:
+                    pass  # Lost observer does not cancel the worker owning the claim.
+
+        service.start(
+            call.directory,
+            call.approval_id,
+            call.reviewed_manifest_digest,
+            request_id=call.request_id,
+            admission_deadline=work.deadline,
+            on_admitted=admitted,
+        )
+        if not work.result.done():
+            work.result.set_result(self._refused(call, unknown=True))
+
+    def _initialize_backend(self) -> None:
+        if self._fresh_factory is None:
+            return
+        try:
+            if not self._closing.is_set():
+                observed = (
+                    self._fresh_factory()
+                )  # Same owned worker; no loop blocking/new executor.
+                with self._mutex:
+                    if not self._draining and not self._closing.is_set():
+                        if isinstance(observed, Failure):
+                            self.fresh_issue = observed
+                        else:
+                            self.fresh = observed
+        except Exception as error:
+            self._closing.set()
+            self.initialization.set_exception(error)
+        else:
+            self.initialization.set_result(None)
+
+    def _run(self, *, initialize: bool = False) -> None:
+        if initialize:
+            self._initialize_backend()
         while not self._closing.is_set() or not self._queue.empty():
             try:
                 work = self._queue.get(timeout=0.05)
@@ -170,6 +319,19 @@ class RuntimeDispatcher:
                     or time.monotonic() >= work.deadline
                 ):
                     result = self._refused(work.call, closing=self._draining)
+                elif isinstance(work.call, ExecutionStartCall) or (
+                    isinstance(work.call, FreshExecutionCall) and work.call.operation == "start"
+                ):
+                    # The same existing worker remains counted through completion;
+                    # only its observation future may finish at durable admission.
+                    self._start_execution(work)
+                    continue
+                elif isinstance(work.call, FreshExecutionCall):
+                    result = (
+                        self.fresh.execute(work.call, work.deadline)
+                        if self.fresh is not None
+                        else self._refused(work.call)
+                    )
                 elif isinstance(work.call, ExecutionCall):
                     result = (
                         self.execution.execute(work.call, work.deadline)
@@ -190,6 +352,8 @@ class RuntimeDispatcher:
                     work.result.set_result(self._refused(work.call, unknown=True))
             finally:
                 with self._mutex:
+                    if _is_start(work.call):
+                        self._execution_reserved = False
                     if not isinstance(work.call, StreamQuery):
                         self._outstanding_actions -= 1
                 self._queue.task_done()

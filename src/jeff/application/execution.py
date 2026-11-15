@@ -1,6 +1,7 @@
-"""Legacy review-only actions and fresh internal authority ports; no executor or Docker I/O."""
+"""Legacy reviews, distinct fresh public intent and private authority ports; no Docker I/O."""
 
 import re
+import unicodedata
 from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -438,7 +439,7 @@ class ExecutionManifest(_Model):
     """Fresh action identity; the trusted verifier must still check target and inputs.
 
     Not a subclass or reinterpretation of the permanently review-only ActionManifest.
-    No RPC/CLI route admits this type until real target/input verification exists.
+    Public intent is separate; only the trusted target/input verifier grants fresh authority.
     """
 
     authority_kind: Literal["execution_v1"] = "execution_v1"
@@ -544,8 +545,91 @@ class AuthorityResult(_Model):
         return self
 
 
+class ExecutionAdmission(_Model):
+    """Confirmed claim acknowledgement, never a token or proof a guest started.
+
+    Replays describe current persisted facts only. Delivery of this observation is
+    independent of the lifetime of the worker that owns a first confirmed claim.
+    """
+
+    authority_kind: Literal["execution_v1"] = "execution_v1"
+    request_id: UUID
+    project_id: UUID
+    canonical_root: Path
+    approval_id: UUID
+    job_id: UUID
+    manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    claim_state: Literal["claimed", "unknown", "finished"]
+    replayed: StrictBool
+
+    @field_validator("canonical_root")
+    @classmethod
+    def root(cls, value: Path) -> Path:
+        return absolute_path(value)
+
+    @model_validator(mode="after")
+    def first_claim(self) -> Self:
+        if not self.replayed and self.claim_state != "claimed":
+            raise ValueError("A first admission acknowledges a confirmed claim only.")
+        return self
+
+
+class ExecutionStartCall(_Model):
+    """Explicit fresh start identity; reviewed digest is not a current-proof override."""
+
+    authority_kind: Literal["execution_v1"] = "execution_v1"
+    request_id: UUID = Field(default_factory=uuid4)
+    directory: Path
+    approval_id: UUID
+    reviewed_manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("directory")
+    @classmethod
+    def root(cls, value: Path) -> Path:
+        return absolute_path(value)
+
+
+class ExecutionStartReply(_Model):
+    """Admission or refusal only; actual completion is inspected through durable facts."""
+
+    request_id: UUID
+    identity: UUID | None = None
+    admission: ExecutionAdmission | None = None
+    error: Failure | None = None
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        if (self.admission is None) == (self.error is None):
+            raise ValueError("Start replies require exactly one admission or failure.")
+        if self.admission is not None and (
+            self.identity is None or self.admission.request_id != self.request_id
+        ):
+            raise ValueError("Admission replies require matching identity and correlation.")
+        return self
+
+
 class AuthorityStore(Protocol):
     def authority(self, operation: AuthorityOperation, *, deadline: float) -> AuthorityResult: ...
+
+
+class ProposalRequestScope(_Model):
+    """Facts lookup identity, never preparation or launch permission."""
+
+    request_id: UUID
+    project_id: UUID
+    canonical_root: Path
+    owner_instance_id: UUID
+
+    @field_validator("canonical_root")
+    @classmethod
+    def root(cls, value: Path) -> Path:
+        return absolute_path(value)
+
+
+class ProposalLookupStore(Protocol):
+    def lookup_proposal(
+        self, scope: ProposalRequestScope, *, deadline: float
+    ) -> AuthorityRecord | None: ...
 
 
 class DockerTargetDeclaration(_Model):
@@ -598,6 +682,42 @@ class DockerCLIIdentity(_Model):
     @classmethod
     def canonical_path(cls, value: Path) -> Path:
         return absolute_path(value)
+
+
+class DockerBackendConfiguration(_Model):
+    """Explicit installation-private declaration, not verification or authority.
+
+    Construction is cold: paths/identity/defaults must be supplied, never discovered.
+    Actual ownership, permissions and binary/engine identity remain adapter checks.
+    This standalone contract does not extend legacy settings or enable execution.
+    """
+
+    binary: DockerCLIIdentity
+    config: Path
+    declarations: tuple[DockerTargetDeclaration, ...] = Field(min_length=1, max_length=16)
+
+    @field_validator("config")
+    @classmethod
+    def config_path(cls, value: Path) -> Path:
+        return absolute_path(value)
+
+    @model_validator(mode="after")
+    def explicit_and_bounded(self) -> Self:
+        if (
+            self.config == self.binary.path
+            or self.config in self.binary.path.parents
+            or self.binary.path in self.config.parents
+        ):
+            raise ValueError("Private CLI and configuration paths must not overlap.")
+        identities = [(d.profile.project_id, d.profile.name) for d in self.declarations]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Duplicate backend project/profile declaration.")
+        fingerprint(self.model_dump(mode="json"))
+        return self
+
+    @property
+    def fingerprint(self) -> str:
+        return fingerprint(self.model_dump(mode="json"))
 
 
 class VerifiedDockerTarget(_Model):
@@ -765,6 +885,7 @@ class DockerBackendFault(Exception):
             "docker_policy_mismatch",
             "docker_mutation_unconfirmed",
             "docker_journal_unconfirmed",
+            "docker_home_capacity",
         ],
         *,
         diagnostics: DockerFailureFacts | None = None,
@@ -827,6 +948,31 @@ class PreparedInputFault(Exception):
     ) -> None:
         self.code = code
         super().__init__(code)
+
+
+def canonical_prepared_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Pure shared lexical validation, before source access or proposal replay."""
+    if len(paths) > PREPARED_FILE_LIMIT:
+        raise PreparedInputFault("input_limit")
+    placeholders = tuple(PreparedFile(path=p, size=0, sha256="0" * 64) for p in sorted(paths))
+    _ = PreparedInputs(files=placeholders).digest
+    nodes: dict[tuple[str, ...], tuple[str, ...]] = {}
+    leaves: set[tuple[str, ...]] = set()
+    for item in placeholders:
+        parts = PurePosixPath(item.path).parts
+        for index in range(1, len(parts) + 1):
+            literal = parts[:index]
+            key = tuple(unicodedata.normalize("NFC", p).casefold() for p in literal)
+            if key in nodes and nodes[key] != literal:
+                raise PreparedInputFault("input_invalid")
+            if index < len(parts) and key in leaves:
+                raise PreparedInputFault("input_invalid")
+            nodes[key] = literal
+        key = tuple(unicodedata.normalize("NFC", p).casefold() for p in parts)
+        if any(len(old) > len(key) and old[: len(key)] == key for old in nodes):
+            raise PreparedInputFault("input_invalid")
+        leaves.add(key)
+    return tuple(item.path for item in placeholders)
 
 
 class PreparedInputPreparer(Protocol):
@@ -1215,3 +1361,314 @@ class DockerLifecycleBackend(Protocol):
     def kill(self, endpoint: str, container_id: str, *, deadline: float) -> None: ...
     def remove(self, endpoint: str, container_id: str, *, deadline: float) -> None: ...
     def absent(self, endpoint: str, container_id: str, *, deadline: float) -> bool: ...
+
+
+class ExecutionStarter(Protocol):
+    """Owned-worker seam, not a callable endpoint or a caller-lifetime executor."""
+
+    def start(
+        self,
+        directory: Path,
+        approval_id: UUID,
+        expected_manifest_digest: str,
+        *,
+        request_id: UUID,
+        admission_deadline: float,
+        on_admitted: Callable[[ExecutionAdmission], None],
+    ) -> DockerExecutionResult | AuthorityRecord: ...
+
+
+FreshExecutionOperation = Literal["propose", "approve", "deny", "start", "show", "logs"]
+
+
+class FreshExecutionCall(_Model):
+    """Public intent only; no current proof, backend settings or launch authority."""
+
+    authority_kind: Literal["execution_v1"] = "execution_v1"
+    request_id: UUID
+    directory: Path
+    operation: FreshExecutionOperation
+    profile_name: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{0,31}$")
+    argv: tuple[str, ...] = Field(default=(), max_length=ARGV_COUNT)
+    paths: tuple[str, ...] = Field(default=(), max_length=PREPARED_FILE_LIMIT)
+    approval_id: UUID | None = None
+    reviewed_manifest_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("directory")
+    @classmethod
+    def root(cls, value: Path) -> Path:
+        return absolute_path(value)
+
+    @model_validator(mode="after")
+    def shape(self) -> Self:
+        if self.operation == "propose":
+            if (
+                self.profile_name is None
+                or not self.argv
+                or self.approval_id is not None
+                or self.reviewed_manifest_digest is not None
+            ):
+                raise ValueError("Proposals require only a profile, literal argv and inputs.")
+            for argument in self.argv:
+                public_text(argument, ARGV_BYTES)
+            try:
+                canonical_prepared_paths(self.paths)
+            except PreparedInputFault:
+                raise ValueError("Invalid literal input inventory.") from None
+        elif self.profile_name is not None or self.argv or self.paths or self.approval_id is None:
+            raise ValueError(
+                "Targeted operations require approval identity without new action inputs."
+            )
+        if (self.operation in {"approve", "deny", "start"}) != (
+            self.reviewed_manifest_digest is not None
+        ):
+            raise ValueError("Decisions and starts require the exact reviewed digest only.")
+        fingerprint(self.model_dump(mode="json"))
+        return self
+
+
+class FreshExecutionView(_Model):
+    """Original reviewable facts, excluding private claim/owner/controller identities."""
+
+    authority_kind: Literal["execution_v1"] = "execution_v1"
+    proposal_id: UUID
+    approval_id: UUID
+    job_id: UUID
+    project_id: UUID
+    canonical_root: Path
+    manifest: ExecutionManifest
+    manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    state: AuthorityState
+    created_at_ms: StrictInt = Field(ge=0)
+    expires_at_ms: StrictInt = Field(ge=0)
+    claim_state: Literal["claimed", "unknown", "finished"] | None = None
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        if (
+            self.manifest_digest != self.manifest.fingerprint
+            or self.project_id != self.manifest.profile.project_id
+            or self.canonical_root != self.manifest.profile.canonical_root
+            or self.expires_at_ms < self.created_at_ms
+            or (self.state == AuthorityState.CONSUMED) != (self.claim_state is not None)
+        ):
+            raise ValueError("Inconsistent original execution facts.")
+        return self
+
+    @classmethod
+    def from_record(cls, record: AuthorityRecord) -> Self:
+        return cls.model_validate(
+            {
+                name: getattr(record, name)
+                for name in (
+                    "proposal_id",
+                    "approval_id",
+                    "job_id",
+                    "project_id",
+                    "canonical_root",
+                    "manifest",
+                    "manifest_digest",
+                    "state",
+                    "created_at_ms",
+                    "expires_at_ms",
+                    "claim_state",
+                )
+            }
+        )
+
+
+class FreshExecutionCompletion(_Model):
+    """Durable result projection without owned handles or host/container identifiers."""
+
+    disposition: Literal["completed", "quarantined"]
+    outcome: DockerJobOutcome
+    output_facts: DockerOutputFacts
+    payload_state: Literal["retained", "retired", "expired", "clock_unconfirmed"]
+    retirement_reason: Literal["age", "capacity"] | None = None
+    recorded_at_ms: StrictInt = Field(ge=0)
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        if (self.payload_state == "retired") != (self.retirement_reason is not None):
+            raise ValueError("Inconsistent payload retirement facts.")
+        if self.disposition == "completed" and (
+            self.outcome.outcome_unknown
+            or self.outcome.timed_out
+            or not self.outcome.cleanup_verified
+            or self.outcome.exit_code is None
+            or self.output_facts.aborted
+            or not (self.output_facts.stdout_eof and self.output_facts.stderr_eof)
+        ):
+            raise ValueError("Unconfirmed completion cannot be called completed.")
+        return self
+
+
+class FreshExecutionReply(_Model):
+    authority_kind: Literal["execution_v1"] = "execution_v1"
+    request_id: UUID
+    operation: FreshExecutionOperation
+    identity: UUID | None = None
+    ok: StrictBool
+    view: FreshExecutionView | None = None
+    admission: ExecutionAdmission | None = None
+    completion: FreshExecutionCompletion | None = None
+    completion_state: (
+        Literal["not_claimed", "claim_only", "launch_without_result", "recorded"] | None
+    ) = None
+    output: DockerOutputSnapshot | None = None
+    error: Failure | None = None
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        if self.ok != (self.error is None):
+            raise ValueError("Success and failure disagree.")
+        if not self.ok:
+            if any(
+                value is not None
+                for value in (
+                    self.view,
+                    self.admission,
+                    self.completion,
+                    self.completion_state,
+                    self.output,
+                )
+            ):
+                raise ValueError("Refusals cannot carry success facts.")
+        elif self.identity is None:
+            raise ValueError("Success requires authenticated instance correlation.")
+        elif self.operation == "start":
+            if (
+                self.admission is None
+                or self.admission.request_id != self.request_id
+                or any(
+                    value is not None
+                    for value in (self.view, self.completion, self.completion_state, self.output)
+                )
+            ):
+                raise ValueError("Start acknowledges only the matching committed claim.")
+        elif self.view is None or self.admission is not None:
+            raise ValueError("Non-start success requires original scoped facts.")
+        if (
+            self.completion is not None or self.completion_state is not None
+        ) and self.operation not in {"show", "logs"}:
+            raise ValueError("Completion is inspection only.")
+        if self.ok and self.operation in {"show", "logs"}:
+            if self.completion_state is None or (self.completion_state == "recorded") != (
+                self.completion is not None
+            ):
+                raise ValueError("Inspection requires explicit consistent completion availability.")
+            assert self.view is not None
+            if self.completion is not None:
+                expected = "finished" if self.completion.disposition == "completed" else "unknown"
+                if self.view.claim_state != expected:
+                    raise ValueError("Inspection authority and completion disagree.")
+            elif self.view.claim_state == "finished" or (
+                self.completion_state == "not_claimed"
+            ) != (self.view.claim_state is None):
+                raise ValueError("Inconsistent absent completion facts.")
+            if (
+                self.operation == "logs"
+                and self.completion is not None
+                and (self.completion.payload_state == "retained") != (self.output is not None)
+            ):
+                raise ValueError("Log text must agree with explicit retention state.")
+        if self.output is not None:
+            if (
+                self.operation != "logs"
+                or self.completion is None
+                or self.completion.payload_state != "retained"
+            ):
+                raise ValueError("Only logs may carry retained guarded text.")
+            if (
+                DockerOutputFacts.model_validate(
+                    self.output.model_dump(exclude={"stdout", "stderr"})
+                )
+                != self.completion.output_facts
+            ):
+                raise ValueError("Guarded text disagrees with capture facts.")
+        return self
+
+
+def fresh_execution_failure(code: str) -> Failure:
+    messages = {
+        "execution_unavailable": "Fresh execution is not enabled for this runtime or scope.",
+        "execution_busy": "An owned execution or serialized action is still active.",
+        "execution_backend_unavailable": (
+            "Configured fresh backend failed identity/private-resource checks; it is disabled."
+        ),
+        "execution_backend_capacity": (
+            "Private backend generation capacity is full; no cleanup or reuse was attempted."
+        ),
+        "execution_conflict": "Request identity or reviewed action conflicts with stored facts.",
+        "execution_expired": "Approval expired or was invalidated; a fresh review is required.",
+        "execution_not_found": "No fresh execution record exists in this validated scope.",
+        "request_outcome_unknown": (
+            "Request outcome is unconfirmed; inspect original facts before another action."
+        ),
+        "execution_unconfirmed": (
+            "Fresh execution facts or outcome are unconfirmed; inspect before further action."
+        ),
+    }
+    aliases = {
+        "docker_busy": "execution_busy",
+        "docker_authority_required": "execution_unavailable",
+        "runtime_capability_unavailable": "execution_unavailable",
+        "storage_outcome_unconfirmed": "request_outcome_unknown",
+    }
+    safe = aliases.get(code, code)
+    if safe not in messages:
+        safe = "execution_unconfirmed"
+    return Failure(error=ErrorData(code=safe, message=messages[safe]))
+
+
+class FreshExecutionClient(Protocol):
+    def fresh(self, call: FreshExecutionCall) -> FreshExecutionReply: ...
+
+
+class FreshExecutionService(ExecutionStarter, Protocol):
+    def execute(self, call: FreshExecutionCall, deadline: float) -> FreshExecutionReply: ...
+
+
+class ExecutionInspectionScope(_Model):
+    project_id: UUID
+    canonical_root: Path
+    owner_instance_id: UUID
+    approval_id: UUID
+
+    @field_validator("canonical_root")
+    @classmethod
+    def root(cls, value: Path) -> Path:
+        return absolute_path(value)
+
+
+class ExecutionInspection(_Model):
+    record: AuthorityRecord
+    completion_state: Literal["not_claimed", "claim_only", "launch_without_result", "recorded"]
+    result: DockerExecutionResult | None = None
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        if (self.completion_state == "not_claimed") != (self.record.claim_id is None):
+            raise ValueError("Completion availability disagrees with claim facts.")
+        if (self.completion_state == "recorded") != (self.result is not None):
+            raise ValueError("Inconsistent completion availability.")
+        if self.result is not None:
+            original = self.result.owned.intent.record
+            if (original.claim_id, original.approval_id, original.manifest_digest) != (
+                self.record.claim_id,
+                self.record.approval_id,
+                self.record.manifest_digest,
+            ):
+                raise ValueError("Completion belongs to different authority.")
+            expected = "finished" if self.result.disposition == "completed" else "unknown"
+            if self.record.claim_state != expected:
+                raise ValueError("Authority and result disagree.")
+        elif self.record.claim_state == "finished":
+            raise ValueError("Finished authority requires a confirmed result.")
+        return self
+
+
+class ExecutionResultReader(Protocol):
+    def inspect_execution(
+        self, scope: ExecutionInspectionScope, *, deadline: float
+    ) -> ExecutionInspection: ...

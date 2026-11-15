@@ -29,6 +29,7 @@ from jeff.application.dispatch import (
     EvidenceReply,
     EvidenceRequest,
     ExecutionRequest,
+    FreshExecutionRequest,
     ProjectCall,
     ProjectRequest,
     ProjectStatusService,
@@ -37,12 +38,18 @@ from jeff.application.dispatch import (
     ReceiptReply,
     ReceiptRequest,
     StreamFrame,
-    StreamReply,
     SubscriptionQuery,
     SubscriptionRequest,
     dispatch_failure,
 )
-from jeff.application.execution import ExecutionCall, ExecutionReply, execution_failure
+from jeff.application.execution import (
+    ExecutionCall,
+    ExecutionReply,
+    FreshExecutionCall,
+    FreshExecutionReply,
+    execution_failure,
+    fresh_execution_failure,
+)
 from jeff.application.history import StreamCursor
 from jeff.application.projects import Failure
 from jeff.application.runtime import (
@@ -75,6 +82,7 @@ class RpcRequest(
             | ReceiptRequest
             | EvidenceRequest
             | ExecutionRequest
+            | FreshExecutionRequest
             | SubscriptionRequest,
             Field(discriminator="kind"),
         ]
@@ -541,6 +549,73 @@ class RuntimeProjectClient:
             connection.connection.close()
             raise
 
+    def fresh(self, call: FreshExecutionCall) -> FreshExecutionReply:
+        deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
+
+        def refused(error: Failure, identity: UUID | None = None) -> FreshExecutionReply:
+            return FreshExecutionReply(
+                ok=False,
+                request_id=call.request_id,
+                operation=call.operation,
+                identity=identity,
+                error=error,
+            )
+
+        try:
+            encode_message(
+                FreshExecutionRequest(call=call, expected_instance_id=UUID(int=0)).model_dump(
+                    mode="json"
+                ),
+                DEFAULT_RUNTIME_LIMITS.request_bytes,
+            )
+        except ControlFault:
+            return refused(fresh_execution_failure("execution_unconfirmed"))
+        try:
+            with self._connect(deadline) as connection:
+                try:
+                    request = FreshExecutionRequest(
+                        call=call,
+                        expected_instance_id=connection.identity.instance_id,
+                        remaining_ms=max(1, int(_remaining(deadline) * 1000)),
+                    )
+                    reply = self._exchange(connection, request, FreshExecutionReply)
+                    if (
+                        reply.request_id != call.request_id
+                        or reply.identity != connection.identity.instance_id
+                        or reply.operation != call.operation
+                    ):
+                        raise ControlFault("runtime_ownership_unconfirmed")
+                    if reply.admission is not None and (
+                        reply.admission.approval_id != call.approval_id
+                        or reply.admission.manifest_digest != call.reviewed_manifest_digest
+                    ):
+                        raise ControlFault("runtime_ownership_unconfirmed")
+                    if reply.view is not None:
+                        if (
+                            call.approval_id is not None
+                            and reply.view.approval_id != call.approval_id
+                        ):
+                            raise ControlFault("runtime_ownership_unconfirmed")
+                        if (
+                            call.reviewed_manifest_digest is not None
+                            and reply.view.manifest_digest != call.reviewed_manifest_digest
+                        ):
+                            raise ControlFault("runtime_ownership_unconfirmed")
+                        if call.operation == "propose" and (
+                            reply.view.manifest.profile.name != call.profile_name
+                            or reply.view.manifest.argv != call.argv
+                            or tuple(item.path for item in reply.view.manifest.inputs.files)
+                            != tuple(sorted(call.paths))
+                        ):
+                            raise ControlFault("runtime_ownership_unconfirmed")
+                    return reply
+                except (OSError, ControlFault):
+                    return refused(
+                        dispatch_failure("request_outcome_unknown"), connection.identity.instance_id
+                    )
+        except ControlFault as error:
+            return refused(control_failure(error.code))
+
     def review(self, call: ExecutionCall) -> ExecutionReply:
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
         try:
@@ -706,7 +781,14 @@ class ControlServer:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Verify the kernel peer before secrets, then decode one bounded request."""
         project_slot = False
-        response: ControlResponse | DispatchReply | ReceiptReply | EvidenceReply | ExecutionReply
+        response: (
+            ControlResponse
+            | DispatchReply
+            | ReceiptReply
+            | EvidenceReply
+            | ExecutionReply
+            | FreshExecutionReply
+        )
         try:
             uid, _ = peer_identity(cast(socket.socket, writer.get_extra_info("socket")))
             if uid != self.owner.store.layout.uid:
@@ -789,7 +871,14 @@ class ControlServer:
                 )
                 return
             if isinstance(
-                request, (ProjectRequest, ReceiptRequest, EvidenceRequest, ExecutionRequest)
+                request,
+                (
+                    ProjectRequest,
+                    ReceiptRequest,
+                    EvidenceRequest,
+                    ExecutionRequest,
+                    FreshExecutionRequest,
+                ),
             ):
                 if self._project_connections >= DEFAULT_RUNTIME_LIMITS.connections - 1:
                     response = self._project_refusal(request, busy=True)
@@ -834,6 +923,11 @@ class ControlServer:
                             if self.dispatcher is not None and self.dispatcher.execution is not None
                             else ()
                         ),
+                        *(
+                            ("execution.v1",)
+                            if self.dispatcher is not None and self.dispatcher.fresh is not None
+                            else ()
+                        ),
                     )
                     if not self.stopping
                     and storage.state == "ready"
@@ -864,14 +958,26 @@ class ControlServer:
 
     def _project_refusal(
         self,
-        request: ProjectRequest | ReceiptRequest | EvidenceRequest | ExecutionRequest,
+        request: ProjectRequest
+        | ReceiptRequest
+        | EvidenceRequest
+        | ExecutionRequest
+        | FreshExecutionRequest,
         *,
         busy: bool = False,
         unknown: bool = False,
-    ) -> DispatchReply | ReceiptReply | EvidenceReply | ExecutionReply:
+    ) -> DispatchReply | ReceiptReply | EvidenceReply | ExecutionReply | FreshExecutionReply:
         error = dispatch_failure(
             "request_outcome_unknown" if unknown else "runtime_busy" if busy else "runtime_stopping"
         )
+        if isinstance(request, FreshExecutionRequest):
+            return FreshExecutionReply(
+                ok=False,
+                request_id=request.call.request_id,
+                operation=request.call.operation,
+                identity=self.identity.instance_id,
+                error=error,
+            )
         if isinstance(request, ExecutionRequest):
             return ExecutionReply(
                 request_id=request.call.request_id, identity=self.identity.instance_id, result=error
@@ -894,9 +1000,13 @@ class ControlServer:
 
     async def _project(
         self,
-        request: ProjectRequest | ReceiptRequest | EvidenceRequest | ExecutionRequest,
+        request: ProjectRequest
+        | ReceiptRequest
+        | EvidenceRequest
+        | ExecutionRequest
+        | FreshExecutionRequest,
         began: float,
-    ) -> DispatchReply | ReceiptReply | EvidenceReply | ExecutionReply:
+    ) -> DispatchReply | ReceiptReply | EvidenceReply | ExecutionReply | FreshExecutionReply:
         if request.expected_instance_id != self.identity.instance_id:
             error = self._project_refusal(request)
             failure = dispatch_failure("project_target_mismatch")
@@ -917,18 +1027,41 @@ class ControlServer:
         try:
             work = (
                 request.call
-                if isinstance(request, (ProjectRequest, ExecutionRequest))
+                if isinstance(request, (ProjectRequest, ExecutionRequest, FreshExecutionRequest))
                 else request.query
             )
             future = self.dispatcher.submit(work, deadline)
-        except ControlFault:
+        except ControlFault as error:
+            if (
+                isinstance(request, FreshExecutionRequest)
+                and error.code == "runtime_capability_unavailable"
+            ):
+                return FreshExecutionReply(
+                    ok=False,
+                    request_id=request.call.request_id,
+                    operation=request.call.operation,
+                    identity=self.identity.instance_id,
+                    error=self.dispatcher.fresh_issue or fresh_execution_failure(error.code),
+                )
             return self._project_refusal(request, busy=True)
         try:
             reply = await asyncio.wait_for(
                 asyncio.shield(asyncio.wrap_future(future)),
                 timeout=max(0, deadline - time.monotonic()),
             )
-            if isinstance(reply, StreamReply):
+            expected = (
+                FreshExecutionReply
+                if isinstance(request, FreshExecutionRequest)
+                else ExecutionReply
+                if isinstance(request, ExecutionRequest)
+                else DispatchReply
+                if isinstance(request, ProjectRequest)
+                else EvidenceReply
+                if isinstance(request, EvidenceRequest)
+                else ReceiptReply
+            )
+            if not isinstance(reply, expected):
+                # Fresh replies must never leak into the permanently review-only route.
                 raise ControlFault("runtime_protocol_error")
             return reply
         except TimeoutError:

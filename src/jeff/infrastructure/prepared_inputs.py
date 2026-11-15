@@ -26,9 +26,10 @@ from jeff.application.execution import (
     PreparedInputFault,
     PreparedInputs,
     absolute_path,
+    canonical_prepared_paths,
 )
 from jeff.application.runtime import ControlFault
-from jeff.domain.execution import PREPARED_FILE_BYTES, PREPARED_FILE_LIMIT, PREPARED_TOTAL_BYTES
+from jeff.domain.execution import PREPARED_FILE_BYTES, PREPARED_TOTAL_BYTES
 from jeff.domain.projects import Project
 from jeff.infrastructure.runtime_state import Ownership
 
@@ -149,6 +150,38 @@ class FilePreparedInputStore:
         checks.callback(self._entry_stable, pinned_parent, name, _identity(before), mode)
         return fd
 
+    def _make_directory(self, parent: int, name: str, *, exist_ok: bool = False) -> None:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent)
+        except FileExistsError:
+            if not exist_ok:
+                raise
+            return  # Existing entries are strictly checked, never permission-repaired.
+        before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or before.st_uid != self.uid
+            or stat.S_IMODE(before.st_mode) & ~0o700
+        ):
+            raise PreparedInputFault("input_unsafe")
+        fd = os.open(name, _DIR, dir_fd=parent)
+        try:
+            if _identity(os.fstat(fd)) != _identity(before):
+                raise PreparedInputFault("input_changed")
+            # Daemon umask0177 intentionally protects sockets/files but removes
+            # owner traversal from mkdir0700. Set only our freshly created inode.
+            os.fchmod(fd, 0o700)
+            after = os.fstat(fd)
+            if (
+                after.st_uid != self.uid
+                or stat.S_IMODE(after.st_mode) != 0o700
+                or _identity(after)
+                != _identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
+            ):
+                raise PreparedInputFault("input_changed")
+        finally:
+            self._close(fd)
+
     def _tree(
         self,
         root: int,
@@ -163,10 +196,7 @@ class FilePreparedInputStore:
         for name in parts:
             _deadline(deadline)
             if create:
-                try:
-                    os.mkdir(name, 0o700, dir_fd=fd)
-                except FileExistsError:
-                    pass
+                self._make_directory(fd, name, exist_ok=True)
             fd = self._directory(fd, name, mode, stack)
         return fd
 
@@ -212,10 +242,7 @@ class FilePreparedInputStore:
         self.owner.check()
         with self.owner.store.directory(self.data, create=False) as data, ExitStack() as stack:
             if create:
-                try:
-                    os.mkdir("jobs", 0o700, dir_fd=data)
-                except FileExistsError:
-                    pass
+                self._make_directory(data, "jobs", exist_ok=True)
             jobs = self._directory(data, "jobs", 0o700, stack)
             flags = os.O_RDWR | _FLAGS
             try:
@@ -275,27 +302,7 @@ class FilePreparedInputStore:
                     raise PreparedInputFault("input_capacity")
 
     def _literal_paths(self, paths: tuple[str, ...]) -> tuple[str, ...]:
-        if len(paths) > PREPARED_FILE_LIMIT:
-            raise PreparedInputFault("input_limit")
-        placeholders = tuple(PreparedFile(path=p, size=0, sha256="0" * 64) for p in sorted(paths))
-        _ = PreparedInputs(files=placeholders).digest  # Bound inventory before source opens.
-        nodes: dict[tuple[str, ...], tuple[str, ...]] = {}
-        leaves: set[tuple[str, ...]] = set()
-        for item in placeholders:
-            parts = PurePosixPath(item.path).parts
-            for index in range(1, len(parts) + 1):
-                literal = parts[:index]
-                key = tuple(unicodedata.normalize("NFC", p).casefold() for p in literal)
-                if key in nodes and nodes[key] != literal:
-                    raise PreparedInputFault("input_invalid")
-                if index < len(parts) and key in leaves:
-                    raise PreparedInputFault("input_invalid")
-                nodes[key] = literal
-            key = tuple(unicodedata.normalize("NFC", p).casefold() for p in parts)
-            if any(len(old) > len(key) and old[: len(key)] == key for old in nodes):
-                raise PreparedInputFault("input_invalid")
-            leaves.add(key)
-        return tuple(item.path for item in placeholders)
+        return canonical_prepared_paths(paths)
 
     def _regular(self, info: os.stat_result, mode: int | None, limit: int) -> None:
         if (
@@ -460,13 +467,11 @@ class FilePreparedInputStore:
                                 total += info.st_size
                                 if total > PREPARED_TOTAL_BYTES:
                                     raise PreparedInputFault("input_limit")
-                        os.mkdir(
-                            str(identifier), 0o700, dir_fd=jobs
-                        )  # Exclusive UUID; never retry/adopt a collision.
+                        self._make_directory(jobs, str(identifier))  # Exclusive UUID; no adoption.
                         snapshot = self._directory(
                             jobs, str(identifier), 0o700, retained, postchecks=postchecks
                         )
-                        os.mkdir("input", 0o700, dir_fd=snapshot)
+                        self._make_directory(snapshot, "input")
                         view = self._directory(
                             snapshot, "input", None, retained, postchecks=postchecks
                         )

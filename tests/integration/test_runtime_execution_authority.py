@@ -1,5 +1,6 @@
 """Fresh internal authority through real SQLite; no Docker or input-verification claims."""
 
+import json
 import os
 import sqlite3
 import time
@@ -14,6 +15,7 @@ import pytest
 from jeff.application.execution import (
     ActionManifest,
     AuthorityOperation,
+    DockerBackendConfiguration,
     DockerBackendFault,
     DockerCLIIdentity,
     DockerCompletion,
@@ -22,6 +24,7 @@ from jeff.application.execution import (
     DockerLaunchIntent,
     DockerLaunchScope,
     DockerOwnedContainer,
+    DockerTargetDeclaration,
     ExecutionCall,
     ExecutionManifest,
     ExecutionProfile,
@@ -34,9 +37,104 @@ from jeff.application.execution import (
 from jeff.application.runtime import RuntimeLayout
 from jeff.application.storage import StorageFault
 from jeff.domain.projects import Project
+from jeff.infrastructure.runtime_diagnostics import RuntimeDiagnosticsAdapter
 from jeff.infrastructure.runtime_output import GuardedOutputCollector
+from jeff.infrastructure.runtime_settings import load_or_create_settings
 from jeff.infrastructure.runtime_state import RuntimeStateStore, _RecoveryPermit
 from jeff.infrastructure.runtime_storage import SQLiteStorage
+
+
+def test_settings3_backend_cache_requires_ready_and_stopped_doctor_stays_cold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jeff.infrastructure import docker_cli
+
+    def no_backend(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Settings loading must not construct a Docker adapter")
+
+    monkeypatch.setattr(docker_cli.DockerTargetInspector, "__init__", no_backend)
+    monkeypatch.setattr(docker_cli.DockerLifecycleCLI, "__init__", no_backend)
+    for kind in ("configured", "disabled", "failed_database", "legacy"):
+        root = tmp_path / kind[0]  # Keep synthetic native socket paths below the existing bound.
+        layout = RuntimeLayout(data_dir=root / "d", runtime_dir=root / "r", uid=os.geteuid())
+        owner = RuntimeStateStore(layout).acquire(create=True)
+        assert owner is not None
+        profile = ExecutionProfile(
+            project_id=uuid4(),
+            canonical_root=root / "project",
+            name="python",
+            engine_id="synthetic-no-query",
+            endpoint="unix:///synthetic/nonexistent.sock",
+            image_id="sha256:" + "1" * 64,
+            platform="linux/arm64",
+            toolchain="synthetic",
+            executable="/usr/local/bin/python",
+        )
+        backend = DockerBackendConfiguration(
+            binary=DockerCLIIdentity(path=Path("/synthetic/missing-cli"), sha256="a" * 64, size=1),
+            config=Path("/synthetic/missing-config"),
+            declarations=(DockerTargetDeclaration(profile=profile),),
+        )
+        value = {
+            "schema_version": 3,
+            "history": {"retention_days": 30},
+            "execution": {"profiles": [profile.model_dump(mode="json")]},
+            "backend": None if kind == "disabled" else backend.model_dump(mode="json"),
+        }
+        if kind == "legacy":
+            value.pop("backend")
+            value["schema_version"] = 2
+        payload = json.dumps(value).encode()
+        with owner:
+            owner.store.credential(owner)
+            load_or_create_settings(owner)
+            layout.settings.write_bytes(payload)
+            if kind == "failed_database":
+                layout.database.write_bytes(b"SYNTHETIC_NON_DATABASE")
+                layout.database.chmod(0o600)
+            storage = SQLiteStorage(owner, instance_id=uuid4())
+            assert storage.execution_backend is None
+            storage.start()
+            try:
+                state = storage.wait_ready(5)
+                if kind == "failed_database":
+                    assert state.state == "failed" and storage.execution_backend is None
+                else:
+                    assert state.state == "ready"
+                    expected = backend if kind == "configured" else None
+                    assert storage.execution_backend == expected
+                    # No hot reload or backend construction: paths are nonexistent.
+                    if kind != "legacy":
+                        layout.settings.write_bytes(json.dumps({**value, "backend": None}).encode())
+                    assert storage.execution_backend == expected
+                    layout.settings.write_bytes(payload)
+                storage.request_close()
+                assert storage.execution_backend is None
+            finally:
+                storage.close(timeout=5)
+            assert storage.closed and storage.execution_backend is None
+            assert layout.settings.read_bytes() == payload
+        if kind != "failed_database":
+            before = layout.settings.stat()
+
+            def selected(current: RuntimeLayout = layout) -> RuntimeLayout:
+                return current
+
+            result = RuntimeDiagnosticsAdapter(selected).inspect()
+            assert (
+                result.ok
+                and result.data.summary == "stopped"
+                and result.data.settings_schema_version == (2 if kind == "legacy" else 3)
+            )
+            assert "synthetic/missing" not in result.model_dump_json()
+            after = layout.settings.stat()
+            assert (before.st_ino, before.st_mtime_ns, before.st_size) == (
+                after.st_ino,
+                after.st_mtime_ns,
+                after.st_size,
+            )
+            assert layout.settings.read_bytes() == payload
 
 
 @contextmanager

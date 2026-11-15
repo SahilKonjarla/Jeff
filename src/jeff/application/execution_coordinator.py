@@ -1,4 +1,4 @@
-"""Trusted internal fresh execution interface. No public routing or implicit approval.
+"""Verified fresh execution use cases behind explicit routing; no implicit approval.
 
 Calls are synchronous and serialized without queueing. Job deadline permits explicit
 owned cleanup≤10s and completion≤5s afterward; filesystem cancellation is cooperative.
@@ -16,6 +16,7 @@ from uuid import UUID
 from jeff.application.execution import (
     AuthorityOperation,
     AuthorityRecord,
+    AuthorityResult,
     AuthorityStore,
     DockerBackendFault,
     DockerCompletionStore,
@@ -24,14 +25,25 @@ from jeff.application.execution import (
     DockerOutputCapture,
     DockerTargetDeclaration,
     DockerTargetVerifier,
+    ExecutionAdmission,
+    ExecutionInspectionScope,
     ExecutionManifest,
     ExecutionProfile,
+    ExecutionResultReader,
+    FreshExecutionCall,
+    FreshExecutionCompletion,
+    FreshExecutionReply,
+    FreshExecutionView,
     PreparedInputFault,
     PreparedInputPreparer,
     PreparedInputs,
     PreparedInputVerifier,
+    ProposalLookupStore,
+    ProposalRequestScope,
     ReviewFault,
     absolute_path,
+    canonical_prepared_paths,
+    fresh_execution_failure,
 )
 from jeff.application.projects import ProjectService
 from jeff.application.storage import ProjectRegistry, StorageFault
@@ -55,11 +67,15 @@ class ExecutionCoordinator:
         profiles: Callable[[], tuple[ExecutionProfile, ...]],
         declarations: tuple[DockerTargetDeclaration, ...],
         instance_id: UUID,
+        proposal_lookup: ProposalLookupStore | None = None,
+        inspection: ExecutionResultReader | None = None,
     ) -> None:
         self.projects, self.registry, self.authority = projects, registry, authority
         self.preparer, self.inputs, self.verifier = preparer, inputs, verifier
         self.controller, self.results, self.capture = controller, results, capture
         self.profiles, self.declarations, self.instance_id = profiles, declarations, instance_id
+        self.proposal_lookup = proposal_lookup
+        self.inspection = inspection
         self._mutex = threading.Lock()
 
     @staticmethod
@@ -163,6 +179,91 @@ class ExecutionCoordinator:
         self._deadline(deadline)
         return declaration
 
+    def execute(self, call: FreshExecutionCall, deadline: float) -> FreshExecutionReply:
+        """Public intent gateway. Starts must use the existing owned-worker observer seam."""
+        try:
+            self._deadline(deadline)
+            if call.operation == "propose":
+                assert call.profile_name is not None
+                record = self.propose(
+                    call.directory,
+                    call.profile_name,
+                    call.argv,
+                    call.paths,
+                    request_id=call.request_id,
+                    deadline=deadline,
+                )
+            elif call.operation in {"approve", "deny"}:
+                assert call.approval_id is not None and call.reviewed_manifest_digest is not None
+                record = self.decide(
+                    call.directory,
+                    call.approval_id,
+                    call.reviewed_manifest_digest,
+                    approve=call.operation == "approve",
+                    request_id=call.request_id,
+                    deadline=deadline,
+                )
+            elif call.operation in {"show", "logs"}:
+                if self.inspection is None:
+                    raise DockerBackendFault("docker_authority_required")
+                assert call.approval_id is not None
+                project = self._project(call.directory, deadline)
+                observed = self.inspection.inspect_execution(
+                    ExecutionInspectionScope(
+                        project_id=project.project_id,
+                        canonical_root=project.root,
+                        owner_instance_id=self.instance_id,
+                        approval_id=call.approval_id,
+                    ),
+                    deadline=deadline,
+                )
+                record = observed.record
+                result = observed.result
+                completion = (
+                    None
+                    if result is None
+                    else FreshExecutionCompletion(
+                        disposition=result.disposition,
+                        outcome=result.outcome,
+                        output_facts=result.output_facts,
+                        payload_state=result.payload_state,
+                        retirement_reason=result.retirement_reason,
+                        recorded_at_ms=result.recorded_at_ms,
+                    )
+                )
+                return FreshExecutionReply(
+                    ok=True,
+                    request_id=call.request_id,
+                    operation=call.operation,
+                    identity=self.instance_id,
+                    view=FreshExecutionView.from_record(record),
+                    completion=completion,
+                    completion_state=observed.completion_state,
+                    output=result.output
+                    if result is not None and call.operation == "logs"
+                    else None,
+                )
+            else:
+                raise DockerBackendFault("docker_authority_required")
+            return FreshExecutionReply(
+                ok=True,
+                request_id=call.request_id,
+                operation=call.operation,
+                identity=self.instance_id,
+                view=FreshExecutionView.from_record(record),
+            )
+        except (DockerBackendFault, PreparedInputFault, ReviewFault, StorageFault) as error:
+            failure = fresh_execution_failure(error.code)
+        except Exception:
+            failure = fresh_execution_failure("execution_unconfirmed")
+        return FreshExecutionReply(
+            ok=False,
+            request_id=call.request_id,
+            operation=call.operation,
+            identity=self.instance_id,
+            error=failure,
+        )
+
     def propose(
         self,
         directory: Path,
@@ -171,6 +272,7 @@ class ExecutionCoordinator:
         paths: tuple[str, ...],
         *,
         deadline: float,
+        request_id: UUID | None = None,
     ) -> AuthorityRecord:
         with self._active(deadline):
             project = self._project(directory, deadline)
@@ -178,6 +280,32 @@ class ExecutionCoordinator:
             # Validate public argv before allocating/copying a snapshot; dummy inventory
             # is never persisted or granted authority.
             ExecutionManifest(profile=profile, argv=argv, inputs=PreparedInputs())
+            if request_id is not None:
+                if self.proposal_lookup is None:
+                    raise DockerBackendFault("docker_authority_required")
+                try:
+                    paths = canonical_prepared_paths(paths)
+                except ValueError:
+                    raise PreparedInputFault("input_invalid") from None
+                prior = self.proposal_lookup.lookup_proposal(
+                    ProposalRequestScope(
+                        request_id=request_id,
+                        project_id=project.project_id,
+                        canonical_root=project.root,
+                        owner_instance_id=self.instance_id,
+                    ),
+                    deadline=deadline,
+                )
+                if prior is not None:
+                    if (
+                        prior.manifest.profile.name != profile_name
+                        or prior.manifest.argv != argv
+                        or tuple(item.path for item in prior.manifest.inputs.files) != paths
+                    ):
+                        raise ReviewFault("execution_conflict")
+                    # Replay original facts; refresh existing expiry without target
+                    # queries, source reads, another snapshot or launch authority.
+                    return self._load(project, prior.approval_id, prior.manifest_digest, deadline)
             declaration = self._declaration(profile)
             self._target(declaration, deadline)
             prepared = self.preparer.prepare(project, paths, deadline=deadline)
@@ -191,6 +319,7 @@ class ExecutionCoordinator:
                     operation="propose",
                     manifest=manifest,
                     current_manifest_digest=manifest.fingerprint,
+                    **({"request_id": request_id} if request_id is not None else {}),
                 ),
                 deadline=deadline,
             ).record
@@ -203,15 +332,19 @@ class ExecutionCoordinator:
         *,
         approve: bool,
         deadline: float,
+        request_id: UUID | None = None,
     ) -> AuthorityRecord:
         with self._active(deadline):
             if type(approve) is not bool:
                 raise DockerBackendFault("docker_policy_mismatch")
             project = self._project(directory, deadline)
             record = self._load(project, approval_id, expected_manifest_digest, deadline)
-            if record.state not in (AuthorityState.PENDING, AuthorityState.APPROVED):
+            if (
+                record.state not in (AuthorityState.PENDING, AuthorityState.APPROVED)
+                and request_id is None
+            ):
                 raise DockerBackendFault("docker_authority_required")
-            if approve:
+            if approve and record.state in (AuthorityState.PENDING, AuthorityState.APPROVED):
                 self._checked(project, record, deadline)
             return self.authority.authority(
                 self._operation(
@@ -219,9 +352,131 @@ class ExecutionCoordinator:
                     operation="approve" if approve else "deny",
                     approval_id=approval_id,
                     current_manifest_digest=record.manifest.fingerprint if approve else None,
+                    **({"request_id": request_id} if request_id is not None else {}),
                 ),
                 deadline=deadline,
             ).record
+
+    def _execute_claim(
+        self,
+        claim: AuthorityResult,
+        declaration: DockerTargetDeclaration,
+        capture: DockerOutputCapture,
+        job_deadline: float,
+        cleanup_deadline: float,
+    ) -> DockerExecutionResult:
+        # Only the local first confirmed response reaches this mutation path.
+        handle = self.controller.create(
+            claim, declaration, deadline=job_deadline, cleanup_deadline=cleanup_deadline
+        )
+        try:
+            self.controller.run(
+                handle, capture, deadline=job_deadline, cleanup_deadline=cleanup_deadline
+            )
+        except Exception:
+            if not self.controller.terminate_remove_owned(handle, deadline=cleanup_deadline):
+                raise DockerBackendFault("docker_mutation_unconfirmed") from None
+            raise
+        return self.controller.complete(
+            handle,
+            capture,
+            self.results,
+            deadline=min(time.monotonic() + 5, job_deadline + 15),
+        )
+
+    def start(
+        self,
+        directory: Path,
+        approval_id: UUID,
+        expected_manifest_digest: str,
+        *,
+        request_id: UUID,
+        admission_deadline: float,
+        on_admitted: Callable[[ExecutionAdmission], None],
+    ) -> DockerExecutionResult | AuthorityRecord:
+        """Owned-worker entry: acknowledge a committed claim, then continue locally.
+
+        The observer receives no permission. Its failure cannot cancel admitted
+        work. This method remains synchronous for its owning worker; no thread,
+        queue, RPC handler or automatic retry is created here. Replays return facts.
+        """
+        with self._active(admission_deadline):
+            if not callable(on_admitted):
+                raise DockerBackendFault("docker_authority_required")
+            project = self._project(directory, admission_deadline)
+            record = self._load(project, approval_id, expected_manifest_digest, admission_deadline)
+            if record.state not in (AuthorityState.APPROVED, AuthorityState.CONSUMED):
+                raise DockerBackendFault("docker_authority_required")
+            capture: DockerOutputCapture | None = None
+            try:
+                job_deadline = time.monotonic() + record.manifest.profile.timeout_seconds
+                claim_deadline = min(admission_deadline, job_deadline)
+                declaration: DockerTargetDeclaration | None = None
+                if record.state == AuthorityState.APPROVED:
+                    declaration = self._checked(project, record, claim_deadline)
+                    capture = self.capture(record.manifest.profile.output_bytes)
+                    if (
+                        type(capture.retention_limit) is not int
+                        or capture.retention_limit != record.manifest.profile.output_bytes
+                    ):
+                        raise DockerBackendFault("docker_unsafe_configuration")
+                claim = self.authority.authority(
+                    self._operation(
+                        project,
+                        operation="claim",
+                        request_id=request_id,
+                        approval_id=approval_id,
+                        current_manifest_digest=record.manifest.fingerprint,
+                    ),
+                    deadline=claim_deadline,
+                )
+                if (
+                    claim.record.approval_id != record.approval_id
+                    or claim.record.manifest != record.manifest
+                    or claim.record.owner_instance_id != self.instance_id
+                    or claim.record.state != AuthorityState.CONSUMED
+                ):
+                    raise DockerBackendFault("docker_authority_required")
+                replayed = claim.launch_claim is None
+                if not replayed and (
+                    declaration is None
+                    or capture is None
+                    or claim.launch_claim != claim.record.claim_id
+                    or claim.record.claim_state != "claimed"
+                ):
+                    raise DockerBackendFault("docker_authority_required")
+                observation = ExecutionAdmission.model_validate(
+                    {
+                        "request_id": request_id,
+                        "project_id": project.project_id,
+                        "canonical_root": project.root,
+                        "approval_id": claim.record.approval_id,
+                        "job_id": claim.record.job_id,
+                        "manifest_digest": claim.record.manifest_digest,
+                        "claim_state": claim.record.claim_state,
+                        "replayed": replayed,
+                    }
+                )
+                try:
+                    on_admitted(observation)
+                except Exception:
+                    pass  # Observer delivery is not worker ownership or cancellation.
+                if replayed:
+                    if capture is not None:
+                        capture.seal(abort=True)
+                    return claim.record
+                if capture is None or declaration is None:
+                    raise DockerBackendFault("docker_authority_required")
+                return self._execute_claim(
+                    claim, declaration, capture, job_deadline, job_deadline + 10
+                )
+            except Exception:
+                if capture is not None:
+                    try:
+                        capture.seal(abort=True)
+                    except Exception:
+                        pass
+                raise
 
     def run(
         self, directory: Path, approval_id: UUID, expected_manifest_digest: str, *, deadline: float
@@ -260,26 +515,8 @@ class ExecutionCoordinator:
                 if claim.launch_claim is None:
                     raise DockerBackendFault("docker_authority_required")
                 # Never cache/return the ephemeral first-response launch permission.
-                handle = self.controller.create(
-                    claim, declaration, deadline=job_deadline, cleanup_deadline=cleanup_deadline
-                )
-                try:
-                    self.controller.run(
-                        handle, capture, deadline=job_deadline, cleanup_deadline=cleanup_deadline
-                    )
-                except Exception:
-                    # Includes expiry in the create→run gap. Only this live handle;
-                    # no guessed intent/resource adoption or second execution.
-                    if not self.controller.terminate_remove_owned(
-                        handle, deadline=cleanup_deadline
-                    ):
-                        raise DockerBackendFault("docker_mutation_unconfirmed") from None
-                    raise
-                return self.controller.complete(
-                    handle,
-                    capture,
-                    self.results,
-                    deadline=min(time.monotonic() + 5, job_deadline + 15),
+                return self._execute_claim(
+                    claim, declaration, capture, job_deadline, cleanup_deadline
                 )
             except Exception:
                 try:

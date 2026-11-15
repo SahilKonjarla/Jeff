@@ -70,10 +70,16 @@ def _signature(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _safe_ancestors(path: Path) -> None:
+def _construction_budget(deadline: float | None) -> None:
+    if deadline is not None and (not math.isfinite(deadline) or time.monotonic() >= deadline):
+        raise DockerBackendFault("docker_timeout")
+
+
+def _safe_ancestors(path: Path, *, deadline: float | None = None) -> None:
     if not path.is_absolute():
         raise DockerBackendFault("docker_unsafe_configuration")
     for parent in (*reversed(path.parents), path):
+        _construction_budget(deadline)
         info = os.lstat(parent)
         sticky_temp = (
             parent in (Path("/private/tmp"), Path("/private/var/tmp"))
@@ -125,23 +131,29 @@ def _failure_facts(
 
 
 class _DockerCLI:
-    def __init__(self, binary: Path, config: Path, home: Path) -> None:
+    def __init__(
+        self, binary: Path, config: Path, home: Path, *, deadline: float | None = None
+    ) -> None:
         if sys.platform != "darwin":
             raise DockerBackendFault("docker_unsupported")
         try:
+            _construction_budget(deadline)
             self.binary = binary.resolve(strict=True)
             self.config = config
             self.home = home
             if home == config or home in config.parents or config in home.parents:
                 raise DockerBackendFault("docker_unsafe_configuration")
-            self.identity, self._binary_signature = self._binary_identity()
-            self._home_signature = self._private_home(fresh=True)
-            self._config_signature = self._private_config()
+            self.identity, self._binary_signature = self._binary_identity(deadline=deadline)
+            self._home_signature = self._private_home(fresh=True, deadline=deadline)
+            self._config_signature = self._private_config(deadline=deadline)
+            _construction_budget(deadline)
         except OSError:
             raise DockerBackendFault("docker_unavailable") from None
 
-    def _binary_identity(self) -> tuple[DockerCLIIdentity, tuple[int, ...]]:
-        _safe_ancestors(self.binary.parent)
+    def _binary_identity(
+        self, *, deadline: float | None = None
+    ) -> tuple[DockerCLIIdentity, tuple[int, ...]]:
+        _safe_ancestors(self.binary.parent, deadline=deadline)
         fd = os.open(self.binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             before = os.fstat(fd)
@@ -156,6 +168,7 @@ class _DockerCLI:
                 raise DockerBackendFault("docker_unsafe_configuration")
             digest, count = hashlib.sha256(), 0
             while chunk := os.read(fd, 1048576):
+                _construction_budget(deadline)
                 count += len(chunk)
                 if count > 268435456:
                     raise DockerBackendFault("docker_unsafe_configuration")
@@ -168,10 +181,12 @@ class _DockerCLI:
         finally:
             os.close(fd)
 
-    def _private_config(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    def _private_config(
+        self, *, deadline: float | None = None
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
         if not self.config.is_absolute() or self.config.resolve(strict=True) != self.config:
             raise DockerBackendFault("docker_unsafe_configuration")
-        _safe_ancestors(self.config)
+        _safe_ancestors(self.config, deadline=deadline)
         directory = os.lstat(self.config)
         if not (
             stat.S_ISDIR(directory.st_mode)
@@ -201,10 +216,12 @@ class _DockerCLI:
         finally:
             os.close(fd)
 
-    def _private_home(self, *, fresh: bool = False) -> tuple[int, ...]:
+    def _private_home(
+        self, *, fresh: bool = False, deadline: float | None = None
+    ) -> tuple[int, ...]:
         if not self.home.is_absolute() or self.home.resolve(strict=True) != self.home:
             raise DockerBackendFault("docker_unsafe_configuration")
-        _safe_ancestors(self.home)
+        _safe_ancestors(self.home, deadline=deadline)
         info = os.lstat(self.home)
         if not (
             stat.S_ISDIR(info.st_mode)
@@ -622,12 +639,17 @@ class DockerTargetInspector:
         *,
         home: Path | None = None,
         _reader: _Reader | None = None,
+        deadline: float | None = None,
     ) -> None:
         if _reader is None:
             if binary is None or config is None or home is None:
                 raise DockerBackendFault("docker_unsafe_configuration")
-            _reader = _DockerCLI(binary, config, home)
+            _reader = _DockerCLI(binary, config, home, deadline=deadline)
         self._reader = _reader
+
+    @property
+    def identity(self) -> DockerCLIIdentity:
+        return self._reader.identity
 
     def verify_target(
         self, declaration: DockerTargetDeclaration, *, deadline: float

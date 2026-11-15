@@ -6,6 +6,7 @@ import fcntl
 import os
 import stat
 import sys
+import time
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -19,14 +20,18 @@ from jeff.application.dispatch import (
 )
 from jeff.application.execution import (
     DockerBackendFault,
+    DockerCLIIdentity,
     DockerTargetDeclaration,
     ExecutionClient,
     ExecutionService,
+    FreshExecutionClient,
+    fresh_execution_failure,
 )
 from jeff.application.execution_coordinator import ExecutionCoordinator
 from jeff.application.projects import Failure, ProjectService
 from jeff.application.questions import QuestionService
 from jeff.application.runtime import (
+    DEFAULT_RUNTIME_LIMITS,
     PROTOCOL_REVISION,
     ControlFault,
     ControlIssueCode,
@@ -69,10 +74,12 @@ def create_internal_execution(
     metadata_home: Path,
     lifecycle_home: Path,
     declarations: tuple[DockerTargetDeclaration, ...],
+    expected_binary: DockerCLIIdentity | None = None,
+    deadline: float | None = None,
 ) -> ExecutionCoordinator:
-    """Explicit internal composition only; never invoked by startup/CLI/RPC.
+    """Construct adapters without Docker queries, implicit discovery or new workers.
 
-    Caller supplies already owned/ready SQL and private CLI/config/fresh HOME paths.
+    Trusted startup or an internal caller supplies owned SQL and private fresh HOME paths.
     Construction validates those explicit resources but never queries/launches Docker,
     creates directories, loads default user state or starts another worker.
     """
@@ -90,8 +97,12 @@ def create_internal_execution(
     ):
         raise DockerBackendFault("docker_unsafe_configuration")
     inputs = FilePreparedInputStore(owner)
-    verifier = DockerTargetInspector(binary, config, home=metadata_home)
-    backend = DockerLifecycleCLI(binary, config, lifecycle_home)
+    verifier = DockerTargetInspector(binary, config, home=metadata_home, deadline=deadline)
+    backend = DockerLifecycleCLI(binary, config, lifecycle_home, deadline=deadline)
+    if expected_binary is not None and (
+        verifier.identity != expected_binary or backend.identity != expected_binary
+    ):
+        raise DockerBackendFault("docker_unsafe_configuration")
     controller = DockerJobController(
         verifier, backend, inputs, storage, owner_instance_id=instance_id
     )
@@ -108,7 +119,56 @@ def create_internal_execution(
         profiles=lambda: storage.execution_profiles,
         declarations=declarations,
         instance_id=instance_id,
+        proposal_lookup=storage,
+        inspection=storage,
     )
+
+
+def create_configured_execution(
+    *,
+    owner: Ownership,
+    storage: SQLiteStorage,
+    projects: ProjectService,
+    instance_id: UUID,
+    deadline: float,
+) -> ExecutionCoordinator | Failure:
+    """Owned startup construction; never query Docker, discover defaults or repair state."""
+
+    def active() -> None:
+        owner.check()
+        if storage.owner is not owner or storage.instance_id != instance_id:
+            raise ControlFault("runtime_ownership_unconfirmed")
+        if storage.snapshot().state != "ready":
+            raise StorageFault("storage_closing")
+
+    active()
+    configuration = storage.execution_backend
+    if configuration is None:
+        return fresh_execution_failure("execution_unavailable")
+    try:
+        with owner.execution_homes(instance_id, deadline=deadline) as (metadata, lifecycle):
+            built = create_internal_execution(
+                owner=owner,
+                storage=storage,
+                projects=projects,
+                instance_id=instance_id,
+                binary=configuration.binary.path,
+                config=configuration.config,
+                metadata_home=metadata,
+                lifecycle_home=lifecycle,
+                declarations=configuration.declarations,
+                expected_binary=configuration.binary,
+                deadline=deadline,
+            )
+        active()
+        return built
+    except DockerBackendFault as error:
+        active()  # Never disguise lost owner/storage readiness as optional backend failure.
+        return fresh_execution_failure(
+            "execution_backend_capacity"
+            if error.code == "docker_home_capacity"
+            else "execution_backend_unavailable"
+        )
 
 
 def _selected_layout() -> RuntimeLayout:
@@ -164,6 +224,11 @@ def create_execution_client() -> ExecutionClient:
     return RuntimeProjectClient(_selected_layout)
 
 
+def create_fresh_execution_client() -> FreshExecutionClient:
+    """Fresh RPC client only; constructing it never enables a daemon backend."""
+    return RuntimeProjectClient(_selected_layout)
+
+
 def create_activity_client() -> ActivityClient:
     """Lazy installed subscription interface; no CLI/auto-start/cursor persistence."""
     return RuntimeProjectClient(_selected_layout)
@@ -177,6 +242,7 @@ async def _serve(
     The startup pipe is diagnostic only; authenticated full readiness remains the
     parent's authority. Shutdown waits for resources rather than cancelling waits.
     """
+    activation_deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.start_seconds
     events = RuntimeEvents(
         identity,
         _stream_send,
@@ -226,10 +292,28 @@ async def _serve(
                 ExecutionService(
                     projects, storage, lambda: storage.execution_profiles, identity.instance_id
                 ),
+                fresh_factory=(
+                    lambda: create_configured_execution(
+                        owner=owner,
+                        storage=storage,
+                        projects=projects,
+                        instance_id=identity.instance_id,
+                        deadline=activation_deadline,
+                    )
+                )
+                if storage.execution_backend is not None
+                else None,
             )
             dispatcher.start()
             server.dispatcher = dispatcher
-            events.start(dispatcher)
+            try:
+                await asyncio.shield(asyncio.wrap_future(dispatcher.initialization))
+            except (ControlFault, StorageFault):
+                raise
+            except Exception:
+                raise ControlFault("runtime_start_failed") from None
+            if not server.stopping:
+                events.start(dispatcher)
         packet = encode_message(
             StartupResult(
                 revision=PROTOCOL_REVISION, instance_id=identity.instance_id, error=state.error

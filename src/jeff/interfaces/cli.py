@@ -25,7 +25,12 @@ from jeff.application.execution import (
     ExecutionClient,
     ExecutionOperation,
     ExecutionSuccess,
+    FreshExecutionCall,
+    FreshExecutionClient,
+    FreshExecutionOperation,
+    FreshExecutionReply,
     execution_failure,
+    fresh_execution_failure,
 )
 from jeff.application.history import HistoryPage
 from jeff.application.projects import ErrorData, Failure, Success
@@ -39,6 +44,7 @@ def create_app(
     control: Callable[[], RuntimeControl],
     diagnostics: Callable[[], RuntimeDiagnostics] | None = None,
     execution: Callable[[], ExecutionClient] | None = None,
+    fresh_execution: Callable[[], FreshExecutionClient] | None = None,
 ) -> typer.Typer:
     """Build a CLI without invoking factories or selecting an installation.
 
@@ -324,6 +330,133 @@ def create_app(
 
     review_commands("approvals", "approval")
     review_commands("jobs", "job")
+
+    fresh_app = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
+    app.add_typer(
+        fresh_app,
+        name="execution",
+        help="Fresh reviewed actions; explicit approval and start, never legacy promotion.",
+    )
+
+    def fresh_action(
+        operation: FreshExecutionOperation, json_output: bool, **values: object
+    ) -> None:
+        try:
+            call = FreshExecutionCall.model_validate(
+                {"directory": Path.cwd(), "request_id": uuid4(), "operation": operation, **values}
+            )
+            if operation in {"propose", "approve", "deny", "start"}:
+                typer.echo(f"Request: {call.request_id}", err=True)
+            reply = (
+                fresh_execution().fresh(call)
+                if fresh_execution is not None
+                else FreshExecutionReply(
+                    ok=False,
+                    request_id=call.request_id,
+                    operation=operation,
+                    error=fresh_execution_failure("execution_unavailable"),
+                )
+            )
+        except ControlFault as error:
+            render(control_failure(error.code), json_output)
+            return
+        except (ValidationError, OSError):
+            render(fresh_execution_failure("execution_unconfirmed"), json_output)
+            return
+        if json_output:
+            typer.echo(json.dumps(reply.model_dump(mode="json"), ensure_ascii=True))
+        elif reply.error is not None:
+            typer.echo(f"{reply.error.error.code}: {reply.error.error.message}", err=True)
+        elif reply.admission is not None:
+            typer.echo(
+                f"Job: {reply.admission.job_id}\nClaim: {reply.admission.claim_state}; "
+                f"replayed={reply.admission.replayed}"
+            )
+            typer.echo("Claim acknowledgement only; not guest-start or completion confirmation.")
+        elif reply.view is not None:
+            view = reply.view
+            typer.echo(
+                f"Approval: {view.approval_id}\nJob: {view.job_id}\nState: {view.state.value}; "
+                f"claim: {view.claim_state or 'none'}"
+            )
+            typer.echo(f"Manifest SHA256: {view.manifest_digest}")
+            typer.echo(
+                json.dumps(view.manifest.model_dump(mode="json"), ensure_ascii=True, indent=2)
+            )
+            if operation in {"show", "logs"}:
+                typer.echo(
+                    f"Completion: {reply.completion_state}; absence is not proof a guest never ran."
+                )
+            if reply.completion is not None:
+                typer.echo(
+                    f"Disposition: {reply.completion.disposition}; "
+                    f"exit: {reply.completion.outcome.exit_code}; "
+                    f"text: {reply.completion.payload_state}"
+                )
+            if reply.output is not None:
+                typer.echo(reply.output.stdout, nl=False)
+                typer.echo(reply.output.stderr, nl=False, err=True)
+        if not reply.ok:
+            raise typer.Exit(code=1)
+
+    @fresh_app.command("propose", context_settings={"ignore_unknown_options": True})
+    def fresh_propose(
+        argv: Annotated[
+            list[str], typer.Argument(help="Literal public argv after --; never shell text.")
+        ],
+        profile: str = typer.Option("default", "--profile"),
+        inputs: Annotated[
+            list[str] | None,
+            typer.Option(
+                "--input",
+                help="Repeated literal project-relative file; no glob/directory expansion.",
+            ),
+        ] = None,
+        request_id: Annotated[UUID | None, typer.Option("--request-id")] = None,
+        json_output: bool = typer.Option(False, "--json"),
+    ) -> None:
+        """Prepare a fresh exact action for review; does not approve or start it."""
+        fresh_action(
+            "propose",
+            json_output,
+            profile_name=profile,
+            argv=tuple(argv),
+            paths=tuple(inputs or ()),
+            request_id=request_id or uuid4(),
+        )
+
+    def fresh_target_command(operation: Literal["approve", "deny", "start"]) -> None:
+        @fresh_app.command(operation)
+        def target(
+            approval_id: UUID,
+            digest: str = typer.Option(
+                ...,
+                "--digest",
+                help="Exact reviewed manifest SHA256; never current-verifier proof.",
+            ),
+            request_id: Annotated[UUID | None, typer.Option("--request-id")] = None,
+            json_output: bool = typer.Option(False, "--json"),
+        ) -> None:
+            """Explicitly decide a pending review or request its single confirmed claim."""
+            fresh_action(
+                operation,
+                json_output,
+                approval_id=approval_id,
+                reviewed_manifest_digest=digest,
+                request_id=request_id or uuid4(),
+            )
+
+    for operation in ("approve", "deny", "start"):
+        fresh_target_command(operation)
+
+    def fresh_inspection_command(operation: Literal["show", "logs"]) -> None:
+        @fresh_app.command(operation)
+        def inspect(approval_id: UUID, json_output: bool = typer.Option(False, "--json")) -> None:
+            """Inspect this fresh approval's durable job facts or bounded guarded logs."""
+            fresh_action(operation, json_output, approval_id=approval_id)
+
+    fresh_inspection_command("show")
+    fresh_inspection_command("logs")
 
     def lifecycle(operation: str, json_output: bool) -> None:
         try:

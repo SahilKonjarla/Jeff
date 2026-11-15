@@ -22,7 +22,7 @@ from jeff.application.diagnostics import (
 )
 from jeff.application.projects import Failure
 from jeff.application.runtime import ControlFault, RuntimeLayout, RuntimePathInspection
-from jeff.application.storage import DATABASE_SCHEMA, RuntimeSettings, StorageFault
+from jeff.application.storage import DATABASE_SCHEMA, LoadedRuntimeSettings, StorageFault
 from jeff.domain.runtime import RuntimeState
 from jeff.infrastructure.runtime_ipc import inspect_control
 from jeff.infrastructure.runtime_paths import inspect_layout
@@ -163,7 +163,7 @@ class RuntimeDiagnosticsAdapter:
                     required=True,
                 )
             checks.append(check)
-        settings: RuntimeSettings | None = None
+        settings: LoadedRuntimeSettings | None = None
         database_version: int | None = None
         runtime: DoctorRuntimeData | None = None
         if (
@@ -227,7 +227,9 @@ class RuntimeDiagnosticsAdapter:
     @staticmethod
     def _runtime(
         layout: RuntimeLayout, deadline: float
-    ) -> tuple[list[DoctorCheck], RuntimeSettings | None, int | None, DoctorRuntimeData | None]:
+    ) -> tuple[
+        list[DoctorCheck], LoadedRuntimeSettings | None, int | None, DoctorRuntimeData | None
+    ]:
         """Use authenticated cached live facts, never client-side live settings/SQL reads."""
         try:
             with RuntimeStateStore(layout).diagnostic_observation(deadline) as ownership:
@@ -376,9 +378,9 @@ class RuntimeDiagnosticsAdapter:
     @staticmethod
     def _stopped(
         layout: RuntimeLayout, deadline: float
-    ) -> tuple[list[DoctorCheck], RuntimeSettings | None, int | None]:
+    ) -> tuple[list[DoctorCheck], LoadedRuntimeSettings | None, int | None]:
         """Hold a non-creating lease through all stopped reads and final revalidation."""
-        settings: RuntimeSettings | None = None
+        settings: LoadedRuntimeSettings | None = None
         version: int | None = None
         checks = [
             DoctorCheck(

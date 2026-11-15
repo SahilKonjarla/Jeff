@@ -14,7 +14,7 @@ from pydantic import (
     model_validator,
 )
 
-from jeff.application.execution import ExecutionSettings
+from jeff.application.execution import DockerBackendConfiguration, ExecutionSettings
 from jeff.application.history import (
     ActivityCode,
     ActivityEvent,
@@ -32,7 +32,7 @@ from jeff.application.history import (
 from jeff.application.projects import ErrorData, Failure, ProjectService
 from jeff.domain.projects import Project
 
-SETTINGS_SCHEMA = 2
+SETTINGS_SCHEMA = 3
 DATABASE_SCHEMA = 8
 RETIREMENT_BATCH_LIMIT = 100
 RETIREMENT_INTERVAL_SECONDS = 60
@@ -107,7 +107,9 @@ class HistorySettings(_StorageModel):
 
 
 class RuntimeSettings(_StorageModel):
-    schema_version: StrictInt = Field(ge=1, le=SETTINGS_SCHEMA)
+    """Legacy settings1/2 representation; never gains opt-in backend defaults."""
+
+    schema_version: StrictInt = Field(ge=1, le=2)
     history: HistorySettings
     execution: ExecutionSettings = ExecutionSettings()
 
@@ -118,6 +120,29 @@ class RuntimeSettings(_StorageModel):
         return self
 
 
+class ConfiguredRuntimeSettings(_StorageModel):
+    """Explicit settings3, cold and disabled when backend is absent or null."""
+
+    schema_version: StrictInt = Field(ge=3, le=3)
+    history: HistorySettings
+    execution: ExecutionSettings = ExecutionSettings()
+    backend: DockerBackendConfiguration | None = None
+
+    @model_validator(mode="after")
+    def bound_backend(self) -> Self:
+        if self.backend is not None:
+            profiles = {(p.project_id, p.name): p for p in self.execution.profiles}
+            if any(
+                profiles.get((d.profile.project_id, d.profile.name)) != d.profile
+                for d in self.backend.declarations
+            ):
+                raise ValueError("Backend declarations require exact configured profile bindings.")
+        return self
+
+
+LoadedRuntimeSettings = RuntimeSettings | ConfiguredRuntimeSettings
+
+# Absent installations remain opt-out and keep the exact settings2 defaults.
 DEFAULT_SETTINGS = RuntimeSettings(schema_version=2, history=HistorySettings(retention_days=30))
 
 
