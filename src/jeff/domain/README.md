@@ -1,6 +1,6 @@
 # Domain — tier 0
 
-**Status:** M01 project identity, repository metadata and disclosure policy implemented; M02 slice-1 runtime value invariants added. Accepted M03 Phase2 adds review-only states, bounds and canonical manifest fingerprints in `execution.py`. Phase3 Step1 adds distinct authority states and explicit prepared-inventory bounds; these values confer no physical engine/input verification or process authority. An executor remains unimplemented. The M02 internal control lifecycle uses these values without putting OS behavior in domain.
+**Status:** M01 project identity, repository metadata and disclosure policy implemented; M02 slice-1 runtime value invariants added. Accepted M03 Phase2 adds review-only states, bounds and canonical manifest fingerprints in `execution.py`. Phase3 Step1 adds distinct authority states and explicit prepared-inventory bounds; these values confer no physical engine/input verification or process authority. Fresh execution is composed through application ports/adapters; these domain values alone never grant permission to launch. The M02 internal control lifecycle uses these values without putting OS behavior in domain.
 
 **Ownership:** `projects.py` defines immutable `Project(project_id: UUID, root: Path)` and `ProjectError(code, message)`. Identity requires an absolute root; filesystem canonicalization and configuration parsing belong to adapters. Errors contain fixed actionable messages, not raw file/provider output.
 

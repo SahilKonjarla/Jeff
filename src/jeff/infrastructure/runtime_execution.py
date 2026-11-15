@@ -1,7 +1,8 @@
-"""Internal owned-container state machine; no public routing or implicit port defaults.
+"""Owned-container state machine behind the application execution ports.
 
-Real journal/input/output adapters are required before production composition. A
-serialized model/label/name alone cannot adopt a resource into this controller.
+Bootstrap supplies real journal/input/output adapters for opt-in public execution;
+this module does not route requests or choose defaults. A serialized model, label
+or name alone cannot adopt a resource into this controller.
 """
 
 import math
@@ -154,6 +155,12 @@ class _Session:
 
 
 class DockerJobController:
+    """Journal mutations and retain exact local ownership until cleanup is confirmed.
+
+    Unknown outcomes quarantine the controller rather than granting another attempt.
+    Successful cleanup does not by itself reconcile an uncertain job completion.
+    """
+
     def __init__(
         self,
         verifier: DockerTargetVerifier,
@@ -508,6 +515,11 @@ class DockerJobController:
         deadline: float,
         cleanup_deadline: float,
     ) -> DockerOwnedContainer:
+        """Spend first-response permission once, journaling intent before Docker Create.
+
+        The claim stays spent even if verification or mutation fails. A returned
+        handle is local session identity, never permission to adopt a stored CID.
+        """
         with self._operation():
             self._budgets(deadline, cleanup_deadline)
             if self._quarantined or any(not s.removed for s in self._sessions.values()):

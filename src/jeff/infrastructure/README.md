@@ -1,6 +1,6 @@
 # Infrastructure — tier2
 
-Owns concrete project files, private runtime state, native/authenticated IPC, lifecycle, SQL, committed event delivery and diagnostics. Depends inward on application/domain plus stdlib/PyYAML; no bootstrap/client policy or sibling integration calls. M02 is delivered/accepted on Mac; general execution isolation is not proved. M03 selects declared Docker jobs, not a general native sandbox rewrite; an internal controller/transport exists, but no production-wired container executor is delivered. Linux Jeff client/runtime compatibility is out of scope. [Tier map](../README.md).
+Owns concrete project files, private runtime state, native/authenticated IPC, lifecycle, SQL, committed event delivery and diagnostics. Depends inward on application/domain plus stdlib/PyYAML; no bootstrap/client policy or sibling integration calls. M02 is delivered/accepted on Mac. M03's opt-in public Docker execution is wired through bootstrap/application ports, with selected source/installed/manual proofs and explicit Step3 acceptance; whole-Phase3 acceptance remains pending. This is not universal isolation proof or a general native sandbox rewrite. Linux Jeff client/runtime compatibility is out of scope. [Tier map](../README.md).
 
 ## Adapter map
 
@@ -17,7 +17,7 @@ Owns concrete project files, private runtime state, native/authenticated IPC, li
 |`runtime_events.py`|One serialized read pump, coalesced hints, retained pages/writers and committed-position invalidation|
 |`runtime_diagnostics.py`|One-budget finite doctor projection: cached live facts or safely leased stopped reads|
 |`docker_cli.py`|Explicit CLI/config/endpoint target verifier and fixed bounded lifecycle transport; no independently issued launch authority|
-|`runtime_execution.py`|Internal one-attempt owned-container controller; mandatory journal/input/output ports, exact-ID cleanup and quarantine; not bootstrap/RPC/CLI wired|
+|`runtime_execution.py`|One-attempt owned-container controller; mandatory journal/input/output ports, exact-ID cleanup and quarantine; bootstrap supplies it behind opt-in public application orchestration|
 |`prepared_inputs.py`|Ownership-bound explicit public-file snapshots, bounded copy/seal/hash verification and17-slot admission; no live source recopy or public route|
 |`runtime_output.py`|Memory-only guarded stdout/stderr collector, bounded classified-frame release, terminal-safe retention and explicit EOF/abort snapshots; no persistence/completion authority|
 
@@ -55,6 +55,14 @@ Startup authenticates/pins genuine hot DELETE-journal header/identities/bounds (
 
 Accepted wire7 (current source wire11) carries a separate typed review request through the existing bounded workers and single SQL owner. DB5 stores exact public manifests, project/root-bound proposal/approval/job identities and mutation UUID exclusion. Decisions are atomic, finite and permanently nonexecutable; approved jobs remain blocked, with no Docker/process adapter. The daemon loads private profiles once at startup. Restart invalidates unused review state; declarations are explicitly unverified and profiles are not repository-granted authority. Inspection may transactionally expire/retire review detail, unlike read-only M02 diagnostic/history interfaces.
 
+## Current Phase3 delivery
+
+Step3 is explicitly accepted after source, noneditable installed-wheel and Sahil manual public-flow proofs on the published `f3856da` implementation: wire11/DB8/settings3 supported/default2. Opt-in startup performs private-resource/pin checks without Docker commands; explicit fresh actions reverify target/prepared inputs before one confirmed claim. Public results report durable finished exit0, guarded output, same-ID facts replay, controller-attested cleanup and normal daemon stop. Budget8/8 is exhausted; no runtime/fault authority follows. Actual public nonzero exit, cap-reaching truncation and installed missing-backend/M02 smoke evidence still need disposition before whole-Phase3 acceptance. Subsequent comment/docstring-only edits have not been runtime-tested or repackaged.
+
+## Historical infrastructure checkpoints
+
+The following sections retain their checkpoint versions/counts and then-pending gates; statements that public activation or live proof is absent are historical, not current capability descriptions.
+
 ## Phase3 Step1 internal authority foundation
 
 DB6 adds separate fresh-authority rows and permanent operation UUID exclusion; existing DB5 review rows are never converted. `SQLiteStorage.authority` queues typed internal work on the same SQL owner. Atomic approval/claim checks bind scope, original expiry and current manifest digest; only confirmed first consumption returns a transient launch permission. Duplicate/show/restart never recreates it. Restart preserves consumed claims as unknown and quarantines further claims. Existing wire7/8/9/10 clients refuse current wire11; schema2 default bytes are unchanged (schema3 is separately supported) and doctor/readiness now support DB8 together. The internal authority operation is **not** admitted by RPC/CLI until a trusted engine/input verifier and controller are implemented. No Docker I/O or real input copy is present in Step1. Current disposable clean migrations do not prove physical hot-journal recovery of DB6.
@@ -65,7 +73,7 @@ DB6 adds separate fresh-authority rows and permanent operation UUID exclusion; e
 
 Configured construction compares **both** inspector and lifecycle CLI observed path/SHA/size pins after strict config/fresh HOME checks; Inspector exposes read-only identity rather than private-reader access. Constructor deadline reaches hash/traversal loops; blocked syscalls remain cooperative. Daemon-side10s window starts at `_serve` entry, not the parent's exact absolute deadline. No socket/engine/image query, subprocess, image acquisition or native fallback occurs during startup.
 
-Optional dispatcher factory runs once on existing worker0, outside its mutex, before future/ready/admission publication. Running initialization cannot be cancelled into drainage; Stop suppresses late service publication and waits actual completion. Known private backend failure caches a fixed issue; base M02 may become ready while fresh capability is absent. Owner/storage/unexpected faults complete exceptionally and seal admission. `_serve` awaits shielded initialization before starting the event pump; default factory-free behavior stays unchanged. IPC uses existing FreshReply.error for backend-unavailable/capacity versus disabled, with no private paths/new wire fields.217 source cases pass, including actual in-process bootstrap status/withdrawal with synthetic CLI + subprocess trap, no actual Docker/installed/crash proof. SQL schema/digest/settings defaults unchanged.
+Optional dispatcher factory runs once on existing worker0, outside its mutex, before future/ready/admission publication. Running initialization cannot be cancelled into drainage; Stop suppresses late service publication and waits actual completion. Known private backend failure caches a fixed issue; base M02 may become ready while fresh capability is absent. Owner/storage/unexpected faults complete exceptionally and seal admission. `_serve` awaits shielded initialization before starting the event pump; default factory-free behavior stays unchanged. IPC uses existing FreshReply.error for backend-unavailable/capacity versus disabled, with no private paths/new wire fields. The217-case source checkpoint included in-process bootstrap status/withdrawal with synthetic CLI + subprocess trap. Later source/installed/manual public proofs passed as recorded above; physical-crash proof remains separate. SQL schema/digest/settings defaults unchanged.
 
 ## Step3 wire11 source routing and atomic inspection
 

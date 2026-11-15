@@ -1,14 +1,18 @@
 # Application — tier1
 
-Owns use cases, typed public results, policy and narrow ports. Depends only on domain/application contracts, stdlib and Pydantic—not concrete sockets, processes, SQL/YAML adapters or bootstrap. M02 is delivered/accepted. M03 Phase2 adds durable review-only proposals/approvals/jobs; Phase2 is accepted; actual execution remains pending. Phase3 Step1 adds internal fresh-authority models/ports, not a public executor. [Tier map](../README.md).
+Owns use cases, typed public results, policy and narrow ports. Depends only on domain/application contracts, stdlib and Pydantic—not concrete sockets, processes, SQL/YAML adapters or bootstrap. M02 is delivered/accepted. M03 Phase2's durable review-only workflow is accepted. Phase3 now composes fresh authority, verified owned Docker execution and opt-in public intent; Step3 is explicitly accepted after source, fresh installed-wheel and human manual proofs. Whole-Phase3 acceptance remains pending evidence-gap disposition. [Tier map](../README.md).
 
-## Step3 opt-in activation — source-validated, default off
+## Current Step3 — accepted public integration, default off
 
 Source bootstrap can now supply the existing fresh coordinator only from ready private schema3 configuration, after actual owner/SQL/private-config/HOME and both observed CLI path/SHA/size checks. Absence/null stays disabled and creates no HOME namespace. Known backend/capacity faults remain fresh-only with fixed refusal and no capability; ownership/storage/unexpected failures abort readiness. Startup performs no Docker query/launch or implicit default discovery, and capability is not engine/image/isolation verification. That remains mandatory at explicit proposal/approval/start.
 
-Managed0700 HOMEs live under runtime_dir/execution-backend/instanceUUID/{metadata,lifecycle};16 retained generations include failed/partial allocations. No reuse/repair/adoption/cleanup, and no byte/RSS/disk quota claim. A single existing worker initializes outside the control loop; readiness/admission and drainage wait for actual completion, not cancellation, with a cooperative daemon-side10s startup window.217 selected source cases pass with stable108 hashes and scoped static review; no current installed/live Docker proof or M03 acceptance follows. Legacy review/default2/settings1/2 semantics and wire11/DB8/settings3 support remain unchanged. Earlier source checkpoints below are historical.
+Managed0700 HOMEs live under runtime_dir/execution-backend/instanceUUID/{metadata,lifecycle};16 retained generations include failed/partial allocations. No reuse/repair/adoption/cleanup, and no byte/RSS/disk quota claim. A single existing worker initializes outside the control loop; readiness/admission and drainage wait for actual completion, not cancellation, with a cooperative daemon-side10s startup window. The published217-case source baseline and scoped review preceded three passed public-flow proofs (source, noneditable installed wheel and Sahil manual). Step3 is accepted; whole-Phase3/M03 is not. Budget8/8 is exhausted. Cleanup/count are controller-attested; real public nonzero exit and cap-reaching truncation remain unmapped. Subsequent comments/docstrings are not a new source-test or wheel pass. Legacy review/default2/settings1/2 semantics and wire11/DB8/settings3 support remain unchanged. Earlier source checkpoints below are historical.
 
-## Step3 wire11 fresh public intent — source-routed
+## Historical implementation checkpoints
+
+The sections below preserve their original counts, versions and then-pending gates. The current accepted public integration above supersedes their statements that activation or live proof is absent.
+
+## Step3 wire11 fresh public intent — source-routed checkpoint
 
 `FreshExecutionCall` is distinct from both permanent `review_only_v1` and internal claim/start types. It requires a request UUID/absolute directory and one of propose/approve/deny/start/show/logs. Only propose accepts profile/literal argv/input names; decisions/start require exact approval ID/reviewed digest, not caller current-verifier proof. `ExecutionCoordinator.execute` handles propose/decide/scoped inspection; starts use the owning-worker observer seam exclusively. Stable decisions reuse DB8's unchanged operation fingerprint. Deny binds the reviewed digest through scoped `_load` against the immutable manifest before mutation/replay, including already-denied retries; no new persisted field or weakened internal model is required.
 

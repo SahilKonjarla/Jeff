@@ -52,6 +52,13 @@ from jeff.domain.projects import Project
 
 
 class ExecutionCoordinator:
+    """Bind reviewed inputs to one locally confirmed claim and its owned execution.
+
+    Persisted records and public acknowledgements are observations, not reusable
+    launch permission. Storage, target verification and container I/O stay behind
+    supplied ports; the coordinator never constructs an adapter or retries work.
+    """
+
     def __init__(
         self,
         projects: ProjectService,
@@ -274,6 +281,11 @@ class ExecutionCoordinator:
         deadline: float,
         request_id: UUID | None = None,
     ) -> AuthorityRecord:
+        """Prepare literal inputs once; replay returns the original reviewed facts.
+
+        Serialization is local to this coordinator, not a durable preparation
+        reservation. Failed or cross-instance preparation can leave bounded residue.
+        """
         with self._active(deadline):
             project = self._project(directory, deadline)
             profile = self._profile(project, profile_name)
@@ -481,6 +493,11 @@ class ExecutionCoordinator:
     def run(
         self, directory: Path, approval_id: UUID, expected_manifest_digest: str, *, deadline: float
     ) -> DockerExecutionResult:
+        """Run synchronously for internal callers without publishing admission early.
+
+        Public starts use ``start`` so the owning worker outlives its admission
+        observer. Neither entry point can reconstruct a lost first-claim token.
+        """
         with self._active(deadline):
             project = self._project(directory, deadline)
             record = self._load(project, approval_id, expected_manifest_digest, deadline)

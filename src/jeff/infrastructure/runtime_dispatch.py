@@ -90,6 +90,7 @@ class RuntimeDispatcher:
         self.fresh_issue: Failure | None = None
         self._fresh_factory = fresh_factory
         self.initialization: Future[None] = Future()
+        # Cancellation of an observer must not make live initialization look drained.
         self.initialization.set_running_or_notify_cancel()
         if fresh_factory is None:
             self.initialization.set_result(None)
