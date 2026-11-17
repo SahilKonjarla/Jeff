@@ -31,7 +31,7 @@ Git add/commit requires the child's real `.git`; it cannot fall back to the pare
 
 ## Fixture contents and restoration
 
-All templates live in `create_demo_projects.py`; no template package/dependency is added. The sandbox contains a loopback-first HTTP service, deterministic pytest mismatch, and narrow-mount Compose service. The second project is minimal. Generated READMEs explain exact behavior and deliberate single-file restoration using the recorded baseline; broad cleanup/reset is not a setup procedure.
+Template strings live in [`_demo_templates.py`](_demo_templates.py) and remain re-exported by `create_demo_projects.py`; no template package/dependency is added. The sandbox contains a loopback-first HTTP service, deterministic pytest mismatch, and narrow-mount Compose service. The second project is minimal. Generated READMEs explain exact behavior and deliberate single-file restoration using the recorded baseline; broad cleanup/reset is not a setup procedure.
 
 Service/test/Compose details belong in [examples](../examples/README.md). No raw credentials or environment files are required. `.gitignore` already excludes both default generated roots, so generation does not modify the parent's ignore rules or index/history.
 

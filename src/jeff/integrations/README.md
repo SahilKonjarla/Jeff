@@ -8,7 +8,7 @@
 
 ## Native lifetime
 
-Bootstrap injects `git/worker.py::OwnedGitRunner` for daemon discovery/filter/status. Each single-use helper owns real Git Popen plus a duplicate of the daemon's existing lifetime-lock description and liveness reader. Git inherits none of these handles. EOF/deadline kills/reaps only the captured child; the lease excludes replacement until helper exit. Private protocol1 allows five fixed operations, not arbitrary argv. A transferred Unix-socket capability establishes native peer identity for receiver-local Darwin NOTE_EXIT; kqueue FDs are not transferred. Late captured exits0/1 reconcile cleanup; running/abnormal exits remain quarantined. No fallback/replay/new grace. Non-daemon default runner remains available to its existing callers.
+Bootstrap injects `git/worker/runner.py::OwnedGitRunner` for daemon discovery/filter/status. Each single-use helper owns real Git Popen plus a duplicate of the daemon's existing lifetime-lock description and liveness reader. Git inherits none of these handles. EOF/deadline kills/reaps only the captured child; the lease excludes replacement until helper exit. Private protocol1 allows five fixed operations, not arbitrary argv. A transferred Unix-socket capability establishes native peer identity for receiver-local Darwin NOTE_EXIT; kqueue FDs are not transferred. Late captured exits0/1 reconcile cleanup; running/abnormal exits remain quarantined. No fallback/replay/new grace. Non-daemon default runner remains available to its existing callers.
 
 ## Queries and protections
 
