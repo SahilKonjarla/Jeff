@@ -113,13 +113,66 @@ def test_reports_are_frozen_and_failure_keeps_bounded_data() -> None:
         result.data.summary = "healthy"
 
 
+def test_live_doctor_accepts_fresh_and_cancel_capabilities_without_weakening_base_readiness() -> (
+    None
+):
+    from uuid import uuid4
+
+    from jeff.application.runtime import RuntimeIdentityData
+    from jeff.domain.runtime import RuntimeState
+
+    base = (
+        "ask.branch",
+        "ask.changes",
+        "init",
+        "config",
+        "receipt.inspect",
+        "activity.trace",
+        "activity.replay",
+        "debug.last",
+        "history.list",
+        "activity.subscribe",
+        "execution.review",
+    )
+    value = dict(
+        state=RuntimeState.RUNNING,
+        identity=RuntimeIdentityData(instance_id=uuid4(), pid=123),
+        control_ready=True,
+        application_ready=True,
+        storage_state="ready",
+        active_retention_days=30,
+        settings_source="existing_file",
+    )
+    for extra in ((), ("execution.v1",), ("execution.v1", "execution.cancel.v1")):
+        cached = DoctorRuntimeData.model_validate(
+            {**value, "available_operations": (*base, *extra)}
+        )
+        healthy = report().model_dump()
+        healthy.update(
+            summary="healthy",
+            database_schema_version=10,
+            runtime=cached,
+            checks=[
+                dict(name=n, status="ok", required=True)
+                for n in ("platform", "python", "git", "paths", "runtime", "settings", "storage")
+            ],
+        )
+        assert DoctorReport.model_validate(healthy).summary == "healthy"
+    with pytest.raises(ValidationError):
+        DoctorRuntimeData.model_validate(
+            {**value, "available_operations": (*base, "execution.cancel.v1")}
+        )
+    with pytest.raises(ValidationError):
+        DoctorRuntimeData.model_validate({**value, "available_operations": base[:-1]})
+
+
 def stopped_payload() -> dict[str, Any]:
     value = report().model_dump(mode="json")
     value.update(
         summary="stopped",
         settings_schema_version=2,
         configured_retention_days=17,
-        database_schema_version=8,
+        database_schema_version=10,
     )
     value["checks"] = [
         {"name": name, "status": "ok", "code": None, "required": True}
@@ -161,7 +214,7 @@ def test_valid_oversized_configuration_uses_finite_marker_not_active_retention()
 def test_phase2_doctor_accepts_current_and_legacy_settings_and_current_live_readiness() -> None:
     stopped = DoctorReport.model_validate(stopped_payload())
     assert doctor_result(stopped).ok
-    assert stopped.settings_schema_version == 2 and stopped.database_schema_version == 8
+    assert stopped.settings_schema_version == 2 and stopped.database_schema_version == 10
     legacy = DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 1})
     assert doctor_result(legacy).ok and legacy.settings_schema_version == 1
     configured = DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 3})

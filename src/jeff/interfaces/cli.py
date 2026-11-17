@@ -22,6 +22,9 @@ from jeff.application.dispatch import (
 )
 from jeff.application.execution import (
     ExecutionCall,
+    ExecutionCancelCall,
+    ExecutionCancelClient,
+    ExecutionCancelReply,
     ExecutionClient,
     ExecutionOperation,
     ExecutionSuccess,
@@ -45,6 +48,7 @@ def create_app(
     diagnostics: Callable[[], RuntimeDiagnostics] | None = None,
     execution: Callable[[], ExecutionClient] | None = None,
     fresh_execution: Callable[[], FreshExecutionClient] | None = None,
+    cancellation: Callable[[], ExecutionCancelClient] | None = None,
 ) -> typer.Typer:
     """Build a CLI without invoking factories or selecting an installation.
 
@@ -338,6 +342,52 @@ def create_app(
         help="Fresh reviewed actions; explicit approval and start, never legacy promotion.",
     )
 
+    @fresh_app.command("cancel")
+    def cancel_execution(
+        approval_id: UUID,
+        digest: str = typer.Option(..., "--digest", help="Exact reviewed manifest SHA256."),
+        request_id: Annotated[UUID | None, typer.Option("--request-id")] = None,
+        json_output: bool = typer.Option(False, "--json"),
+    ) -> None:
+        """Request durable stop intent; acceptance does not confirm termination."""
+        try:
+            call = ExecutionCancelCall(
+                request_id=request_id or uuid4(),
+                approval_id=approval_id,
+                reviewed_manifest_digest=digest,
+            )
+            typer.echo(f"Request: {call.request_id}", err=True)
+            reply = (
+                cancellation().cancel(call)
+                if cancellation is not None
+                else ExecutionCancelReply(
+                    request_id=call.request_id,
+                    approval_id=approval_id,
+                    reviewed_manifest_digest=digest,
+                    ok=False,
+                    error=fresh_execution_failure("execution_unavailable"),
+                )
+            )
+        except ControlFault as error:
+            render(control_failure(error.code), json_output)
+            return
+        except (ValidationError, OSError):
+            render(fresh_execution_failure("execution_unconfirmed"), json_output)
+            return
+        if json_output:
+            typer.echo(json.dumps(reply.model_dump(mode="json"), ensure_ascii=True))
+        elif reply.error is not None:
+            typer.echo(f"{reply.error.error.code}: {reply.error.error.message}", err=True)
+        elif reply.stop is not None:
+            typer.echo(f"Stop intent: durable; reason: {reply.stop.reason}")
+            typer.echo(
+                f"Termination: {reply.stop.outcome or 'unconfirmed'}; "
+                f"cleanup: {reply.stop.cleanup_verified}; logs: {reply.stop.payload_state}"
+            )
+            typer.echo("Intent acceptance is not termination or complete-output confirmation.")
+        if not reply.ok:
+            raise typer.Exit(code=1)
+
     def fresh_action(
         operation: FreshExecutionOperation, json_output: bool, **values: object
     ) -> None:
@@ -387,6 +437,19 @@ def create_app(
                 typer.echo(
                     f"Completion: {reply.completion_state}; absence is not proof a guest never ran."
                 )
+            if reply.execution_phase is not None:
+                typer.echo(f"Observation phase: {reply.execution_phase}")
+            if reply.stop is not None:
+                typer.echo(
+                    f"Stop: {reply.stop.reason}; outcome: {reply.stop.outcome or 'unconfirmed'}; "
+                    f"cleanup: {reply.stop.cleanup_verified}; text: {reply.stop.payload_state}"
+                )
+                if reply.stop.output_facts is not None:
+                    facts = reply.stop.output_facts
+                    typer.echo(
+                        f"Output: aborted={facts.aborted}; stdout EOF={facts.stdout_eof}; "
+                        f"stderr EOF={facts.stderr_eof}; truncated={facts.truncated}"
+                    )
             if reply.completion is not None:
                 typer.echo(
                     f"Disposition: {reply.completion.disposition}; "

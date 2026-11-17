@@ -72,7 +72,7 @@ def test_receipt_claim_finish_lookup_and_restart_without_replay(tmp_path: Path) 
         again = SQLiteStorage(owner, instance_id=uuid4())
         again.start()
         try:
-            assert again.wait_ready(5).schema_version == 8
+            assert again.wait_ready(5).schema_version == 10
             recovered = again.inspect(scope, deadline=deadline())
             assert recovered is not None and recovered.state == "unknown"
             assert recovered.outcome_code == "interrupted"
@@ -119,7 +119,7 @@ def test_schema_one_registry_migrates_and_concurrent_claim_is_unique(tmp_path: P
         storage = SQLiteStorage(owner, instance_id=instance)
         storage.start()
         try:
-            assert storage.wait_ready(5).schema_version == 8
+            assert storage.wait_ready(5).schema_version == 10
             assert storage.lookup(project) == project
             claim = ReceiptClaim(
                 request_id=uuid4(),
@@ -248,8 +248,20 @@ def test_schema_two_migration_failure_rolls_back_actual_ddl_and_preserves_regist
             assert initial.index(project) == (project, True)
         finally:
             initial.close()
-        # Construct a clean owned v1 fixture from current known schema, never real data.
+        # Construct an exact owned v1 fixture, removing every later catalog first.
         with closing(original(layout.database, isolation_level=None)) as fixture:
+            for table in (
+                "execution_stop_payloads",
+                "execution_lifecycles",
+                "execution_results",
+                "execution_launch_events",
+                "execution_launches",
+                "execution_authority_operations",
+                "execution_authorities",
+                "execution_operations",
+                "execution_reviews",
+            ):
+                fixture.execute(f"DROP TABLE {table}")
             fixture.execute("DROP TABLE activity_events")
             fixture.execute("DROP TABLE activity_requests")
             fixture.execute("DROP TABLE activity_meta")
@@ -271,7 +283,7 @@ def test_schema_two_migration_failure_rolls_back_actual_ddl_and_preserves_regist
         retry = SQLiteStorage(owner)
         retry.start()
         try:
-            assert retry.wait_ready(5).schema_version == 8
+            assert retry.wait_ready(5).schema_version == 10
             assert retry.lookup(project) == project
         finally:
             retry.close()

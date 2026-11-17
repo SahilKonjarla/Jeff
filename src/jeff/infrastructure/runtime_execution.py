@@ -18,6 +18,8 @@ from uuid import UUID, uuid4
 
 from jeff.application.execution import (
     AuthorityResult,
+    CancellableDockerBackend,
+    CancellableDockerVerifier,
     DockerBackendFault,
     DockerCompletion,
     DockerCompletionStore,
@@ -33,8 +35,15 @@ from jeff.application.execution import (
     DockerPolicyFacts,
     DockerTargetDeclaration,
     DockerTargetVerifier,
+    ExecutionStopObservation,
+    ExecutionStopRecord,
+    ExecutionStopSignal,
+    ExecutionStopStore,
+    ExecutionStopTerminal,
     PreparedInputVerifier,
+    VerifiedDockerTarget,
 )
+from jeff.domain.execution import fingerprint
 
 
 def ownership_labels(intent: DockerLaunchIntent) -> dict[str, str]:
@@ -145,6 +154,8 @@ def _state_fault(state: dict[str, object]) -> DockerBackendFault:
 class _Session:
     handle: DockerOwnedContainer
     start_attempted: bool = False
+    start_recorded: bool = False
+    exit_code: int | None = None
     removed: bool = False
     stop_attempted: bool = False
     kill_attempted: bool = False
@@ -507,6 +518,18 @@ class DockerJobController:
                 raise DockerBackendFault("docker_ownership_unconfirmed")
             return self._read(handle.intent, handle.container_id, deadline, handle.created_at)
 
+    def _verify(
+        self,
+        declaration: DockerTargetDeclaration,
+        deadline: float,
+        stop: ExecutionStopSignal | None,
+    ) -> VerifiedDockerTarget:
+        if stop is not None:
+            if not isinstance(self.verifier, CancellableDockerVerifier):
+                raise DockerBackendFault("docker_unsafe_configuration")
+            return self.verifier.verify_target_cancellable(declaration, stop, deadline=deadline)
+        return self.verifier.verify_target(declaration, deadline=deadline)
+
     def create(
         self,
         claim: AuthorityResult,
@@ -514,6 +537,7 @@ class DockerJobController:
         *,
         deadline: float,
         cleanup_deadline: float,
+        stop: ExecutionStopSignal | None = None,
     ) -> DockerOwnedContainer:
         """Spend first-response permission once, journaling intent before Docker Create.
 
@@ -522,6 +546,10 @@ class DockerJobController:
         """
         with self._operation():
             self._budgets(deadline, cleanup_deadline)
+            if stop is not None:
+                stop.require_scope(claim.record)
+                stop.cap_cleanup(cleanup_deadline)
+                stop.check()
             if self._quarantined or any(not s.removed for s in self._sessions.values()):
                 raise DockerBackendFault("docker_busy")
             record = claim.record
@@ -539,8 +567,9 @@ class DockerJobController:
             intent: DockerLaunchIntent | None = None
             handle: DockerOwnedContainer | None = None
             observed_container_id: str | None = None
+            intent_attempted = False
             try:
-                target = self.verifier.verify_target(declaration, deadline=deadline)
+                target = self._verify(declaration, deadline, stop)
                 if target.declaration_digest != declaration.fingerprint:
                     raise DockerBackendFault("docker_target_mismatch")
                 binding = self.inputs.verify(record.manifest, deadline=deadline)
@@ -554,7 +583,12 @@ class DockerJobController:
                 self._declarations[intent.attempt_id] = declaration
                 self.inputs.check(binding, record.manifest, deadline=deadline)
                 self._engine(intent, deadline)
+                if stop is not None:
+                    stop.check()
+                intent_attempted = True
                 self._record(intent, "create_intent", deadline=deadline)
+                if stop is not None:
+                    stop.check()
                 container_id = self.backend.create(intent, deadline=deadline)
                 if re.fullmatch(r"[0-9a-f]{64}", container_id) is None:
                     raise DockerBackendFault("docker_mutation_unconfirmed")
@@ -573,6 +607,13 @@ class DockerJobController:
                     raise _state_fault(state)
                 return handle
             except Exception as error:
+                if (
+                    not intent_attempted
+                    and isinstance(error, DockerBackendFault)
+                    and error.code == "docker_cancelled"
+                ):
+                    # No journal/mutation was attempted; SQL still must prove the no-launch fence.
+                    raise
                 self._quarantined = True
                 if intent is not None:
                     if (
@@ -587,7 +628,9 @@ class DockerJobController:
                     raise
                 raise DockerBackendFault("docker_mutation_unconfirmed") from None
 
-    def _cleanup(self, session: _Session, deadline: float) -> bool:
+    def _cleanup(
+        self, session: _Session, deadline: float, *, grace_deadline: float | None = None
+    ) -> bool:
         handle, intent = session.handle, session.handle.intent
         if session.removed:
             return True  # Confirmed prior removal is a fact, never a repeated mutation.
@@ -608,9 +651,21 @@ class DockerJobController:
                 if not session.stop_attempted:
                     session.stop_attempted = True
                     try:
-                        self.backend.stop(
-                            intent.target.endpoint, handle.container_id, deadline=deadline
-                        )
+                        if grace_deadline is not None:
+                            if not isinstance(self.backend, CancellableDockerBackend):
+                                raise DockerBackendFault("docker_unsafe_configuration")
+                            self.backend.stop_gracefully(
+                                intent.target.endpoint,
+                                handle.container_id,
+                                grace_seconds=max(
+                                    0, min(5, int(grace_deadline - time.monotonic()))
+                                ),
+                                deadline=deadline,
+                            )
+                        else:
+                            self.backend.stop(
+                                intent.target.endpoint, handle.container_id, deadline=deadline
+                            )
                     except Exception:
                         self._unknown(intent, deadline, handle)
                 raw = self._read(intent, handle.container_id, deadline, handle.created_at)
@@ -626,6 +681,18 @@ class DockerJobController:
                     raw = self._read(intent, handle.container_id, deadline, handle.created_at)
             if _mapping(raw.get("State")).get("Running") is not False:
                 raise DockerBackendFault("docker_cleanup_unconfirmed")
+            final_state = _mapping(raw.get("State"))
+            if (
+                grace_deadline is not None
+                and session.start_recorded
+                and session.exit_code is None
+                and final_state.get("Status") == "exited"
+            ):
+                code = final_state.get("ExitCode")
+                if type(code) is not int or not 0 <= code <= 255:
+                    raise DockerBackendFault("docker_mutation_unconfirmed")
+                session.exit_code = code
+                self._record(intent, "exited", deadline=deadline, handle=handle, exit_code=code)
             self._engine(intent, deadline)
             session.remove_attempted = True
             self.backend.remove(intent.target.endpoint, handle.container_id, deadline=deadline)
@@ -656,6 +723,7 @@ class DockerJobController:
         *,
         deadline: float,
         cleanup_deadline: float,
+        stop: ExecutionStopSignal | None = None,
     ) -> DockerJobOutcome:
         with self._operation():
             deadline = min(
@@ -664,23 +732,30 @@ class DockerJobController:
             cleanup_deadline = min(cleanup_deadline, deadline + 10)
             self._budgets(deadline, cleanup_deadline)
             session = self._session(handle)
+            if stop is not None:
+                stop.require_scope(handle.intent.record)
             if session.start_attempted or session.removed or self._quarantined:
                 raise DockerBackendFault("docker_authority_required")
             session.start_attempted = (
                 True  # Before journal/transport: uncertainty never reopens start.
             )
             session.sink = sink
+            if stop is not None:
+                stop.cap_cleanup(cleanup_deadline)
             exit_code: int | None = None
             timed_out = unknown = False
             try:
+                if stop is not None:
+                    stop.check()
                 if (
                     type(sink.retention_limit) is not int
                     or sink.retention_limit != handle.intent.record.manifest.profile.output_bytes
                 ):
                     raise DockerBackendFault("docker_unsafe_configuration")
-                target = self.verifier.verify_target(
+                target = self._verify(
                     DockerTargetDeclaration.model_validate(self._declaration(handle)),
-                    deadline=deadline,
+                    deadline,
+                    stop,
                 )
                 if target.fingerprint != handle.intent.target.fingerprint:
                     raise DockerBackendFault("docker_target_mismatch")
@@ -695,10 +770,26 @@ class DockerJobController:
                     or before_start.get("Running") is not False
                 ):
                     raise DockerBackendFault("docker_policy_mismatch")
+                if stop is not None:
+                    stop.check()
                 self._record(handle.intent, "start_intent", deadline=deadline, handle=handle)
-                transport_status = self.backend.attach(
-                    handle.intent.target.endpoint, handle.container_id, sink, deadline=deadline
-                )
+                session.start_recorded = True
+                if stop is not None:
+                    stop.check()
+                    if not isinstance(self.backend, CancellableDockerBackend):
+                        raise DockerBackendFault("docker_unsafe_configuration")
+                    transport_status = self.backend.attach_cancellable(
+                        handle.intent.target.endpoint,
+                        handle.container_id,
+                        sink,
+                        stop,
+                        lambda: self._observe_running(handle, stop, deadline),
+                        deadline=deadline,
+                    )
+                else:
+                    transport_status = self.backend.attach(
+                        handle.intent.target.endpoint, handle.container_id, sink, deadline=deadline
+                    )
                 raw = self._read(handle.intent, handle.container_id, deadline, handle.created_at)
                 state = _mapping(raw.get("State"))
                 code = state.get("ExitCode")
@@ -709,7 +800,7 @@ class DockerJobController:
                     or not 0 <= code <= 255
                 ):
                     raise DockerBackendFault("docker_mutation_unconfirmed")
-                exit_code = code
+                exit_code = session.exit_code = code
                 self._record(
                     handle.intent, "exited", deadline=deadline, handle=handle, exit_code=code
                 )
@@ -719,6 +810,19 @@ class DockerJobController:
                     )
                     self._unknown(handle.intent, cleanup_deadline, handle)
             except Exception as error:
+                if (
+                    stop is not None
+                    and isinstance(error, DockerBackendFault)
+                    and (
+                        error.code == "docker_cancelled"
+                        or (error.code == "docker_timeout" and time.monotonic() >= deadline)
+                    )
+                ):
+                    if not stop.requested:
+                        stop.request(uuid4(), "timeout")
+                    # Attach has returned/reaped before the owning coordinator persists
+                    # intent and re-enters this controller for cleanup. No reentrant mutations.
+                    raise DockerBackendFault("docker_cancelled") from None
                 unknown = True
                 timed_out = isinstance(error, DockerBackendFault) and error.code == "docker_timeout"
                 self._unknown(handle.intent, cleanup_deadline, handle)
@@ -730,6 +834,108 @@ class DockerJobController:
                 cleanup_verified=cleaned,
             )
             return session.outcome
+
+    def _observe_running(
+        self, handle: DockerOwnedContainer, stop: ExecutionStopSignal, deadline: float
+    ) -> None:
+        stop.check()
+        try:
+            raw = self._read(
+                handle.intent,
+                handle.container_id,
+                min(deadline, time.monotonic() + 0.5),
+                handle.created_at,
+            )
+        except DockerBackendFault as error:
+            if error.code == "docker_timeout":
+                return  # Bounded read-only probe timed out; never invent running readiness.
+            raise
+        if _mapping(raw.get("State")).get("Running") is True:
+            stop.mark_running()
+
+    def finish_stop_owned(
+        self,
+        handle: DockerOwnedContainer,
+        capture: DockerOutputCapture,
+        stop: ExecutionStopSignal,
+        store: ExecutionStopStore,
+    ) -> ExecutionStopRecord:
+        with self._operation():
+            session = self._session(handle)
+            stop.require_scope(handle.intent.record)
+            if session.sink is not capture or session.completion_attempted or not stop.requested:
+                raise DockerBackendFault("docker_authority_required")
+            session.completion_attempted = True
+            try:
+                output = capture.seal(abort=True)
+                cleaned = self._cleanup(
+                    session, stop.cleanup_deadline, grace_deadline=stop.grace_deadline
+                )
+                record = stop.confirmed
+                known = (
+                    record is not None
+                    and not self._journal_lost
+                    and not self._quarantined
+                    and cleaned
+                    and (not session.start_recorded or session.exit_code is not None)
+                )
+                if record is None:
+                    self._unknown(handle.intent, stop.recording_deadline, handle)
+                    raise DockerBackendFault("docker_journal_unconfirmed")
+                facts = DockerCompletion(
+                    owned=handle,
+                    outcome=DockerJobOutcome(
+                        exit_code=session.exit_code,
+                        cleanup_verified=cleaned,
+                        timed_out=False,
+                        outcome_unknown=not known,
+                    ),
+                    output=output,
+                )
+                terminal = ExecutionStopTerminal(
+                    outcome=("timed_out" if record.reason == "timeout" else "cancelled")
+                    if known
+                    else "unknown",
+                    evidence="owned" if known else "uncertain",
+                    cleanup_verified=cleaned,
+                    exit_code=session.exit_code if known else None,
+                    attempt_id=handle.intent.attempt_id if known else None,
+                    ownership_digest=fingerprint(
+                        {
+                            "intent": handle.intent.fingerprint,
+                            "container": handle.container_id,
+                            "birth": handle.created_at,
+                        }
+                    )
+                    if known
+                    else None,
+                    output_facts=facts.output_facts,
+                    output_digest=facts.output_digest,
+                )
+                observation = ExecutionStopObservation(
+                    scope=stop.scope,
+                    request_id=record.request_id,
+                    manifest_digest=record.manifest_digest,
+                    terminal=terminal,
+                    owned=handle if known else None,
+                )
+                result = store.finish_stop_with_capture(
+                    observation, output, deadline=stop.recording_deadline
+                )
+                if (
+                    result.terminal != terminal
+                    or result.scope != record.scope
+                    or result.request_id != record.request_id
+                ):
+                    raise DockerBackendFault("docker_journal_unconfirmed")
+                if not known:
+                    self._quarantined = True
+                return result
+            except Exception:
+                self._quarantined = True
+                raise DockerBackendFault("docker_journal_unconfirmed") from None
+            finally:
+                session.sink = None
 
     def complete(
         self,

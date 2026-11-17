@@ -2,6 +2,7 @@
 
 from typing import Never
 
+import pytest
 from typer.testing import CliRunner
 
 from jeff.application.execution import ExecutionCall, ExecutionReply, execution_failure
@@ -74,6 +75,70 @@ def test_fresh_cli_is_lazy_distinct_and_requires_reviewed_digest() -> None:
     for operation in ("show", "logs"):
         runner.invoke(app, ["execution", operation, object_id, "--json"])
         assert calls[-1].operation == operation and calls[-1].reviewed_manifest_digest is None
+
+
+def test_cancel_cli_is_lazy_requires_digest_and_never_discovers_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+    from uuid import uuid4
+
+    from jeff.application.execution import (
+        ExecutionCancelCall,
+        ExecutionCancelReply,
+        ExecutionStopView,
+    )
+
+    calls: list[ExecutionCancelCall] = []
+
+    def forbidden() -> Never:
+        raise AssertionError("Cancellation must not invoke unrelated factories or cwd discovery")
+
+    class Client:
+        def cancel(self, call: ExecutionCancelCall) -> ExecutionCancelReply:
+            calls.append(call)
+            return ExecutionCancelReply(
+                request_id=call.request_id,
+                approval_id=call.approval_id,
+                reviewed_manifest_digest=call.reviewed_manifest_digest,
+                identity=uuid4(),
+                ok=True,
+                stop=ExecutionStopView(
+                    request_id=call.request_id,
+                    reason="cancel",
+                    requested_at_ms=1000,
+                    clock_confirmed=True,
+                ),
+            )
+
+    app = create_app(forbidden, forbidden, cancellation=lambda: Client())
+    runner = CliRunner()
+    approval, request_id = uuid4(), uuid4()
+    assert runner.invoke(app, ["execution", "cancel", "--help"]).exit_code == 0
+    assert runner.invoke(app, ["execution", "cancel", str(approval)]).exit_code == 2
+    assert not calls
+    monkeypatch.setattr(Path, "cwd", forbidden)
+    response = runner.invoke(
+        app,
+        [
+            "execution",
+            "cancel",
+            str(approval),
+            "--digest",
+            "a" * 64,
+            "--request-id",
+            str(request_id),
+            "--json",
+        ],
+    )
+    assert response.exit_code == 0, response.output
+    parsed = ExecutionCancelReply.model_validate_json(response.stdout)
+    assert parsed.stop is not None and parsed.stop.outcome is None
+    assert calls == [
+        ExecutionCancelCall(
+            request_id=request_id, approval_id=approval, reviewed_manifest_digest="a" * 64
+        )
+    ]
 
 
 def test_run_passes_literal_argv_to_review_port_without_invoking_project_factories() -> None:

@@ -9,15 +9,18 @@ import math
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future
 from contextlib import contextmanager
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from jeff.application.execution import (
     AuthorityOperation,
     AuthorityRecord,
     AuthorityResult,
     AuthorityStore,
+    CancellableDockerController,
+    CancellableDockerVerifier,
     DockerBackendFault,
     DockerCompletionStore,
     DockerExecutionController,
@@ -26,10 +29,18 @@ from jeff.application.execution import (
     DockerTargetDeclaration,
     DockerTargetVerifier,
     ExecutionAdmission,
+    ExecutionCancelCall,
+    ExecutionCancellationStore,
     ExecutionInspectionScope,
+    ExecutionLivePhase,
     ExecutionManifest,
     ExecutionProfile,
     ExecutionResultReader,
+    ExecutionStopObservation,
+    ExecutionStopRecord,
+    ExecutionStopSignal,
+    ExecutionStopStore,
+    ExecutionStopTerminal,
     FreshExecutionCall,
     FreshExecutionCompletion,
     FreshExecutionReply,
@@ -76,6 +87,7 @@ class ExecutionCoordinator:
         instance_id: UUID,
         proposal_lookup: ProposalLookupStore | None = None,
         inspection: ExecutionResultReader | None = None,
+        stop_store: ExecutionStopStore | None = None,
     ) -> None:
         self.projects, self.registry, self.authority = projects, registry, authority
         self.preparer, self.inputs, self.verifier = preparer, inputs, verifier
@@ -84,6 +96,119 @@ class ExecutionCoordinator:
         self.proposal_lookup = proposal_lookup
         self.inspection = inspection
         self._mutex = threading.Lock()
+        self.stop_store = stop_store
+        self._control_mutex = threading.Lock()
+        self._live: ExecutionStopSignal | None = None
+        self._shutdown_deadline: float | None = None
+        self._execution_uncertain = False
+
+    @property
+    def shutdown_confirmed(self) -> bool:
+        with self._control_mutex:
+            return not self._execution_uncertain and (
+                self._live is None or self._live.completion_known
+            )
+
+    @property
+    def cancellation_available(self) -> bool:
+        return (
+            isinstance(self.stop_store, ExecutionCancellationStore)
+            and isinstance(self.controller, CancellableDockerController)
+            and isinstance(self.verifier, CancellableDockerVerifier)
+        )
+
+    def submit_cancel(
+        self, call: ExecutionCancelCall, *, deadline: float
+    ) -> Future[ExecutionStopRecord]:
+        if not self.cancellation_available or not isinstance(
+            self.stop_store, ExecutionCancellationStore
+        ):
+            raise DockerBackendFault("docker_authority_required")
+        with self._control_mutex:
+            live = self._live
+        if live is not None and (
+            live.scope.approval_id != call.approval_id
+            or live.authority.manifest_digest != call.reviewed_manifest_digest
+        ):
+            live = None
+        if live is not None:
+            live.request(call.request_id, "cancel")  # Provisional fence, never durable acceptance.
+        future = self.stop_store.submit_cancel(call, deadline=deadline)
+        if live is not None:
+
+            def committed(done: Future[ExecutionStopRecord]) -> None:
+                try:
+                    assert live is not None
+                    live.confirm(done.result())
+                except Exception:
+                    pass  # SQL failure never clears the provisional fence or restarts work.
+
+            future.add_done_callback(committed)
+        return future
+
+    def begin_shutdown(self, deadline: float) -> None:
+        with self._control_mutex:
+            self._shutdown_deadline = min(self._shutdown_deadline or deadline, deadline)
+            live = self._live
+            cap = self._shutdown_deadline
+        if live is not None:
+            live.request(uuid4(), "shutdown", shutdown_deadline=cap)
+
+    def execution_phase(self, approval_id: UUID) -> ExecutionLivePhase | None:
+        with self._control_mutex:
+            live = self._live
+        return live.phase if live is not None and live.scope.approval_id == approval_id else None
+
+    def _persist_live_stop(self, stop: ExecutionStopSignal) -> ExecutionStopRecord | None:
+        assert self.stop_store is not None
+        if stop.confirmed is not None:
+            return stop.confirmed
+        try:
+            record = self.stop_store.request_stop(
+                stop.request_record(), deadline=min(stop.recording_deadline, time.monotonic() + 1)
+            )
+            stop.confirm(record)
+            return record
+        except (DockerBackendFault, ReviewFault, StorageFault):
+            return None  # Owned cleanup still runs; no invented durable acceptance.
+
+    def _finish_without_handle(self, stop: ExecutionStopSignal) -> ExecutionStopRecord:
+        assert self.stop_store is not None
+        record = self._persist_live_stop(stop)
+        if record is None:
+            raise DockerBackendFault("docker_journal_unconfirmed")
+        if record.terminal is not None:
+            stop.finished(record)
+            return record
+        observation = ExecutionStopObservation(
+            scope=stop.scope,
+            request_id=record.request_id,
+            manifest_digest=record.manifest_digest,
+            terminal=ExecutionStopTerminal(
+                outcome="timed_out" if record.reason == "timeout" else "cancelled",
+                evidence="not_started",
+                cleanup_verified=True,
+            ),
+        )
+        try:
+            result = self.stop_store.finish_stop(observation, deadline=stop.recording_deadline)
+            stop.finished(result)
+            return result
+        except ReviewFault as error:
+            if error.code != "execution_outcome_unknown":
+                raise
+            # SQL positively rejected no-launch proof; this is not an ACK-loss retry.
+            return self.stop_store.finish_stop(
+                ExecutionStopObservation(
+                    scope=stop.scope,
+                    request_id=record.request_id,
+                    manifest_digest=record.manifest_digest,
+                    terminal=ExecutionStopTerminal(
+                        outcome="unknown", evidence="uncertain", cleanup_verified=False
+                    ),
+                ),
+                deadline=stop.recording_deadline,
+            )
 
     @staticmethod
     def _deadline(deadline: float) -> None:
@@ -132,8 +257,18 @@ class ExecutionCoordinator:
             raise DockerBackendFault("docker_target_mismatch")
         return matches[0]
 
-    def _target(self, declaration: DockerTargetDeclaration, deadline: float) -> None:
-        target = self.verifier.verify_target(declaration, deadline=deadline)
+    def _target(
+        self,
+        declaration: DockerTargetDeclaration,
+        deadline: float,
+        stop: ExecutionStopSignal | None = None,
+    ) -> None:
+        if stop is not None:
+            if not isinstance(self.verifier, CancellableDockerVerifier):
+                raise DockerBackendFault("docker_unsafe_configuration")
+            target = self.verifier.verify_target_cancellable(declaration, stop, deadline=deadline)
+        else:
+            target = self.verifier.verify_target(declaration, deadline=deadline)
         p = declaration.profile
         if (
             target.declaration_digest != declaration.fingerprint
@@ -169,13 +304,19 @@ class ExecutionCoordinator:
         return record
 
     def _checked(
-        self, project: Project, record: AuthorityRecord, deadline: float
+        self,
+        project: Project,
+        record: AuthorityRecord,
+        deadline: float,
+        stop: ExecutionStopSignal | None = None,
     ) -> DockerTargetDeclaration:
         profile = self._profile(project, record.manifest.profile.name)
         if profile != record.manifest.profile:
             raise DockerBackendFault("docker_target_mismatch")
         declaration = self._declaration(profile)
-        self._target(declaration, deadline)
+        self._target(declaration, deadline, stop)
+        if stop is not None:
+            stop.check()
         binding = self.inputs.verify(record.manifest, deadline=deadline)
         if (
             binding.snapshot_id != record.manifest.inputs.snapshot_id
@@ -246,8 +387,21 @@ class ExecutionCoordinator:
                     view=FreshExecutionView.from_record(record),
                     completion=completion,
                     completion_state=observed.completion_state,
-                    output=result.output
-                    if result is not None and call.operation == "logs"
+                    stop=observed.stop,
+                    execution_phase=self.execution_phase(record.approval_id)
+                    or (
+                        "finished"
+                        if record.claim_state == "finished"
+                        or (
+                            observed.stop is not None
+                            and observed.stop.outcome in {"cancelled", "timed_out", "completed"}
+                        )
+                        else "unconfirmed"
+                        if record.claim_state == "unknown"
+                        else None
+                    ),
+                    output=(result.output if result is not None else observed.stop_output)
+                    if call.operation == "logs"
                     else None,
                 )
             else:
@@ -376,7 +530,50 @@ class ExecutionCoordinator:
         capture: DockerOutputCapture,
         job_deadline: float,
         cleanup_deadline: float,
-    ) -> DockerExecutionResult:
+        stop: ExecutionStopSignal | None = None,
+    ) -> DockerExecutionResult | ExecutionStopRecord:
+        if stop is not None:
+            if self.stop_store is None or not isinstance(
+                self.controller, CancellableDockerController
+            ):
+                raise DockerBackendFault("docker_authority_required")
+            handle = None
+            try:
+                stop.check()
+                handle = self.controller.create(
+                    claim,
+                    declaration,
+                    deadline=job_deadline,
+                    cleanup_deadline=cleanup_deadline,
+                    stop=stop,
+                )
+                self.controller.run(
+                    handle,
+                    capture,
+                    deadline=job_deadline,
+                    cleanup_deadline=cleanup_deadline,
+                    stop=stop,
+                )
+            except DockerBackendFault:
+                if not stop.requested:
+                    raise
+                self._persist_live_stop(stop)
+                if handle is not None:
+                    stopped = self.controller.finish_stop_owned(
+                        handle, capture, stop, self.stop_store
+                    )
+                    stop.finished(stopped)
+                    return stopped
+                capture.seal(abort=True)
+                return self._finish_without_handle(stop)
+            completed = self.controller.complete(
+                handle,
+                capture,
+                self.results,
+                deadline=min(time.monotonic() + 5, stop.recording_deadline),
+            )
+            stop.finished(completed)
+            return completed
         # Only the local first confirmed response reaches this mutation path.
         handle = self.controller.create(
             claim, declaration, deadline=job_deadline, cleanup_deadline=cleanup_deadline
@@ -405,7 +602,7 @@ class ExecutionCoordinator:
         request_id: UUID,
         admission_deadline: float,
         on_admitted: Callable[[ExecutionAdmission], None],
-    ) -> DockerExecutionResult | AuthorityRecord:
+    ) -> DockerExecutionResult | AuthorityRecord | ExecutionStopRecord:
         """Owned-worker entry: acknowledge a committed claim, then continue locally.
 
         The observer receives no permission. Its failure cannot cancel admitted
@@ -420,18 +617,34 @@ class ExecutionCoordinator:
             if record.state not in (AuthorityState.APPROVED, AuthorityState.CONSUMED):
                 raise DockerBackendFault("docker_authority_required")
             capture: DockerOutputCapture | None = None
+            job_deadline = time.monotonic() + record.manifest.profile.timeout_seconds
+            stop = None
+            if self.stop_store is not None and record.state == AuthorityState.APPROVED:
+                if not self.cancellation_available:
+                    raise DockerBackendFault("docker_authority_required")
+                stop = ExecutionStopSignal(record, job_deadline=job_deadline)
+                with self._control_mutex:
+                    self._live = stop
+                    shutdown = self._shutdown_deadline
+                if shutdown is not None:
+                    stop.request(uuid4(), "shutdown", shutdown_deadline=shutdown)
             try:
-                job_deadline = time.monotonic() + record.manifest.profile.timeout_seconds
+                if stop is not None and stop.requested:
+                    return self._finish_without_handle(stop)
                 claim_deadline = min(admission_deadline, job_deadline)
                 declaration: DockerTargetDeclaration | None = None
                 if record.state == AuthorityState.APPROVED:
-                    declaration = self._checked(project, record, claim_deadline)
+                    declaration = self._checked(project, record, claim_deadline, stop)
                     capture = self.capture(record.manifest.profile.output_bytes)
                     if (
                         type(capture.retention_limit) is not int
                         or capture.retention_limit != record.manifest.profile.output_bytes
                     ):
                         raise DockerBackendFault("docker_unsafe_configuration")
+                if stop is not None and stop.requested:
+                    if capture is not None:
+                        capture.seal(abort=True)
+                    return self._finish_without_handle(stop)
                 claim = self.authority.authority(
                     self._operation(
                         project,
@@ -457,6 +670,8 @@ class ExecutionCoordinator:
                     or claim.record.claim_state != "claimed"
                 ):
                     raise DockerBackendFault("docker_authority_required")
+                if stop is not None and not replayed:
+                    stop.mark_claimed()
                 observation = ExecutionAdmission.model_validate(
                     {
                         "request_id": request_id,
@@ -480,15 +695,33 @@ class ExecutionCoordinator:
                 if capture is None or declaration is None:
                     raise DockerBackendFault("docker_authority_required")
                 return self._execute_claim(
-                    claim, declaration, capture, job_deadline, job_deadline + 10
+                    claim, declaration, capture, job_deadline, job_deadline + 10, stop
                 )
-            except Exception:
+            except Exception as error:
                 if capture is not None:
                     try:
                         capture.seal(abort=True)
                     except Exception:
                         pass
+                if (
+                    stop is not None
+                    and isinstance(error, DockerBackendFault)
+                    and error.code == "docker_cancelled"
+                ):
+                    return self._finish_without_handle(stop)
                 raise
+            finally:
+                # A native stop can arrive after natural exit but before this
+                # worker returns. Persist that intent without relabelling v1 completion.
+                if stop is not None and stop.requested and stop.confirmed is None:
+                    self._persist_live_stop(stop)
+                with self._control_mutex:
+                    if self._live is stop:
+                        if stop is not None and (
+                            not stop.completion_known or (stop.requested and stop.confirmed is None)
+                        ):
+                            self._execution_uncertain = True
+                        self._live = None
 
     def run(
         self, directory: Path, approval_id: UUID, expected_manifest_digest: str, *, deadline: float
@@ -532,9 +765,12 @@ class ExecutionCoordinator:
                 if claim.launch_claim is None:
                     raise DockerBackendFault("docker_authority_required")
                 # Never cache/return the ephemeral first-response launch permission.
-                return self._execute_claim(
+                result = self._execute_claim(
                     claim, declaration, capture, job_deadline, cleanup_deadline
                 )
+                if not isinstance(result, DockerExecutionResult):
+                    raise DockerBackendFault("docker_journal_unconfirmed")
+                return result
             except Exception:
                 try:
                     capture.seal(abort=True)

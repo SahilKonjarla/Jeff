@@ -16,6 +16,7 @@ from jeff.application.execution import (
     DockerLaunchIntent,
     ExecutionManifest,
     ExecutionProfile,
+    ExecutionStopSignal,
     PreparedInputBinding,
     PreparedInputs,
     VerifiedDockerTarget,
@@ -40,6 +41,7 @@ def test_cli_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     bad_listing = False
     sink_failure = False
+    cancel_signal: ExecutionStopSignal | None = None
     killed: list[str] = []
 
     class Child:
@@ -79,7 +81,9 @@ def test_cli_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         (home / "Library").mkdir(exist_ok=True)
         if argv[5:7] == ["container", "start"]:
             assert argv[7:] == ["--attach", "--", identifier]
-            return Child(b"public-out", b"public-err", 7, alive=sink_failure)
+            return Child(
+                b"public-out", b"public-err", 7, alive=sink_failure or cancel_signal is not None
+            )
         assert "--force" not in argv and "-f" not in argv and "--volumes" not in argv
         if argv[5] == "create":
             assert "--pull=never" in argv and "--read-only" in argv
@@ -102,6 +106,8 @@ def test_cli_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             if sink_failure:
                 raise ValueError("synthetic output must not escape")
             self.counts[stream] = self.counts.get(stream, 0) + len(data)
+            if cancel_signal is not None:
+                cancel_signal.request(uuid4(), "cancel")
 
         def finish(self, stream: str) -> None:
             self.finished.append(stream)
@@ -169,6 +175,24 @@ def test_cli_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             claim_state="claimed",
             claimed_at_ms=200,
         )
+        sink_failure = False
+        cancel_signal = ExecutionStopSignal(record, job_deadline=time.monotonic() + 30)
+        before = len(calls)
+        with pytest.raises(DockerBackendFault) as cancelled:
+            backend.attach_cancellable(
+                endpoint,
+                identifier,
+                Sink(),
+                cancel_signal,
+                lambda: None,
+                deadline=time.monotonic() + 5,
+            )
+        assert cancelled.value.code == "docker_cancelled"
+        assert len(calls) == before + 1 and killed == ["captured-cli", "captured-cli"]
+        backend.stop_gracefully(
+            endpoint, identifier, grace_seconds=5, deadline=time.monotonic() + 10
+        )
+        assert calls[-1][5:] == ["container", "stop", "--timeout", "5", "--", identifier]
         target = VerifiedDockerTarget(
             declaration_digest="a" * 64,
             profile_digest=profile.fingerprint,

@@ -98,7 +98,7 @@ class _RecoveryBindings(_ProofModel):
 
 class _RecoveryPermit(_ProofModel):
     version: StrictInt = Field(ge=1, le=1)
-    schema_version: StrictInt = Field(ge=4, le=8)
+    schema_version: StrictInt = Field(ge=4, le=10)
     nonce: str = Field(pattern=r"^[0-9a-f]{32}$")
     page_size: StrictInt = Field(ge=512, le=65536)
     original_pages: StrictInt = Field(gt=0, le=(1 << 32) - 1)
@@ -649,7 +649,7 @@ class Ownership:
     ) -> _RecoveryPermit:
         """Bind the actual SQLite-created journal before any business DML; never create it."""
         self.check()
-        if type(schema_version) is not int or schema_version not in (4, 5, 6, 7, 8):
+        if type(schema_version) is not int or schema_version not in (4, 5, 6, 7, 8, 9, 10):
             raise ControlFault("runtime_ownership_unconfirmed")
         token = self.store.read_credential()
         with self.store.directory(self.store.layout.data_dir, create=False) as root:

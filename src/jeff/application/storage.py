@@ -33,7 +33,7 @@ from jeff.application.projects import ErrorData, Failure, ProjectService
 from jeff.domain.projects import Project
 
 SETTINGS_SCHEMA = 3
-DATABASE_SCHEMA = 8
+DATABASE_SCHEMA = 10
 RETIREMENT_BATCH_LIMIT = 100
 RETIREMENT_INTERVAL_SECONDS = 60
 DATABASE_APPLICATION_ID = int.from_bytes(b"JEFF", "big")

@@ -1,11 +1,15 @@
 """Legacy reviews, distinct fresh public intent and private authority ports; no Docker I/O."""
 
+import math
 import re
+import threading
+import time
 import unicodedata
 from collections.abc import Callable
+from concurrent.futures import Future
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Literal, Protocol, Self
+from typing import Literal, Protocol, Self, runtime_checkable
 from uuid import UUID, uuid4
 
 from pydantic import (
@@ -876,6 +880,7 @@ class DockerBackendFault(Exception):
             "docker_protocol_error",
             "docker_output_limit",
             "docker_output_failed",
+            "docker_cancelled",
             "docker_timeout",
             "docker_command_failed",
             "docker_cleanup_unconfirmed",
@@ -1375,9 +1380,10 @@ class ExecutionStarter(Protocol):
         request_id: UUID,
         admission_deadline: float,
         on_admitted: Callable[[ExecutionAdmission], None],
-    ) -> DockerExecutionResult | AuthorityRecord: ...
+    ) -> "DockerExecutionResult | AuthorityRecord | ExecutionStopRecord": ...
 
 
+ExecutionLivePhase = Literal["claim_pending", "admitted", "running_observed", "stop_requested"]
 FreshExecutionOperation = Literal["propose", "approve", "deny", "start", "show", "logs"]
 
 
@@ -1503,6 +1509,112 @@ class FreshExecutionCompletion(_Model):
         return self
 
 
+class ExecutionCancelCall(_Model):
+    """Authenticated stop intent targets immutable reviewed identity, never live paths."""
+
+    request_id: UUID
+    approval_id: UUID
+    reviewed_manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ExecutionStopView(_Model):
+    """Wire12 stop facts only: never a controller identity or complete-log promise."""
+
+    request_id: UUID
+    reason: Literal["cancel", "timeout", "shutdown"]
+    requested_at_ms: StrictInt = Field(ge=0)
+    clock_confirmed: StrictBool
+    outcome: Literal["cancelled", "timed_out", "completed", "unknown"] | None = None
+    evidence: Literal["not_started", "owned", "uncertain"] | None = None
+    cleanup_verified: StrictBool | None = None
+    exit_code: StrictInt | None = Field(default=None, ge=0, le=255)
+    output_facts: DockerOutputFacts | None = None
+    payload_state: Literal[
+        "not_inspected", "missing", "retained", "retired", "expired", "clock_unconfirmed"
+    ] = "not_inspected"
+    retirement_reason: Literal["age", "capacity"] | None = None
+    recorded_at_ms: StrictInt | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        if (self.outcome is None) != (self.evidence is None) or (
+            (self.outcome is None) != (self.cleanup_verified is None)
+        ):
+            raise ValueError("Incomplete stop observation.")
+        if self.outcome is None and (self.exit_code is not None or self.output_facts is not None):
+            raise ValueError("Pending intent cannot assert terminal capture facts.")
+        if self.outcome not in {None, "unknown"} and self.cleanup_verified is not True:
+            raise ValueError("Known termination requires confirmed cleanup.")
+        if self.evidence == "uncertain" and self.outcome != "unknown":
+            raise ValueError("Uncertain evidence cannot confirm termination.")
+        if self.evidence == "not_started" and (
+            self.outcome not in {"cancelled", "timed_out"}
+            or self.exit_code is not None
+            or self.output_facts is not None
+        ):
+            raise ValueError("No-launch proof cannot invent execution facts.")
+        if self.outcome in {"cancelled", "timed_out"} and self.outcome != (
+            "timed_out" if self.reason == "timeout" else "cancelled"
+        ):
+            raise ValueError("Termination differs from the first stop reason.")
+        if self.outcome == "completed" and (
+            self.evidence != "owned"
+            or self.exit_code is None
+            or self.output_facts is None
+            or self.output_facts.aborted
+            or not (self.output_facts.stdout_eof and self.output_facts.stderr_eof)
+        ):
+            raise ValueError("Ordinary completion needs complete, confirmed capture facts.")
+        if (self.payload_state == "retired") != (self.retirement_reason is not None):
+            raise ValueError("Inconsistent stop payload retirement.")
+        if self.payload_state not in {"missing", "not_inspected"} and (
+            self.output_facts is None or self.recorded_at_ms is None
+        ):
+            raise ValueError("Stop payload availability requires capture facts.")
+        return self
+
+    @classmethod
+    def from_record(cls, record: "ExecutionStopRecord", **payload: object) -> Self:
+        fields: dict[str, object] = dict(
+            request_id=record.request_id,
+            reason=record.reason,
+            requested_at_ms=record.requested_at_ms,
+            clock_confirmed=record.clock_confirmed,
+        )
+        terminal = record.terminal
+        if terminal is not None:
+            fields.update(
+                outcome=terminal.outcome,
+                evidence=terminal.evidence,
+                cleanup_verified=terminal.cleanup_verified,
+                exit_code=terminal.exit_code,
+                output_facts=terminal.output_facts,
+            )
+        return cls.model_validate({**fields, **payload})
+
+
+class ExecutionCancelReply(_Model):
+    request_id: UUID
+    approval_id: UUID
+    reviewed_manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    identity: UUID | None = None
+    ok: StrictBool
+    stop: ExecutionStopView | None = None
+    error: Failure | None = None
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        if self.ok != (self.error is None) or self.ok != (self.stop is not None):
+            raise ValueError("Cancellation accepts durable intent only, not invented termination.")
+        if self.ok and self.identity is None:
+            raise ValueError("Accepted stop requires authenticated instance correlation.")
+        return self
+
+
+class ExecutionCancelClient(Protocol):
+    def cancel(self, call: ExecutionCancelCall) -> ExecutionCancelReply: ...
+
+
 class FreshExecutionReply(_Model):
     authority_kind: Literal["execution_v1"] = "execution_v1"
     request_id: UUID
@@ -1513,8 +1625,11 @@ class FreshExecutionReply(_Model):
     admission: ExecutionAdmission | None = None
     completion: FreshExecutionCompletion | None = None
     completion_state: (
-        Literal["not_claimed", "claim_only", "launch_without_result", "recorded"] | None
+        Literal["not_claimed", "claim_only", "launch_without_result", "recorded", "stop_recorded"]
+        | None
     ) = None
+    stop: ExecutionStopView | None = None
+    execution_phase: ExecutionLivePhase | Literal["finished", "unconfirmed"] | None = None
     output: DockerOutputSnapshot | None = None
     error: Failure | None = None
 
@@ -1530,6 +1645,8 @@ class FreshExecutionReply(_Model):
                     self.admission,
                     self.completion,
                     self.completion_state,
+                    self.stop,
+                    self.execution_phase,
                     self.output,
                 )
             ):
@@ -1542,14 +1659,24 @@ class FreshExecutionReply(_Model):
                 or self.admission.request_id != self.request_id
                 or any(
                     value is not None
-                    for value in (self.view, self.completion, self.completion_state, self.output)
+                    for value in (
+                        self.view,
+                        self.completion,
+                        self.completion_state,
+                        self.stop,
+                        self.execution_phase,
+                        self.output,
+                    )
                 )
             ):
                 raise ValueError("Start acknowledges only the matching committed claim.")
         elif self.view is None or self.admission is not None:
             raise ValueError("Non-start success requires original scoped facts.")
         if (
-            self.completion is not None or self.completion_state is not None
+            self.completion is not None
+            or self.completion_state is not None
+            or self.stop is not None
+            or self.execution_phase is not None
         ) and self.operation not in {"show", "logs"}:
             raise ValueError("Completion is inspection only.")
         if self.ok and self.operation in {"show", "logs"}:
@@ -1562,28 +1689,38 @@ class FreshExecutionReply(_Model):
                 expected = "finished" if self.completion.disposition == "completed" else "unknown"
                 if self.view.claim_state != expected:
                     raise ValueError("Inspection authority and completion disagree.")
+            elif self.completion_state == "stop_recorded":
+                if self.stop is None or self.stop.outcome in {None, "completed"}:
+                    raise ValueError("Stop inspection requires a distinct terminal.")
+                if self.view.claim_state is None:
+                    if (
+                        self.stop.evidence != "not_started"
+                        or self.view.state != AuthorityState.INVALIDATED
+                    ):
+                        raise ValueError("Unclaimed cancellation requires positive revocation.")
+                elif self.view.claim_state != (
+                    "unknown" if self.stop.outcome == "unknown" else "finished"
+                ):
+                    raise ValueError("Stop terminal and authority disagree.")
             elif self.view.claim_state == "finished" or (
                 self.completion_state == "not_claimed"
             ) != (self.view.claim_state is None):
                 raise ValueError("Inconsistent absent completion facts.")
-            if (
-                self.operation == "logs"
-                and self.completion is not None
-                and (self.completion.payload_state == "retained") != (self.output is not None)
+            payload = self.completion if self.completion is not None else self.stop
+            if self.operation == "logs" and (
+                (payload is not None and payload.payload_state == "retained")
+                != (self.output is not None)
             ):
                 raise ValueError("Log text must agree with explicit retention state.")
         if self.output is not None:
-            if (
-                self.operation != "logs"
-                or self.completion is None
-                or self.completion.payload_state != "retained"
-            ):
+            payload = self.completion if self.completion is not None else self.stop
+            if self.operation != "logs" or payload is None or payload.payload_state != "retained":
                 raise ValueError("Only logs may carry retained guarded text.")
             if (
                 DockerOutputFacts.model_validate(
                     self.output.model_dump(exclude={"stdout", "stderr"})
                 )
-                != self.completion.output_facts
+                != payload.output_facts
             ):
                 raise ValueError("Guarded text disagrees with capture facts.")
         return self
@@ -1643,11 +1780,45 @@ class ExecutionInspectionScope(_Model):
 
 class ExecutionInspection(_Model):
     record: AuthorityRecord
-    completion_state: Literal["not_claimed", "claim_only", "launch_without_result", "recorded"]
+    completion_state: Literal[
+        "not_claimed", "claim_only", "launch_without_result", "recorded", "stop_recorded"
+    ]
     result: DockerExecutionResult | None = None
+    stop: ExecutionStopView | None = None
+    stop_output: DockerOutputSnapshot | None = None
 
     @model_validator(mode="after")
     def consistent(self) -> Self:
+        if self.completion_state == "stop_recorded":
+            if (
+                self.stop is None
+                or self.stop.outcome in {None, "completed"}
+                or self.result is not None
+            ):
+                raise ValueError("Stop terminal cannot manufacture ordinary completion.")
+            if self.record.claim_id is None:
+                if (
+                    self.stop.evidence != "not_started"
+                    or self.record.state != AuthorityState.INVALIDATED
+                ):
+                    raise ValueError("Unclaimed stop requires positive revocation.")
+            elif self.record.claim_state != (
+                "unknown" if self.stop.outcome == "unknown" else "finished"
+            ):
+                raise ValueError("Stop and consumed authority disagree.")
+            if (self.stop.payload_state == "retained") != (self.stop_output is not None):
+                raise ValueError("Stop payload disagrees with availability.")
+            if (
+                self.stop_output is not None
+                and DockerOutputFacts.model_validate(
+                    self.stop_output.model_dump(exclude={"stdout", "stderr"})
+                )
+                != self.stop.output_facts
+            ):
+                raise ValueError("Stop capture facts disagree.")
+            return self
+        if self.stop_output is not None:
+            raise ValueError("Ordinary results use the original payload only.")
         if (self.completion_state == "not_claimed") != (self.record.claim_id is None):
             raise ValueError("Completion availability disagrees with claim facts.")
         if (self.completion_state == "recorded") != (self.result is not None):
@@ -1672,3 +1843,405 @@ class ExecutionResultReader(Protocol):
     def inspect_execution(
         self, scope: ExecutionInspectionScope, *, deadline: float
     ) -> ExecutionInspection: ...
+
+
+class ExecutionStopRequest(ExecutionInspectionScope):
+    """Internal stop intent, not a signal, completion proof or public launch grant."""
+
+    request_id: UUID
+    manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: Literal["cancel", "timeout", "shutdown"] = "cancel"
+
+
+class ExecutionStopTerminal(_Model):
+    """Versioned terminal facts; known termination does not imply complete logs."""
+
+    outcome: Literal["cancelled", "timed_out", "completed", "unknown"]
+    evidence: Literal["not_started", "owned", "uncertain"]
+    cleanup_verified: StrictBool
+    exit_code: StrictInt | None = Field(default=None, ge=0, le=255)
+    attempt_id: UUID | None = None
+    ownership_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    output_facts: DockerOutputFacts | None = None
+    output_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        owned = self.evidence == "owned"
+        if owned != (self.attempt_id is not None and self.ownership_digest is not None):
+            raise ValueError("Owned stop evidence requires exact identity facts.")
+        if not owned and (self.attempt_id is not None or self.ownership_digest is not None):
+            raise ValueError("Unowned stop evidence cannot invent a container identity.")
+        if (self.output_facts is None) != (self.output_digest is None):
+            raise ValueError("Output facts and digest must agree.")
+        if self.outcome != "unknown" and not self.cleanup_verified:
+            raise ValueError("Known stop requires verified cleanup.")
+        if self.evidence == "not_started" and (
+            self.outcome not in {"cancelled", "timed_out"}
+            or self.exit_code is not None
+            or self.output_facts is not None
+        ):
+            raise ValueError("A prelaunch stop cannot invent execution or output.")
+        if self.evidence == "uncertain" and self.outcome != "unknown":
+            raise ValueError("Uncertain evidence cannot confirm termination.")
+        if self.outcome == "completed" and (not owned or self.exit_code is None):
+            raise ValueError("Ordinary completion requires observed owned exit.")
+        return self
+
+
+class ExecutionStopRecord(_Model):
+    """Durable stop facts, never a restartable timer or reusable control handle.
+
+    The first request fixes UTC observation and policy budgets. A live owner must
+    cap its monotonic deadlines by the original job and shutdown deadlines; loading
+    these facts never starts another timer or reconciles unknown work.
+    """
+
+    version: Literal[1] = 1
+    scope: ExecutionInspectionScope
+    request_id: UUID
+    manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: Literal["cancel", "timeout", "shutdown"]
+    requested_at_ms: StrictInt = Field(ge=0, le=9223372036854760807)
+    clock_confirmed: StrictBool
+    grace_seconds: Literal[5] = 5
+    cleanup_seconds: Literal[10] = 10
+    completion_seconds: Literal[5] = 5
+    terminal: ExecutionStopTerminal | None = None
+
+    @model_validator(mode="after")
+    def reason_matches(self) -> Self:
+        if self.terminal is not None and self.terminal.outcome in {"cancelled", "timed_out"}:
+            expected = "timed_out" if self.reason == "timeout" else "cancelled"
+            if self.terminal.outcome != expected:
+                raise ValueError("Terminal observation disagrees with first stop reason.")
+        return self
+
+    @property
+    def fingerprint(self) -> str:
+        return fingerprint(self.model_dump(mode="json"))
+
+
+class ExecutionStopObservation(_Model):
+    """Trusted owner-to-SQL facts; constructed models alone do not prove no launch."""
+
+    scope: ExecutionInspectionScope
+    request_id: UUID
+    manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    terminal: ExecutionStopTerminal
+    owned: DockerOwnedContainer | None = None
+
+    @model_validator(mode="after")
+    def bound(self) -> Self:
+        if (self.terminal.evidence == "owned") != (self.owned is not None):
+            raise ValueError("Stop observation requires matching ownership evidence.")
+        if self.owned is not None:
+            intent = self.owned.intent
+            expected = fingerprint(
+                {
+                    "intent": intent.fingerprint,
+                    "container": self.owned.container_id,
+                    "birth": self.owned.created_at,
+                }
+            )
+            if (
+                self.terminal.attempt_id != intent.attempt_id
+                or self.terminal.ownership_digest != expected
+                or self.manifest_digest != intent.record.manifest_digest
+                or self.scope.approval_id != intent.record.approval_id
+                or self.scope.project_id != intent.record.project_id
+                or self.scope.canonical_root != intent.record.canonical_root
+                or self.scope.owner_instance_id != intent.record.owner_instance_id
+            ):
+                raise ValueError("Stop observation belongs to different owned work.")
+        return self
+
+
+class ExecutionStopCapture(_Model):
+    """One atomic owner-to-SQL stop plus already sealed, guarded capture."""
+
+    observation: ExecutionStopObservation
+    output: DockerOutputSnapshot
+
+    @model_validator(mode="after")
+    def bound(self) -> Self:
+        terminal = self.observation.terminal
+        facts = DockerOutputFacts.model_validate(
+            self.output.model_dump(exclude={"stdout", "stderr"})
+        )
+        if (
+            terminal.outcome == "completed"
+            or terminal.output_facts != facts
+            or (
+                terminal.output_digest
+                != sha256(self.output.model_dump_json().encode("utf-8")).hexdigest()
+            )
+        ):
+            raise ValueError("Stop capture differs from immutable terminal facts.")
+        return self
+
+
+class ExecutionStopSignal:
+    """Private live-owner latch. Stored observations cannot construct or restart its timers."""
+
+    def __init__(self, authority: AuthorityRecord, *, job_deadline: float) -> None:
+        if not math.isfinite(job_deadline):
+            raise ValueError("A finite original deadline is required.")
+        self.authority = authority
+        self.scope = ExecutionInspectionScope(
+            project_id=authority.project_id,
+            canonical_root=authority.canonical_root,
+            owner_instance_id=authority.owner_instance_id,
+            approval_id=authority.approval_id,
+        )
+        self._lock = threading.Lock()
+        self._request: ExecutionStopRequest | None = None
+        self._confirmed: ExecutionStopRecord | None = None
+        self._running = False
+        self._claimed = authority.state == AuthorityState.CONSUMED
+        self._completion_known = False
+        self._grace = job_deadline + 5
+        self._cleanup = job_deadline + 10
+        self._recording = job_deadline + 15
+
+    @property
+    def completion_known(self) -> bool:
+        with self._lock:
+            return self._completion_known
+
+    def finished(self, result: ExecutionStopRecord | DockerExecutionResult) -> None:
+        if isinstance(result, DockerExecutionResult):
+            self.require_scope(result.owned.intent.record)
+            known = result.disposition == "completed"
+        else:
+            if (
+                result.scope != self.scope
+                or result.manifest_digest != self.authority.manifest_digest
+            ):
+                raise DockerBackendFault("docker_authority_required")
+            known = (
+                result.terminal is not None
+                and result.terminal.outcome != "unknown"
+                and result.terminal.cleanup_verified
+            )
+        with self._lock:
+            self._completion_known = known
+
+    def require_scope(self, authority: AuthorityRecord) -> None:
+        if (
+            authority.approval_id,
+            authority.project_id,
+            authority.canonical_root,
+            authority.owner_instance_id,
+            authority.manifest_digest,
+        ) != (
+            self.scope.approval_id,
+            self.scope.project_id,
+            self.scope.canonical_root,
+            self.scope.owner_instance_id,
+            self.authority.manifest_digest,
+        ):
+            raise DockerBackendFault("docker_authority_required")
+
+    def request(
+        self,
+        request_id: UUID,
+        reason: Literal["cancel", "timeout", "shutdown"],
+        *,
+        shutdown_deadline: float | None = None,
+    ) -> None:
+        request = ExecutionStopRequest(
+            **self.scope.model_dump(),
+            request_id=request_id,
+            manifest_digest=self.authority.manifest_digest,
+            reason=reason,
+        )
+        if shutdown_deadline is not None and not math.isfinite(shutdown_deadline):
+            raise ValueError("A finite shutdown cap is required.")
+        with self._lock:
+            if self._request is None:
+                now = time.monotonic()
+                self._request = request
+                self._grace = min(self._grace, now + 5)
+                self._cleanup = min(self._cleanup, now + 10)
+                self._recording = min(self._recording, now + 15)
+            if shutdown_deadline is not None:
+                self._recording = min(self._recording, shutdown_deadline)
+                self._cleanup = min(self._cleanup, shutdown_deadline - 5)
+            self._grace = min(self._grace, self._cleanup)
+
+    @property
+    def requested(self) -> bool:
+        with self._lock:
+            return self._request is not None
+
+    @property
+    def phase(self) -> ExecutionLivePhase:
+        with self._lock:
+            return (
+                "stop_requested"
+                if self._request is not None
+                else (
+                    "running_observed"
+                    if self._running
+                    else "admitted"
+                    if self._claimed
+                    else "claim_pending"
+                )
+            )
+
+    def mark_claimed(self) -> None:
+        with self._lock:
+            self._claimed = True
+
+    def mark_running(self) -> None:
+        with self._lock:
+            self._running = True
+
+    def check(self) -> None:
+        if self.requested:
+            raise DockerBackendFault("docker_cancelled")
+
+    def request_record(self) -> ExecutionStopRequest:
+        with self._lock:
+            if self._request is None:
+                raise DockerBackendFault("docker_authority_required")
+            if self._confirmed is not None:
+                return ExecutionStopRequest(
+                    **self.scope.model_dump(),
+                    request_id=self._confirmed.request_id,
+                    reason=self._confirmed.reason,
+                    manifest_digest=self.authority.manifest_digest,
+                )
+            return self._request
+
+    def confirm(self, record: ExecutionStopRecord) -> None:
+        with self._lock:
+            if (
+                self._request is None
+                or record.scope != self.scope
+                or (record.manifest_digest != self.authority.manifest_digest)
+            ):
+                raise DockerBackendFault("docker_authority_required")
+            self._confirmed = record  # Canonical first SQL facts; deadlines do not move.
+
+    @property
+    def confirmed(self) -> ExecutionStopRecord | None:
+        with self._lock:
+            return self._confirmed
+
+    def cap_cleanup(self, deadline: float) -> None:
+        with self._lock:
+            self._cleanup = min(self._cleanup, deadline)
+            self._grace = min(self._grace, self._cleanup)
+            self._recording = min(self._recording, deadline + 5)
+
+    @property
+    def grace_deadline(self) -> float:
+        with self._lock:
+            return self._grace
+
+    @property
+    def cleanup_deadline(self) -> float:
+        with self._lock:
+            return self._cleanup
+
+    @property
+    def recording_deadline(self) -> float:
+        with self._lock:
+            return self._recording
+
+
+@runtime_checkable
+class CancellableDockerVerifier(Protocol):
+    def verify_target_cancellable(
+        self, declaration: DockerTargetDeclaration, stop: ExecutionStopSignal, *, deadline: float
+    ) -> VerifiedDockerTarget: ...
+
+
+@runtime_checkable
+class CancellableDockerBackend(Protocol):
+    def attach_cancellable(
+        self,
+        endpoint: str,
+        container_id: str,
+        sink: DockerOutputSink,
+        stop: ExecutionStopSignal,
+        observe_running: Callable[[], None],
+        *,
+        deadline: float,
+    ) -> int: ...
+    def stop_gracefully(
+        self, endpoint: str, container_id: str, *, grace_seconds: int, deadline: float
+    ) -> None: ...
+
+
+@runtime_checkable
+class CancellableDockerController(Protocol):
+    def create(
+        self,
+        claim: AuthorityResult,
+        declaration: DockerTargetDeclaration,
+        *,
+        deadline: float,
+        cleanup_deadline: float,
+        stop: ExecutionStopSignal | None = None,
+    ) -> DockerOwnedContainer: ...
+    def run(
+        self,
+        handle: DockerOwnedContainer,
+        sink: DockerOutputSink,
+        *,
+        deadline: float,
+        cleanup_deadline: float,
+        stop: ExecutionStopSignal | None = None,
+    ) -> DockerJobOutcome: ...
+    def finish_stop_owned(
+        self,
+        handle: DockerOwnedContainer,
+        capture: DockerOutputCapture,
+        stop: ExecutionStopSignal,
+        store: "ExecutionStopStore",
+    ) -> ExecutionStopRecord: ...
+
+
+@runtime_checkable
+class ExecutionCancellationStore(Protocol):
+    def submit_cancel(
+        self, call: ExecutionCancelCall, *, deadline: float
+    ) -> Future[ExecutionStopRecord]: ...
+
+
+@runtime_checkable
+class FreshExecutionControl(Protocol):
+    @property
+    def shutdown_confirmed(self) -> bool: ...
+    @property
+    def cancellation_available(self) -> bool: ...
+    def submit_cancel(
+        self, call: ExecutionCancelCall, *, deadline: float
+    ) -> Future[ExecutionStopRecord]: ...
+    def begin_shutdown(self, deadline: float) -> None: ...
+    def execution_phase(self, approval_id: UUID) -> ExecutionLivePhase | None: ...
+
+
+class ExecutionStopStore(Protocol):
+    def request_stop(
+        self, request: ExecutionStopRequest, *, deadline: float
+    ) -> ExecutionStopRecord: ...
+
+    def inspect_stop(
+        self, scope: ExecutionInspectionScope, *, deadline: float
+    ) -> ExecutionStopRecord | None: ...
+
+    def finish_stop(
+        self, observation: ExecutionStopObservation, *, deadline: float
+    ) -> ExecutionStopRecord: ...
+
+    def finish_stop_with_capture(
+        self,
+        observation: ExecutionStopObservation,
+        capture: DockerOutputSnapshot,
+        *,
+        deadline: float,
+    ) -> ExecutionStopRecord: ...

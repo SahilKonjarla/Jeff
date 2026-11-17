@@ -1,6 +1,7 @@
 """Lazy public CLI composition; only the daemon composes question execution."""
 
 from jeff.bootstrap.runtime import (
+    create_cancellation_client,
     create_execution_client,
     create_fresh_execution_client,
     create_project_client,
@@ -18,4 +19,5 @@ def main() -> None:
         create_runtime_diagnostics,
         create_execution_client,
         fresh_execution=create_fresh_execution_client,
+        cancellation=create_cancellation_client,
     )()

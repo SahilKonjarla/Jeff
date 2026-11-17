@@ -72,6 +72,52 @@ class Metadata:
         return json.dumps(value).encode()
 
 
+def test_stop_during_verification_prevents_remaining_metadata_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jeff.application.execution import (
+        AuthorityRecord,
+        ExecutionManifest,
+        ExecutionStopSignal,
+        PreparedInputs,
+    )
+    from jeff.domain.execution import AuthorityState
+
+    declared = declaration()
+    manifest = ExecutionManifest(
+        profile=declared.profile, argv=(declared.profile.executable, "-V"), inputs=PreparedInputs()
+    )
+    record = AuthorityRecord(
+        proposal_id=uuid4(),
+        approval_id=uuid4(),
+        job_id=uuid4(),
+        project_id=declared.profile.project_id,
+        canonical_root=declared.profile.canonical_root,
+        owner_instance_id=uuid4(),
+        manifest=manifest,
+        manifest_digest=manifest.fingerprint,
+        state=AuthorityState.APPROVED,
+        created_at_ms=100,
+        expires_at_ms=600100,
+    )
+    stop = ExecutionStopSignal(record, job_deadline=time.monotonic() + 30)
+    reader = Metadata()
+    read = reader.read
+
+    def interrupted(query: str, *, endpoint: str, image_id: str | None, deadline: float) -> bytes:
+        result = read(query, endpoint=endpoint, image_id=image_id, deadline=deadline)
+        stop.request(uuid4(), "cancel")
+        return result
+
+    monkeypatch.setattr(reader, "read", interrupted)
+    with pytest.raises(DockerBackendFault) as cancelled:
+        DockerTargetInspector(_reader=reader).verify_target_cancellable(
+            declared, stop, deadline=time.monotonic() + 30
+        )
+    assert cancelled.value.code == "docker_cancelled"
+    assert reader.queries == ["client.version"]
+
+
 def declaration() -> DockerTargetDeclaration:
     profile = ExecutionProfile(
         name="python",

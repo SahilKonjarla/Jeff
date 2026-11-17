@@ -5,7 +5,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -35,6 +35,7 @@ from jeff.application.execution import (
     ExecutionCall,
     ExecutionProfile,
     ExecutionSettings,
+    ExecutionStopSignal,
     PreparedInputFault,
     ProposalRequestScope,
     ReviewFault,
@@ -106,6 +107,7 @@ class Docker:
         self.cid = ""
         self.raw: dict[str, object] = {}
         self.failure: str | None = None
+        self.cancel_mode = False
         self.output = b"public output\n"
         self.exit_code = 0
         self.copied: list[bytes] = []
@@ -204,6 +206,8 @@ class Docker:
         return self.cid
 
     def inspect(self, endpoint: str, container_id: str, *, deadline: float) -> dict[str, object]:
+        if self.failure == "cleanup":
+            raise DockerBackendFault("docker_ownership_unconfirmed")
         assert container_id == self.cid
         raw = copy.deepcopy(self.raw)
         raw["State"] = {
@@ -231,6 +235,36 @@ class Docker:
             raise DockerBackendFault("docker_target_mismatch")
         return self.exit_code
 
+    def attach_cancellable(
+        self,
+        endpoint: str,
+        container_id: str,
+        sink: DockerOutputSink,
+        stop: "ExecutionStopSignal",
+        observe_running: "Callable[[], None]",
+        *,
+        deadline: float,
+    ) -> int:
+        if not self.cancel_mode:
+            return self.attach(endpoint, container_id, sink, deadline=deadline)
+        self.calls.append("attach")
+        self.state = "running"
+        sink.accept("stdout", self.output)
+        observe_running()
+        if self.entered is not None:
+            self.entered.set()
+        end = time.monotonic() + 3
+        while not stop.requested and time.monotonic() < end:
+            threading.Event().wait(0.005)
+        stop.check()
+        raise AssertionError("Finite fake expected a stop request")
+
+    def stop_gracefully(
+        self, endpoint: str, container_id: str, *, grace_seconds: int, deadline: float
+    ) -> None:
+        assert 0 <= grace_seconds <= 5
+        self.stop(endpoint, container_id, deadline=deadline)
+
     def stop(self, endpoint: str, container_id: str, *, deadline: float) -> None:
         self.calls.append("stop")
         self.state = "exited"
@@ -249,7 +283,7 @@ class Docker:
 
 @contextmanager
 def composed(
-    root: Path, *, configured: bool = False
+    root: Path, *, configured: bool = False, cancellable: bool = False
 ) -> Iterator[tuple[ExecutionCoordinator, SQLiteStorage, Project, Docker]]:
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = root / "p"
@@ -320,6 +354,7 @@ def composed(
             assert store.wait_ready(5).state == "ready"
             store.index(project)
             docker = Docker()
+            docker.cancel_mode = cancellable
             verifier = DockerTargetInspector(_reader=docker)
             inputs = FilePreparedInputStore(owner)
             controller = DockerJobController(
@@ -345,10 +380,138 @@ def composed(
                 instance_id=generation,
                 proposal_lookup=store,
                 inspection=store,
+                stop_store=store if cancellable else None,
             )
             yield coordinator, store, project, docker
         finally:
             store.close(timeout=5)
+
+
+def test_cancel_during_preclaim_verification_is_reachable_before_admission_ack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jeff.application.execution import ExecutionCancelCall, ExecutionStopRecord
+
+    with composed(tmp_path, cancellable=True) as (coordinator, store, project, docker):
+        record = approved(coordinator, project)
+        call = ExecutionCancelCall(
+            request_id=uuid4(),
+            approval_id=record.approval_id,
+            reviewed_manifest_digest=record.manifest_digest,
+        )
+        original = docker.read
+        docker.queries.clear()
+
+        def cancel_on_first_read(
+            query: str, *, endpoint: str, image_id: str | None, deadline: float
+        ) -> bytes:
+            data = original(query, endpoint=endpoint, image_id=image_id, deadline=deadline)
+            accepted = coordinator.submit_cancel(call, deadline=time.monotonic() + 2).result(
+                timeout=2
+            )
+            assert accepted.terminal is not None and accepted.terminal.evidence == "not_started"
+            return data
+
+        monkeypatch.setattr(docker, "read", cancel_on_first_read)
+        acknowledgements: list[object] = []
+        result = coordinator.start(
+            project.root,
+            record.approval_id,
+            record.manifest_digest,
+            request_id=uuid4(),
+            admission_deadline=time.monotonic() + 5,
+            on_admitted=acknowledgements.append,
+        )
+        assert isinstance(result, ExecutionStopRecord) and result.terminal is not None
+        assert result.terminal.outcome == "cancelled" and result.terminal.evidence == "not_started"
+        assert not acknowledgements and not docker.calls and docker.queries == ["client.version"]
+        assert coordinator.shutdown_confirmed
+        shown = show(store, project, record.approval_id)
+        assert shown.claim_id is None and shown.state.value == "invalidated"
+
+
+def test_active_cancel_uses_owning_worker_and_inspects_partial_logs(tmp_path: Path) -> None:
+    from jeff.application.execution import (
+        ExecutionCancelCall,
+        ExecutionStopRecord,
+        FreshExecutionCall,
+    )
+
+    with composed(tmp_path, cancellable=True) as (coordinator, store, project, docker):
+        record = approved(coordinator, project)
+        docker.entered = threading.Event()
+        original_start_id = uuid4()
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            work = worker.submit(
+                coordinator.start,
+                project.root,
+                record.approval_id,
+                record.manifest_digest,
+                request_id=original_start_id,
+                admission_deadline=time.monotonic() + 5,
+                on_admitted=lambda _: None,
+            )
+            assert docker.entered.wait(2)
+            assert coordinator.execution_phase(record.approval_id) == "running_observed"
+            call = ExecutionCancelCall(
+                request_id=uuid4(),
+                approval_id=record.approval_id,
+                reviewed_manifest_digest=record.manifest_digest,
+            )
+            with pytest.raises(ReviewFault):
+                coordinator.submit_cancel(
+                    call.model_copy(update={"reviewed_manifest_digest": "0" * 64}),
+                    deadline=time.monotonic() + 1,
+                ).result(timeout=2)
+            assert coordinator.execution_phase(record.approval_id) == "running_observed"
+            accepted = coordinator.submit_cancel(call, deadline=time.monotonic() + 2).result(
+                timeout=3
+            )
+            assert accepted.request_id == call.request_id
+            result = work.result(timeout=5)
+        assert isinstance(result, ExecutionStopRecord) and result.terminal is not None
+        assert result.terminal.outcome == "cancelled" and result.terminal.cleanup_verified
+        assert docker.calls == ["create", "attach", "stop", "remove"]
+        assert coordinator.execution_phase(record.approval_id) is None
+        for operation in ("show", "logs"):
+            reply = coordinator.execute(
+                FreshExecutionCall(
+                    directory=project.root,
+                    request_id=uuid4(),
+                    operation=operation,
+                    approval_id=record.approval_id,
+                ),
+                time.monotonic() + 5,
+            )
+            assert (
+                reply.ok and reply.completion_state == "stop_recorded" and reply.completion is None
+            )
+            assert reply.stop is not None and reply.stop.outcome == "cancelled"
+            assert reply.stop.output_facts is not None and reply.stop.output_facts.aborted
+            assert (reply.output is not None) == (operation == "logs")
+            if reply.output is not None:
+                assert reply.output.stdout == "public output\n"
+            assert not {
+                "nonce",
+                "container_id",
+                "ownership_digest",
+                "attempt_id",
+                "owner_instance_id",
+            } & set(reply.stop.model_dump())
+        assert (
+            coordinator.submit_cancel(call, deadline=time.monotonic() + 2).result(timeout=3)
+            == result
+        )
+        coordinator.start(
+            project.root,
+            record.approval_id,
+            record.manifest_digest,
+            request_id=original_start_id,
+            admission_deadline=time.monotonic() + 5,
+            on_admitted=lambda _: None,
+        )
+        assert docker.calls == ["create", "attach", "stop", "remove"]
 
 
 def test_confirmed_admission_survives_reply_loss_and_replays_facts_only(tmp_path: Path) -> None:
@@ -609,6 +772,252 @@ def test_dispatcher_owns_admitted_job_until_completion_without_an_execution_queu
         finally:
             disabled.close(timeout=5)
         assert docker.calls == ["create", "attach", "remove"]
+
+
+def test_shutdown_budget_is_one_absolute_deadline_and_never_success_after_expiry(
+    tmp_path: Path,
+) -> None:
+    from jeff.infrastructure.runtime_ipc import ControlServer
+
+    with composed(tmp_path) as (_, store, _, docker):
+        assert store.instance_id is not None
+        clock = [100.0]
+        server = ControlServer(
+            store.owner,
+            store.owner.store.read_credential(),
+            RuntimeIdentityData(instance_id=store.instance_id, pid=os.getpid()),
+            store.snapshot,
+            monotonic=lambda: clock[0],
+        )
+        server.request_stop()
+        assert server.stop_deadline == 135.0
+        clock[0] = 120.0
+        server.request_stop()
+        assert server.stop_deadline == 135.0
+        server.check_stop_budget()
+        clock[0] = 135.0
+        with pytest.raises(ControlFault) as expired:
+            server.check_stop_budget()
+        assert expired.value.code == "runtime_stop_unconfirmed"
+        assert not docker.calls
+
+
+@pytest.mark.parametrize("cleanup_confirmed", (True, False))
+def test_authenticated_stop_cancels_active_work_without_observer_cancellation(
+    tmp_path: Path, cleanup_confirmed: bool
+) -> None:
+    import asyncio
+
+    from jeff.application.execution import ExecutionInspectionScope, FreshExecutionCall
+    from jeff.domain.runtime import RuntimeState
+    from jeff.infrastructure.runtime_ipc import ControlClient, ControlServer
+
+    with composed(tmp_path, cancellable=True) as (coordinator, store, project, docker):
+        record = approved(coordinator, project)
+        assert store.instance_id is not None
+        identity = RuntimeIdentityData(instance_id=store.instance_id, pid=os.getpid())
+        dispatcher = RuntimeDispatcher(
+            ProjectDispatcher(
+                coordinator.projects,
+                QuestionService(coordinator.projects, GitRepositoryRead()),
+                store,
+                identity,
+            ),
+            fresh=coordinator,
+        )
+        server = ControlServer(
+            store.owner, store.owner.store.read_credential(), identity, store.snapshot
+        )
+        server.dispatcher = dispatcher
+        docker.entered = threading.Event()
+        dispatcher.start()
+
+        async def exercise() -> None:
+            task = asyncio.create_task(server.serve())
+            try:
+                for _ in range(200):
+                    if task.done():
+                        await task
+                    if store.owner.store.layout.socket.exists():
+                        break
+                    await asyncio.sleep(0.005)
+                ack = dispatcher.submit(
+                    FreshExecutionCall(
+                        directory=project.root,
+                        request_id=uuid4(),
+                        operation="start",
+                        approval_id=record.approval_id,
+                        reviewed_manifest_digest=record.manifest_digest,
+                    ),
+                    time.monotonic() + 5,
+                )
+                await asyncio.to_thread(ack.result, 2)
+                assert docker.entered is not None
+                assert await asyncio.to_thread(docker.entered.wait, 2)
+
+                def stop() -> ControlObservation:
+                    with ControlClient(
+                        store.owner.store.layout, store.owner.store.read_credential()
+                    ).connect(time.monotonic() + 3) as connection:
+                        return connection.request("stop", identity.instance_id)
+
+                if cleanup_confirmed:
+                    observation = await asyncio.to_thread(stop)
+                    assert observation.state == RuntimeState.STOPPING
+                else:
+                    docker.failure = "cleanup"
+                    with pytest.raises(ControlFault) as unconfirmed:
+                        await asyncio.to_thread(stop)
+                    assert unconfirmed.value.code == "runtime_stop_unconfirmed"
+                await asyncio.wait_for(task, 5)
+                assert dispatcher.actions_drained and dispatcher.closed
+            finally:
+                server.request_stop()
+                dispatcher.request_close()
+                try:
+                    await asyncio.wait_for(task, 5)
+                finally:
+                    dispatcher.close(timeout=5)
+
+        previous_umask = os.umask(0o177)
+        try:
+            asyncio.run(exercise())
+        finally:
+            os.umask(previous_umask)
+        final = store.inspect_stop(
+            ExecutionInspectionScope(
+                project_id=project.project_id,
+                canonical_root=project.root,
+                owner_instance_id=identity.instance_id,
+                approval_id=record.approval_id,
+            ),
+            deadline=time.monotonic() + 3,
+        )
+        assert final is not None and final.reason == "shutdown" and final.terminal is not None
+        assert final.terminal.outcome == ("cancelled" if cleanup_confirmed else "unknown")
+        assert final.terminal.cleanup_verified == cleanup_confirmed
+        assert final.terminal.output_facts is not None and final.terminal.output_facts.aborted
+        assert docker.calls == (
+            ["create", "attach", "stop", "remove"] if cleanup_confirmed else ["create", "attach"]
+        )
+
+
+def test_authenticated_cancel_bypasses_full_ordinary_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from jeff.application.dispatch import dispatch_failure
+    from jeff.application.execution import ExecutionCancelCall, FreshExecutionCall
+    from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS
+    from jeff.infrastructure.runtime_ipc import ControlServer, RuntimeProjectClient
+
+    with composed(tmp_path, cancellable=True) as (coordinator, store, project, docker):
+        record = approved(coordinator, project)
+        assert store.instance_id is not None
+        identity = RuntimeIdentityData(instance_id=store.instance_id, pid=os.getpid())
+        dispatcher = RuntimeDispatcher(
+            ProjectDispatcher(
+                coordinator.projects,
+                QuestionService(coordinator.projects, GitRepositoryRead()),
+                store,
+                identity,
+            ),
+            fresh=coordinator,
+        )
+        server = ControlServer(
+            store.owner, store.owner.store.read_credential(), identity, store.snapshot
+        )
+        server.dispatcher = dispatcher
+        client = RuntimeProjectClient(store.owner.store.layout)
+        docker.entered = threading.Event()
+        release = threading.Event()
+        entered = [0]
+        guard = threading.Lock()
+
+        def slow(call: ProjectCall, deadline: float) -> DispatchReply:
+            with guard:
+                entered[0] += 1
+            assert release.wait(8)
+            return DispatchReply(
+                request_id=call.request_id,
+                identity=identity,
+                result=dispatch_failure("runtime_busy"),
+            )
+
+        monkeypatch.setattr(dispatcher.dispatch, "execute", slow)
+        dispatcher.start()
+
+        async def exercise() -> None:
+            task = asyncio.create_task(server.serve())
+            try:
+                for _ in range(200):
+                    if store.owner.store.layout.socket.exists():
+                        break
+                    if task.done():
+                        await task
+                    await asyncio.sleep(0.005)
+                started = dispatcher.submit(
+                    FreshExecutionCall(
+                        request_id=uuid4(),
+                        directory=project.root,
+                        operation="start",
+                        approval_id=record.approval_id,
+                        reviewed_manifest_digest=record.manifest_digest,
+                    ),
+                    time.monotonic() + 5,
+                )
+                await asyncio.to_thread(started.result, 2)
+                assert docker.entered is not None
+                assert await asyncio.to_thread(docker.entered.wait, 2)
+                for _ in range(3):
+                    dispatcher.submit(
+                        ProjectCall(request_id=uuid4(), directory=project.root, operation="config"),
+                        time.monotonic() + 7,
+                    )
+                for _ in range(200):
+                    with guard:
+                        if entered[0] == 3:
+                            break
+                    await asyncio.sleep(0.005)
+                assert entered[0] == 3
+                for _ in range(DEFAULT_RUNTIME_LIMITS.pending_requests):
+                    dispatcher.submit(
+                        ProjectCall(request_id=uuid4(), directory=project.root, operation="config"),
+                        time.monotonic() + 7,
+                    )
+                with pytest.raises(ControlFault):
+                    dispatcher.submit(
+                        ProjectCall(request_id=uuid4(), directory=project.root, operation="config"),
+                        time.monotonic() + 7,
+                    )
+                call = ExecutionCancelCall(
+                    request_id=uuid4(),
+                    approval_id=record.approval_id,
+                    reviewed_manifest_digest=record.manifest_digest,
+                )
+                reply = await asyncio.wait_for(asyncio.to_thread(client.cancel, call), 3)
+                assert reply.ok and reply.stop is not None and reply.stop.reason == "cancel"
+                assert (
+                    reply.request_id == call.request_id and reply.identity == identity.instance_id
+                )
+                assert docker.calls[:2] == ["create", "attach"]
+            finally:
+                release.set()
+                server.request_stop()
+                dispatcher.request_close()
+                try:
+                    await asyncio.wait_for(task, 5)
+                finally:
+                    # Even a listener/assertion failure must close idle non-daemon workers.
+                    dispatcher.close(timeout=5)
+
+        previous_umask = os.umask(0o177)
+        try:
+            asyncio.run(exercise())
+        finally:
+            os.umask(previous_umask)
+        assert docker.calls == ["create", "attach", "stop", "remove"]
 
 
 def test_fresh_authenticated_rpc_keeps_owned_job_after_caller_disconnect(

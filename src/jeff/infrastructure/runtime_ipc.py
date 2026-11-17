@@ -28,6 +28,7 @@ from jeff.application.dispatch import (
     EvidenceQuery,
     EvidenceReply,
     EvidenceRequest,
+    ExecutionCancelRequest,
     ExecutionRequest,
     FreshExecutionRequest,
     ProjectCall,
@@ -43,10 +44,15 @@ from jeff.application.dispatch import (
     dispatch_failure,
 )
 from jeff.application.execution import (
+    DockerBackendFault,
     ExecutionCall,
+    ExecutionCancelCall,
+    ExecutionCancelReply,
     ExecutionReply,
+    ExecutionStopView,
     FreshExecutionCall,
     FreshExecutionReply,
+    ReviewFault,
     execution_failure,
     fresh_execution_failure,
 )
@@ -67,7 +73,7 @@ from jeff.application.runtime import (
     RuntimeLayout,
     control_failure,
 )
-from jeff.application.storage import StorageReadiness
+from jeff.application.storage import StorageFault, StorageReadiness
 from jeff.domain.runtime import RuntimeState
 from jeff.infrastructure.runtime_dispatch import RuntimeDispatcher
 from jeff.infrastructure.runtime_events import RuntimeEvents
@@ -83,6 +89,7 @@ class RpcRequest(
             | EvidenceRequest
             | ExecutionRequest
             | FreshExecutionRequest
+            | ExecutionCancelRequest
             | SubscriptionRequest,
             Field(discriminator="kind"),
         ]
@@ -549,6 +556,56 @@ class RuntimeProjectClient:
             connection.connection.close()
             raise
 
+    def cancel(self, call: ExecutionCancelCall) -> ExecutionCancelReply:
+        """One authenticated control exchange; no cwd discovery, fallback or retry."""
+        deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
+
+        def refused(error: Failure, identity: UUID | None = None) -> ExecutionCancelReply:
+            return ExecutionCancelReply(
+                request_id=call.request_id,
+                approval_id=call.approval_id,
+                reviewed_manifest_digest=call.reviewed_manifest_digest,
+                identity=identity,
+                ok=False,
+                error=error,
+            )
+
+        try:
+            encode_message(
+                ExecutionCancelRequest(call=call, expected_instance_id=UUID(int=0)).model_dump(
+                    mode="json"
+                ),
+                DEFAULT_RUNTIME_LIMITS.request_bytes,
+            )
+        except ControlFault:
+            return refused(fresh_execution_failure("execution_unconfirmed"))
+        try:
+            with self._connect(deadline) as connection:
+                try:
+                    reply = self._exchange(
+                        connection,
+                        ExecutionCancelRequest(
+                            call=call,
+                            expected_instance_id=connection.identity.instance_id,
+                            remaining_ms=max(1, int(_remaining(deadline) * 1000)),
+                        ),
+                        ExecutionCancelReply,
+                    )
+                    if (
+                        reply.request_id != call.request_id
+                        or reply.approval_id != call.approval_id
+                        or reply.reviewed_manifest_digest != call.reviewed_manifest_digest
+                        or reply.identity != connection.identity.instance_id
+                    ):
+                        raise ControlFault("runtime_ownership_unconfirmed")
+                    return reply
+                except (ControlFault, OSError):
+                    return refused(
+                        dispatch_failure("request_outcome_unknown"), connection.identity.instance_id
+                    )
+        except ControlFault as error:
+            return refused(control_failure(error.code))
+
     def fresh(self, call: FreshExecutionCall) -> FreshExecutionReply:
         deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.request_seconds
 
@@ -754,6 +811,7 @@ class ControlServer:
         storage_snapshot: Callable[[], StorageReadiness] = StorageReadiness,
         *,
         on_stop: Callable[[], None] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if len(token) != 32 or identity.pid != os.getpid():
             raise ControlFault("runtime_ownership_unconfirmed")
@@ -762,6 +820,7 @@ class ControlServer:
         self.identity = identity
         self.storage_snapshot = storage_snapshot
         self._on_stop = on_stop
+        self._clock = monotonic
         self.dispatcher: RuntimeDispatcher | None = None
         self.events: RuntimeEvents | None = None
         self._stop_deadline: float | None = None
@@ -839,6 +898,14 @@ class ControlServer:
                     RpcRequest,
                 )
             ).root
+            if isinstance(request, ExecutionCancelRequest):
+                # The existing reserved control connection is not an ordinary project slot.
+                await _async_send(
+                    writer,
+                    await self._cancel(request, began),
+                    DEFAULT_RUNTIME_LIMITS.response_bytes,
+                )
+                return
             if isinstance(request, SubscriptionRequest):
                 if (
                     self.stopping
@@ -901,11 +968,31 @@ class ControlServer:
             else:
                 if request.operation == "stop":
                     self.request_stop()  # shutdown persists even if reply delivery fails
+                    if self.dispatcher is not None and self.dispatcher.cancellation_available:
+                        try:
+                            while not self.dispatcher.actions_drained:
+                                self.check_stop_budget()
+                                await asyncio.sleep(0.01)
+                            if not self.dispatcher.shutdown_confirmed:
+                                raise ControlFault("runtime_stop_unconfirmed")
+                        except ControlFault:
+                            await _async_send(
+                                writer,
+                                ControlResponse(
+                                    revision=PROTOCOL_REVISION,
+                                    request_id=request.request_id,
+                                    error="runtime_stop_unconfirmed",
+                                ),
+                                DEFAULT_RUNTIME_LIMITS.response_bytes,
+                            )
+                            return
                 storage = self.storage_snapshot()
                 observation = ControlObservation(
                     state=RuntimeState.STOPPING if self.stopping else RuntimeState.RUNNING,
                     identity=self.identity,
                     control_ready=not self.stopping,
+                    execution_control_ready=self.dispatcher is not None
+                    and self.dispatcher.cancellation_available,
                     application_ready=(
                         not self.stopping
                         and storage.state == "ready"
@@ -926,6 +1013,12 @@ class ControlServer:
                         *(
                             ("execution.v1",)
                             if self.dispatcher is not None and self.dispatcher.fresh is not None
+                            else ()
+                        ),
+                        *(
+                            ("execution.cancel.v1",)
+                            if self.dispatcher is not None
+                            and self.dispatcher.cancellation_available
                             else ()
                         ),
                     )
@@ -951,10 +1044,49 @@ class ControlServer:
             writer.close()
             try:
                 await asyncio.wait_for(
-                    writer.wait_closed(), timeout=DEFAULT_RUNTIME_LIMITS.frame_seconds
+                    writer.wait_closed(),
+                    timeout=min(
+                        DEFAULT_RUNTIME_LIMITS.frame_seconds,
+                        max(0, self.stop_deadline - self._clock()),
+                    )
+                    if self.stopping
+                    else DEFAULT_RUNTIME_LIMITS.frame_seconds,
                 )
             except (OSError, TimeoutError):
                 pass
+
+    async def _cancel(self, request: ExecutionCancelRequest, began: float) -> ExecutionCancelReply:
+        call = request.call
+
+        def reply(
+            error: Failure | None = None, stop: ExecutionStopView | None = None
+        ) -> ExecutionCancelReply:
+            return ExecutionCancelReply(
+                request_id=call.request_id,
+                approval_id=call.approval_id,
+                reviewed_manifest_digest=call.reviewed_manifest_digest,
+                identity=self.identity.instance_id,
+                ok=error is None,
+                error=error,
+                stop=stop,
+            )
+
+        if request.expected_instance_id != self.identity.instance_id:
+            return reply(control_failure("runtime_ownership_unconfirmed"))
+        if self.dispatcher is None or self.storage_snapshot().state != "ready":
+            return reply(fresh_execution_failure("execution_unavailable"))
+        deadline = began + min(request.remaining_ms / 1000, DEFAULT_RUNTIME_LIMITS.request_seconds)
+        try:
+            future = self.dispatcher.submit_cancel(call, deadline)
+            record = await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(future)),
+                timeout=max(0, deadline - time.monotonic()),
+            )
+            return reply(stop=ExecutionStopView.from_record(record))
+        except TimeoutError:
+            return reply(dispatch_failure("request_outcome_unknown"))
+        except (ControlFault, DockerBackendFault, ReviewFault, StorageFault) as error:
+            return reply(fresh_execution_failure(error.code))
 
     def _project_refusal(
         self,
@@ -1067,17 +1199,27 @@ class ControlServer:
         except TimeoutError:
             return self._project_refusal(request, unknown=True)
 
+    @property
+    def stop_deadline(self) -> float:
+        if self._stop_deadline is None:
+            raise ControlFault("runtime_stop_unconfirmed")
+        return self._stop_deadline
+
+    def check_stop_budget(self) -> None:
+        if self._clock() >= self.stop_deadline:
+            raise ControlFault("runtime_stop_unconfirmed")
+
     def request_stop(self) -> None:
         """Seal admission once; a lost stop reply cannot reverse accepted shutdown."""
         if self._stop_deadline is None:
-            self._stop_deadline = time.monotonic() + DEFAULT_RUNTIME_LIMITS.stop_seconds
+            self._stop_deadline = self._clock() + DEFAULT_RUNTIME_LIMITS.stop_seconds
         if not self.stopping and self._on_stop is not None:
             self._on_stop()
         self.stopping = True
         if self.events is not None:
             self.events.begin_stop()
         if self.dispatcher is not None:
-            self.dispatcher.begin_drain()
+            self.dispatcher.begin_drain(self._stop_deadline)
         self._stop.set()
 
     async def serve(self) -> None:
@@ -1104,6 +1246,7 @@ class ControlServer:
             if self.dispatcher is not None:
                 self.dispatcher.begin_drain()
                 while not self.dispatcher.actions_drained:
+                    self.check_stop_budget()
                     await asyncio.sleep(0.01)
             if self.events is not None:
                 await self.events.drain(
@@ -1117,6 +1260,7 @@ class ControlServer:
             if self.dispatcher is not None:
                 self.dispatcher.request_close()
                 while not self.dispatcher.closed:
+                    self.check_stop_budget()
                     await asyncio.sleep(0.01)
                 self.dispatcher.close(timeout=0)
         finally:
@@ -1129,7 +1273,11 @@ class ControlServer:
             listener.close()
             if self._tasks:
                 _, pending = await asyncio.wait(
-                    self._tasks, timeout=2 * DEFAULT_RUNTIME_LIMITS.frame_seconds
+                    self._tasks,
+                    timeout=min(
+                        2 * DEFAULT_RUNTIME_LIMITS.frame_seconds,
+                        max(0, self.stop_deadline - self._clock()),
+                    ),
                 )
                 for task in pending:
                     task.cancel()

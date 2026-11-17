@@ -16,6 +16,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID, uuid4
@@ -34,13 +35,21 @@ from jeff.application.execution import (
     DockerLaunchIntent,
     DockerLaunchScope,
     DockerLaunchSnapshot,
+    DockerOutputFacts,
     DockerOutputSnapshot,
     DockerOwnedContainer,
+    ExecutionCancelCall,
     ExecutionData,
     ExecutionInspection,
     ExecutionInspectionScope,
     ExecutionManifest,
     ExecutionProfile,
+    ExecutionStopCapture,
+    ExecutionStopObservation,
+    ExecutionStopRecord,
+    ExecutionStopRequest,
+    ExecutionStopTerminal,
+    ExecutionStopView,
     ProposalRequestScope,
     ReviewFault,
     ReviewOperation,
@@ -259,6 +268,26 @@ _RESULT_QUARANTINE = (
     "CREATE UNIQUE INDEX execution_result_quarantine ON execution_results(disposition) "
     "WHERE disposition='quarantined' AND stdout IS NOT NULL"
 )
+_STOP_PAYLOADS = (
+    "CREATE TABLE execution_stop_payloads ("
+    "proposal_id TEXT PRIMARY KEY NOT NULL REFERENCES execution_lifecycles(proposal_id), "
+    "disposition TEXT NOT NULL CHECK(disposition IN ('known','quarantined')), "
+    "recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms>=0), "
+    "clock_confirmed INTEGER NOT NULL CHECK(clock_confirmed IN (0,1)), "
+    "output_facts_json TEXT NOT NULL CHECK(length(CAST(output_facts_json AS BLOB))<=8192), "
+    "output_digest TEXT NOT NULL CHECK(length(output_digest)=64), "
+    "stdout TEXT, stderr TEXT, retirement_reason TEXT, "
+    "CHECK((stdout IS NULL AND stderr IS NULL AND retirement_reason IS NOT NULL "
+    "AND retirement_reason IN ('age','capacity')) OR "
+    "(stdout IS NOT NULL AND stderr IS NOT NULL AND retirement_reason IS NULL "
+    "AND length(CAST(stdout AS BLOB))+length(CAST(stderr AS BLOB))<=1048576)))"
+)
+_LIFECYCLES = (
+    "CREATE TABLE execution_lifecycles (proposal_id TEXT PRIMARY KEY "
+    "REFERENCES execution_authorities(proposal_id), record_json TEXT NOT NULL "
+    "CHECK(length(CAST(record_json AS BLOB))<=32768), record_digest TEXT NOT NULL "
+    "CHECK(length(record_digest)=64))"
+)
 _SIDECARS = ("state.sqlite3-journal", "state.sqlite3-wal", "state.sqlite3-shm")
 _FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
@@ -307,7 +336,7 @@ def _schema(connection: sqlite3.Connection) -> int:
     if connection.execute("PRAGMA application_id").fetchone() != (DATABASE_APPLICATION_ID,):
         raise StorageFault("storage_unrecognized")
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version not in (0, 1, 2, 3, 4, 5, 6, 7, DATABASE_SCHEMA):
+    if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, DATABASE_SCHEMA):
         raise StorageFault("storage_schema_unsupported")
     if connection.execute("PRAGMA journal_mode").fetchone() != ("delete",):
         raise StorageFault("storage_recovery_required")
@@ -342,6 +371,10 @@ def _schema(connection: sqlite3.Connection) -> int:
         expected["execution_results"] = ("table", _RESULTS)
         expected["execution_result_payloads"] = ("index", _RESULT_PAYLOADS)
         expected["execution_result_quarantine"] = ("index", _RESULT_QUARANTINE)
+    if version >= 9:
+        expected["execution_lifecycles"] = ("table", _LIFECYCLES)
+    if version >= 10:
+        expected["execution_stop_payloads"] = ("table", _STOP_PAYLOADS)
     found = connection.execute(
         "SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT ?",
         (len(expected) + 1,),
@@ -371,6 +404,8 @@ def _schema(connection: sqlite3.Connection) -> int:
             (6, "execution_authority_v6"),
             (7, "execution_launch_v7"),
             (8, "execution_results_v8"),
+            (9, "execution_lifecycle_v9"),
+            (10, "execution_stop_payloads_v10"),
         )
         if number <= version
     ]:
@@ -457,6 +492,10 @@ class _Work:
         "launch_status",
         "execution_complete",
         "execution_result",
+        "stop_request",
+        "stop_inspect",
+        "stop_finish",
+        "cancel",
     ]
     payload: (
         Project
@@ -474,6 +513,10 @@ class _Work:
         | DockerLaunchEvent
         | DockerLaunchScope
         | DockerCompletion
+        | ExecutionStopRequest
+        | ExecutionStopObservation
+        | ExecutionStopCapture
+        | ExecutionCancelCall
         | None
     )
     deadline: float
@@ -680,6 +723,64 @@ class SQLiteStorage:
         except StorageFault as error:
             raise ReviewFault(error.code) from None
 
+    def submit_cancel(
+        self, call: ExecutionCancelCall, *, deadline: float
+    ) -> Future[ExecutionStopRecord]:
+        """Nonblocking actor submission; only a completed Future confirms durable intent."""
+        call = ExecutionCancelCall.model_validate(call.model_dump(mode="json"))
+        result: Future[object] = Future()
+        return cast(
+            Future[ExecutionStopRecord],
+            self._enqueue(
+                _Work("cancel", call, min(deadline, time.monotonic() + 30), result), control=True
+            ),
+        )
+
+    def request_stop(
+        self, request: ExecutionStopRequest, *, deadline: float
+    ) -> ExecutionStopRecord:
+        """Internal durable intent only; never sends a signal or grants a new claim."""
+        request = ExecutionStopRequest.model_validate(request.model_dump(mode="json"))
+        try:
+            return cast(ExecutionStopRecord, self._submit("stop_request", request, deadline))
+        except StorageFault as error:
+            raise ReviewFault(error.code) from None
+
+    def finish_stop(
+        self, observation: ExecutionStopObservation, *, deadline: float
+    ) -> ExecutionStopRecord:
+        observation = ExecutionStopObservation.model_validate(observation.model_dump(mode="json"))
+        try:
+            return cast(ExecutionStopRecord, self._submit("stop_finish", observation, deadline))
+        except StorageFault as error:
+            raise ReviewFault(error.code) from None
+
+    def finish_stop_with_capture(
+        self,
+        observation: ExecutionStopObservation,
+        capture: DockerOutputSnapshot,
+        *,
+        deadline: float,
+    ) -> ExecutionStopRecord:
+        request = ExecutionStopCapture.model_validate(
+            {
+                "observation": observation.model_dump(mode="json"),
+                "output": capture.model_dump(mode="json"),
+            }
+        )
+        try:
+            return cast(ExecutionStopRecord, self._submit("stop_finish", request, deadline))
+        except StorageFault as error:
+            raise ReviewFault(error.code) from None
+
+    def inspect_stop(
+        self, scope: ExecutionInspectionScope, *, deadline: float
+    ) -> ExecutionStopRecord | None:
+        try:
+            return cast(ExecutionStopRecord | None, self._submit("stop_inspect", scope, deadline))
+        except StorageFault as error:
+            raise ReviewFault(error.code) from None
+
     def inspect_execution(
         self, scope: ExecutionInspectionScope, *, deadline: float
     ) -> ExecutionInspection:
@@ -756,6 +857,10 @@ class SQLiteStorage:
             "launch_status",
             "execution_complete",
             "execution_result",
+            "stop_request",
+            "stop_inspect",
+            "stop_finish",
+            "cancel",
         ],
         payload: Project
         | ReceiptClaim
@@ -772,6 +877,10 @@ class SQLiteStorage:
         | DockerLaunchEvent
         | DockerLaunchScope
         | DockerCompletion
+        | ExecutionStopRequest
+        | ExecutionStopObservation
+        | ExecutionStopCapture
+        | ExecutionCancelCall
         | None,
         deadline: float | None,
     ) -> object:
@@ -789,20 +898,9 @@ class SQLiteStorage:
         if deadline <= time.monotonic():
             raise StorageFault("storage_busy")
         result: Future[object] = Future()
-        with self._mutex:
-            if not self._accepting:
-                raise StorageFault("storage_closing")
-            try:
-                self._queue.put_nowait(
-                    _Work(
-                        operation,
-                        payload,
-                        deadline,
-                        result,
-                    )
-                )
-            except queue.Full:
-                raise StorageFault("storage_busy") from None
+        self._enqueue(
+            _Work(operation, payload, deadline, result), control=operation.startswith("stop_")
+        )
         try:
             return result.result(timeout=max(0, deadline - time.monotonic()))
         except FutureTimeout:
@@ -810,6 +908,21 @@ class SQLiteStorage:
             raise StorageFault(
                 "storage_busy" if result.cancel() else "storage_outcome_unconfirmed"
             ) from None
+
+    def _enqueue(self, work: _Work, *, control: bool = False) -> Future[object]:
+        if not math.isfinite(work.deadline) or work.deadline <= time.monotonic():
+            raise StorageFault("storage_busy")
+        with self._mutex:
+            if not self._accepting:
+                raise StorageFault("storage_closing")
+            # One reserved control position WITHIN the existing finite pending bound.
+            if not control and self._queue.qsize() >= STORAGE_PENDING_LIMIT - 1:
+                raise StorageFault("storage_busy")
+            try:
+                self._queue.put_nowait(work)
+            except queue.Full:
+                raise StorageFault("storage_busy") from None
+        return work.result
 
     def _begin_write(
         self,
@@ -820,7 +933,7 @@ class SQLiteStorage:
     ) -> None:
         """Arm the actual DELETE journal before business DML, on the same SQL owner."""
         self._check(root, fd)
-        if source_schema not in (4, 5, 6, 7, 8) or _schema(connection) != source_schema:
+        if source_schema not in (4, 5, 6, 7, 8, 9, 10) or _schema(connection) != source_schema:
             raise StorageFault("storage_schema_unsupported")
         try:
             self.owner.store.read_credential()  # Existing authority only, never rekey residue.
@@ -1132,6 +1245,22 @@ class SQLiteStorage:
                 )
                 connection.execute("PRAGMA user_version=8")
                 self._commit_write(connection, fd)
+            if version < 9:
+                self._begin_write(connection, root, fd, source_schema=8)
+                connection.execute(_LIFECYCLES)
+                connection.execute(
+                    "INSERT INTO schema_migrations VALUES (9,'execution_lifecycle_v9')"
+                )
+                connection.execute("PRAGMA user_version=9")
+                self._commit_write(connection, fd)
+            if version < 10:
+                self._begin_write(connection, root, fd, source_schema=9)
+                connection.execute(_STOP_PAYLOADS)
+                connection.execute(
+                    "INSERT INTO schema_migrations VALUES (10,'execution_stop_payloads_v10')"
+                )
+                connection.execute("PRAGMA user_version=10")
+                self._commit_write(connection, fd)
             _schema(connection)
             self._activity_meta(connection)
             if connection.execute(
@@ -1174,6 +1303,43 @@ class SQLiteStorage:
 
     def _execute(self, connection: sqlite3.Connection, work: _Work, root: int, fd: int) -> object:
         self._check(root, fd)
+        if work.operation == "cancel":
+            assert isinstance(work.payload, ExecutionCancelCall)
+            call = work.payload
+            row = connection.execute(
+                "SELECT " + _AUTHORITY_COLUMNS + " FROM execution_authorities WHERE approval_id=?",
+                (str(call.approval_id),),
+            ).fetchone()
+            if row is None:
+                raise ReviewFault("execution_not_found")
+            target = self._authority_record(row)
+            return self._request_stop(
+                connection,
+                ExecutionStopRequest(
+                    project_id=target.project_id,
+                    canonical_root=target.canonical_root,
+                    owner_instance_id=cast(UUID, self.instance_id),
+                    approval_id=call.approval_id,
+                    request_id=call.request_id,
+                    manifest_digest=call.reviewed_manifest_digest,
+                ),
+                root,
+                fd,
+            )
+        if work.operation == "stop_request":
+            assert isinstance(work.payload, ExecutionStopRequest)
+            return self._request_stop(connection, work.payload, root, fd)
+        if work.operation == "stop_finish":
+            if isinstance(work.payload, ExecutionStopCapture):
+                return self._finish_stop(
+                    connection, work.payload.observation, root, fd, capture=work.payload.output
+                )
+            assert isinstance(work.payload, ExecutionStopObservation)
+            return self._finish_stop(connection, work.payload, root, fd)
+        if work.operation == "stop_inspect":
+            assert isinstance(work.payload, ExecutionInspectionScope)
+            record = self._stop_target(connection, work.payload)
+            return self._read_stop(connection, record, work.payload)
         if work.operation == "execution_complete":
             assert isinstance(work.payload, DockerCompletion)
             return self._complete_execution(connection, work.payload, root, fd)
@@ -1315,36 +1481,141 @@ class SQLiteStorage:
     ) -> int:
         # Bounded page churn under the existing16MiB recovery-journal ceiling.
         # No claim of physical-crash proof follows from this logical byte budget.
-        rows = connection.execute(
-            "SELECT sequence,disposition,recorded_at_ms FROM execution_results "
-            "WHERE stdout IS NOT NULL ORDER BY sequence LIMIT 19"
-        ).fetchall()
-        if len(rows) > 18:
-            raise StorageFault("storage_schema_unsupported")
+        rows = SQLiteStorage._retained_payloads(connection)
         retired = 0
         expired = sorted(
-            (row for row in rows if row[2] < cutoff),
-            key=lambda row: (row[1] != "quarantined", row[0]),
+            (row for row in rows if row[4] and row[3] < cutoff),
+            key=lambda row: (row[2] != "quarantined", row[3], row[0], row[1]),
         )[:age_limit]
-        removed = {row[0] for row in expired}
-        for sequence, _kind, _recorded in expired:
-            connection.execute(
-                "UPDATE execution_results SET stdout=NULL,stderr=NULL,retirement_reason='age' "
-                "WHERE sequence=?",
-                (sequence,),
+        removed = {(row[0], row[1]) for row in expired}
+        known = sorted(
+            (r for r in rows if r[2] == "known" and (r[0], r[1]) not in removed),
+            key=lambda r: (r[3], r[0], r[1]),
+        )
+        for row, reason in [(r, "age") for r in expired] + [(r, "capacity") for r in known[:-16]]:
+            table, key = (
+                ("execution_results", "sequence")
+                if row[0] == "legacy"
+                else ("execution_stop_payloads", "proposal_id")
             )
-            retired += 1
-        completed = [
-            seq for seq, kind, _recorded in rows if kind == "completed" and seq not in removed
-        ]
-        for sequence in completed[:-16]:
             connection.execute(
-                "UPDATE execution_results SET stdout=NULL,stderr=NULL,retirement_reason='capacity' "
-                "WHERE sequence=?",
-                (sequence,),
+                f"UPDATE {table} SET stdout=NULL,stderr=NULL,retirement_reason=? WHERE {key}=?",
+                (reason, row[1]),
             )
             retired += 1
         return retired
+
+    @staticmethod
+    def _retained_payloads(connection: sqlite3.Connection) -> list[tuple[str, str, str, int, int]]:
+        rows = connection.execute(
+            "SELECT 'legacy',CAST(sequence AS TEXT),CASE disposition WHEN 'completed' "
+            "THEN 'known' ELSE 'quarantined' END,recorded_at_ms,1 FROM execution_results "
+            "WHERE stdout IS NOT NULL UNION ALL SELECT 'stop',proposal_id,disposition,"
+            "recorded_at_ms,clock_confirmed FROM execution_stop_payloads "
+            "WHERE stdout IS NOT NULL LIMIT 19"
+        ).fetchall()
+        if len(rows) > 18 or sum(r[2] == "quarantined" for r in rows) > 1:
+            raise StorageFault("storage_schema_unsupported")
+        return cast(list[tuple[str, str, str, int, int]], rows)
+
+    def _insert_stop_payload(
+        self,
+        connection: sqlite3.Connection,
+        authority: AuthorityRecord,
+        record: ExecutionStopRecord,
+        capture: DockerOutputSnapshot,
+    ) -> None:
+        terminal = record.terminal
+        assert terminal is not None
+        if capture.retention_limit != authority.manifest.profile.output_bytes:
+            raise ReviewFault("execution_target_mismatch")
+        now = self._sample_retention_wall()
+        cutoff = max(0, (now or 0) - (self._retention_days or 30) * 86400000)
+        self._retire_execution_payloads(connection, cutoff, age_limit=1)
+        occupied = any(r[2] == "quarantined" for r in self._retained_payloads(connection))
+        retain = terminal.outcome != "unknown" or not occupied
+        connection.execute(
+            "INSERT INTO execution_stop_payloads VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                str(authority.proposal_id),
+                "quarantined" if terminal.outcome == "unknown" else "known",
+                now if now is not None else record.requested_at_ms,
+                int(now is not None),
+                terminal.output_facts.model_dump_json()
+                if terminal.output_facts is not None
+                else "{}",
+                terminal.output_digest,
+                capture.stdout if retain else None,
+                capture.stderr if retain else None,
+                None if retain else "capacity",
+            ),
+        )
+        self._retire_execution_payloads(connection, cutoff, age_limit=0)
+
+    def _stop_payload(
+        self,
+        connection: sqlite3.Connection,
+        authority: AuthorityRecord,
+        record: ExecutionStopRecord,
+    ) -> tuple[ExecutionStopView, DockerOutputSnapshot | None]:
+        terminal = record.terminal
+        fields: dict[str, object] = dict(
+            request_id=record.request_id,
+            reason=record.reason,
+            requested_at_ms=record.requested_at_ms,
+            clock_confirmed=record.clock_confirmed,
+            payload_state="missing",
+        )
+        if terminal is not None:
+            fields.update(
+                outcome=terminal.outcome,
+                evidence=terminal.evidence,
+                cleanup_verified=terminal.cleanup_verified,
+                exit_code=terminal.exit_code,
+                output_facts=terminal.output_facts,
+            )
+        row = connection.execute(
+            "SELECT disposition,recorded_at_ms,clock_confirmed,output_facts_json,output_digest,"
+            "stdout,stderr,retirement_reason FROM execution_stop_payloads WHERE proposal_id=?",
+            (str(authority.proposal_id),),
+        ).fetchone()
+        if row is None:
+            return ExecutionStopView.model_validate(fields), None
+        try:
+            if (
+                terminal is None
+                or terminal.output_facts is None
+                or (
+                    DockerOutputFacts.model_validate_json(row[3]) != terminal.output_facts
+                    or row[4] != terminal.output_digest
+                    or row[0] != ("quarantined" if terminal.outcome == "unknown" else "known")
+                    or terminal.output_facts.retention_limit
+                    != authority.manifest.profile.output_bytes
+                )
+            ):
+                raise ValueError("Stop payload binding differs.")
+            snapshot = None
+            if row[5] is not None:
+                snapshot = DockerOutputSnapshot.model_validate(
+                    {**terminal.output_facts.model_dump(), "stdout": row[5], "stderr": row[6]}
+                )
+                if sha256(snapshot.model_dump_json().encode("utf-8")).hexdigest() != row[4]:
+                    raise ValueError("Stop payload digest differs.")
+            if snapshot is None:
+                state, retirement = "retired", row[7]
+            else:
+                now = self._sample_retention_wall()
+                state, retirement = "retained", None
+                if now is None or not row[2]:
+                    state = "clock_unconfirmed"
+                elif row[1] < max(0, now - (self._retention_days or 30) * 86400000):
+                    state = "expired"
+                if state != "retained":
+                    snapshot = None
+            fields.update(payload_state=state, retirement_reason=retirement, recorded_at_ms=row[1])
+            return ExecutionStopView.model_validate(fields), snapshot
+        except (ValueError, TypeError):
+            raise StorageFault("storage_schema_unsupported") from None
 
     def _complete_execution(
         self, connection: sqlite3.Connection, completion: DockerCompletion, root: int, fd: int
@@ -1403,13 +1674,9 @@ class SQLiteStorage:
         if now is None:
             raise DockerBackendFault("docker_mutation_unconfirmed")
         cutoff = max(0, now - (self._retention_days or 30) * 86400000)
-        if (
-            not completion.confirmed
-            and connection.execute(
-                "SELECT 1 FROM execution_results WHERE disposition='quarantined' "
-                "AND stdout IS NOT NULL AND recorded_at_ms>=? LIMIT 1",
-                (cutoff,),
-            ).fetchone()
+        if not completion.confirmed and any(
+            r[2] == "quarantined" and (not r[4] or r[3] >= cutoff)
+            for r in self._retained_payloads(connection)
         ):
             raise DockerBackendFault("docker_busy")
         metadata = json.dumps(
@@ -1457,6 +1724,24 @@ class SQLiteStorage:
             ("finished" if completion.confirmed else "unknown", str(supplied.claim_id)),
         )
         self._retire_execution_payloads(connection, cutoff, age_limit=0)
+        stop_scope = ExecutionInspectionScope(
+            project_id=supplied.project_id,
+            canonical_root=supplied.canonical_root,
+            owner_instance_id=supplied.owner_instance_id,
+            approval_id=supplied.approval_id,
+        )
+        stop = self._read_stop(connection, supplied, stop_scope)
+        if stop is not None and stop.terminal is None:
+            # Preserve the original immutable result; cancellation cannot relabel
+            # an ordinary completion that won before termination was established.
+            terminal = self._result_stop_terminal(self._execution_result(connection, scope))
+            updated = ExecutionStopRecord.model_validate(
+                {
+                    **stop.model_dump(),
+                    "terminal": terminal.model_dump(),
+                }
+            )
+            self._write_stop(connection, supplied, updated)
         self._commit_write(connection, fd)
         return self._execution_result(connection, scope)
 
@@ -1545,6 +1830,13 @@ class SQLiteStorage:
         if existing is not None and existing != (str(intent.attempt_id), binding):
             raise DockerBackendFault("docker_authority_required")
         if event.phase in {"create_intent", "start_intent"}:
+            # A durable stop is a launch fence, not merely absence of a launch row.
+            # The same SQL owner orders this check against claim/stop transactions.
+            if connection.execute(
+                "SELECT 1 FROM execution_lifecycles WHERE proposal_id=?",
+                (str(current.proposal_id),),
+            ).fetchone():
+                raise DockerBackendFault("docker_authority_required")
             now, mono, healthy = self._review_time()
             original = self._authority_deadlines.get(str(current.proposal_id))
             if (
@@ -1678,15 +1970,38 @@ class SQLiteStorage:
         ).record
         if record.owner_instance_id != scope.owner_instance_id:
             raise ReviewFault("execution_target_mismatch")
+        stop = self._read_stop(connection, record, scope)
+        has_legacy = (
+            connection.execute(
+                "SELECT 1 FROM execution_results r JOIN execution_launches l "
+                "ON l.attempt_id=r.attempt_id "
+                "WHERE l.claim_id=?",
+                (str(record.claim_id),),
+            ).fetchone()
+            is not None
+        )
+        if (
+            stop is not None
+            and stop.terminal is not None
+            and stop.terminal.outcome != "completed"
+            and not has_legacy
+        ):
+            view, output = self._stop_payload(connection, record, stop)
+            return ExecutionInspection(
+                record=record, completion_state="stop_recorded", stop=view, stop_output=output
+            )
+        stop_view = ExecutionStopView.from_record(stop) if stop is not None else None
         if record.claim_id is None:
-            return ExecutionInspection(record=record, completion_state="not_claimed")
+            return ExecutionInspection(
+                record=record, completion_state="not_claimed", stop=stop_view
+            )
         launch_row = connection.execute(
             "SELECT 1 FROM execution_launches WHERE claim_id=?", (str(record.claim_id),)
         ).fetchone()
         if launch_row is None:
             if record.claim_state == "finished":
                 raise StorageFault("storage_schema_unsupported")
-            return ExecutionInspection(record=record, completion_state="claim_only")
+            return ExecutionInspection(record=record, completion_state="claim_only", stop=stop_view)
         launch_scope = DockerLaunchScope(
             project_id=scope.project_id,
             canonical_root=scope.canonical_root,
@@ -1699,11 +2014,22 @@ class SQLiteStorage:
         if result_row is None:
             if record.claim_state == "finished":
                 raise StorageFault("storage_schema_unsupported")
-            return ExecutionInspection(record=record, completion_state="launch_without_result")
+            return ExecutionInspection(
+                record=record, completion_state="launch_without_result", stop=stop_view
+            )
+        result = self._execution_result(connection, launch_scope)
+        if stop is not None:
+            stop_view = ExecutionStopView.from_record(
+                stop,
+                payload_state=result.payload_state,
+                retirement_reason=result.retirement_reason,
+                recorded_at_ms=result.recorded_at_ms,
+            )
         return ExecutionInspection(
             record=record,
             completion_state="recorded",
-            result=self._execution_result(connection, launch_scope),
+            result=result,
+            stop=stop_view,
         )
 
     def _lookup_proposal(
@@ -1755,6 +2081,298 @@ class SQLiteStorage:
         if self._authority_payload_digest(original) != prior[0]:
             raise ReviewFault("execution_conflict")
         return record
+
+    def _stop_target(
+        self, connection: sqlite3.Connection, scope: ExecutionInspectionScope
+    ) -> AuthorityRecord:
+        if self.instance_id is None or scope.owner_instance_id != self.instance_id:
+            raise ReviewFault("execution_target_mismatch")
+        row = connection.execute(
+            "SELECT " + _AUTHORITY_COLUMNS + " FROM execution_authorities "
+            "WHERE approval_id=? AND project_id=? AND canonical_root=?",
+            (str(scope.approval_id), str(scope.project_id), str(scope.canonical_root)),
+        ).fetchone()
+        if row is None:
+            raise ReviewFault("execution_not_found")
+        record = self._authority_record(row)
+        if (
+            record.owner_instance_id != scope.owner_instance_id
+            or connection.execute(
+                "SELECT 1 FROM projects WHERE project_id=? AND canonical_root=?",
+                (str(scope.project_id), str(scope.canonical_root)),
+            ).fetchone()
+            is None
+        ):
+            raise ReviewFault("execution_target_mismatch")
+        return record
+
+    @staticmethod
+    def _read_stop(
+        connection: sqlite3.Connection, authority: AuthorityRecord, scope: ExecutionInspectionScope
+    ) -> ExecutionStopRecord | None:
+        row = connection.execute(
+            "SELECT record_json,record_digest FROM execution_lifecycles WHERE proposal_id=?",
+            (str(authority.proposal_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            record = ExecutionStopRecord.model_validate_json(row[0])
+            if (
+                record.scope != scope
+                or record.manifest_digest != authority.manifest_digest
+                or record.fingerprint != row[1]
+            ):
+                raise ValueError("Invalid lifecycle binding.")
+            return record
+        except ValueError:
+            raise StorageFault("storage_schema_unsupported") from None
+
+    @staticmethod
+    def _write_stop(
+        connection: sqlite3.Connection, authority: AuthorityRecord, record: ExecutionStopRecord
+    ) -> None:
+        payload = record.model_dump_json()
+        if len(payload.encode()) > 32768:
+            raise ReviewFault("execution_capacity")
+        connection.execute(
+            "INSERT INTO execution_lifecycles VALUES (?,?,?) "
+            "ON CONFLICT(proposal_id) DO UPDATE SET record_json=excluded.record_json,"
+            "record_digest=excluded.record_digest",
+            (str(authority.proposal_id), payload, record.fingerprint),
+        )
+
+    @staticmethod
+    def _result_stop_terminal(result: DockerExecutionResult) -> ExecutionStopTerminal:
+        owned = result.owned
+        return ExecutionStopTerminal(
+            outcome="completed" if result.disposition == "completed" else "unknown",
+            evidence="owned",
+            cleanup_verified=result.outcome.cleanup_verified,
+            exit_code=result.outcome.exit_code,
+            attempt_id=owned.intent.attempt_id,
+            ownership_digest=fingerprint(
+                {
+                    "intent": owned.intent.fingerprint,
+                    "container": owned.container_id,
+                    "birth": owned.created_at,
+                }
+            ),
+            output_facts=result.output_facts,
+            output_digest=result.output_digest,
+        )
+
+    def _request_stop(
+        self, connection: sqlite3.Connection, request: ExecutionStopRequest, root: int, fd: int
+    ) -> ExecutionStopRecord:
+        scope = ExecutionInspectionScope.model_validate(
+            request.model_dump(
+                include={
+                    "project_id",
+                    "canonical_root",
+                    "owner_instance_id",
+                    "approval_id",
+                }
+            )
+        )
+        authority = self._stop_target(connection, scope)
+        if request.manifest_digest != authority.manifest_digest:
+            raise ReviewFault("execution_target_mismatch")
+        self._begin_write(connection, root, fd)
+        digest = fingerprint(
+            {
+                "operation": "stop_v1",
+                **request.model_dump(
+                    mode="json",
+                    exclude={"request_id"},
+                ),
+            }
+        )
+        if connection.execute(
+            "SELECT 1 FROM execution_operations WHERE request_id=?", (str(request.request_id),)
+        ).fetchone():
+            raise ReviewFault("execution_conflict")
+        prior = connection.execute(
+            "SELECT payload_digest,proposal_id FROM execution_authority_operations "
+            "WHERE request_id=?",
+            (str(request.request_id),),
+        ).fetchone()
+        if prior is not None and prior != (digest, str(authority.proposal_id)):
+            raise ReviewFault("execution_conflict")
+        record = self._read_stop(connection, authority, scope)
+        if prior is not None and record is None:
+            raise StorageFault("storage_schema_unsupported")
+        if record is None:
+            if authority.state not in {AuthorityState.APPROVED, AuthorityState.CONSUMED}:
+                raise ReviewFault("execution_conflict")
+            completed: ExecutionStopTerminal | None = None
+            if authority.state == AuthorityState.CONSUMED and authority.claim_state != "claimed":
+                if authority.claim_state != "finished":
+                    raise ReviewFault("execution_outcome_unknown")
+                completed = self._result_stop_terminal(
+                    self._execution_result(
+                        connection,
+                        DockerLaunchScope(
+                            project_id=authority.project_id,
+                            canonical_root=authority.canonical_root,
+                            claim_id=cast(UUID, authority.claim_id),
+                        ),
+                    )
+                )
+            now, _, healthy = self._review_time()
+            stamp = (
+                now
+                if type(now) is int and 0 <= now <= INT64_MAX - 15000
+                else authority.created_at_ms
+            )
+            record = ExecutionStopRecord(
+                scope=scope,
+                request_id=request.request_id,
+                manifest_digest=authority.manifest_digest,
+                reason=request.reason,
+                requested_at_ms=max(authority.created_at_ms, stamp),
+                clock_confirmed=healthy,
+                terminal=ExecutionStopTerminal(
+                    outcome="timed_out" if request.reason == "timeout" else "cancelled",
+                    evidence="not_started",
+                    cleanup_verified=True,
+                )
+                if authority.state == AuthorityState.APPROVED
+                else completed,
+            )
+            if authority.state == AuthorityState.APPROVED:
+                connection.execute(
+                    "UPDATE execution_authorities SET state='invalidated' WHERE proposal_id=?",
+                    (str(authority.proposal_id),),
+                )
+            self._write_stop(connection, authority, record)
+        if prior is None:
+            connection.execute(
+                "INSERT INTO execution_authority_operations VALUES (?,?,?)",
+                (str(request.request_id), digest, str(authority.proposal_id)),
+            )
+        self._commit_write(connection, fd)
+        return record
+
+    def _finish_stop(
+        self,
+        connection: sqlite3.Connection,
+        observed: ExecutionStopObservation,
+        root: int,
+        fd: int,
+        *,
+        capture: DockerOutputSnapshot | None = None,
+    ) -> ExecutionStopRecord:
+        if capture is not None:
+            ExecutionStopCapture(observation=observed, output=capture)
+        authority = self._stop_target(connection, observed.scope)
+        self._begin_write(connection, root, fd)
+        record = self._read_stop(connection, authority, observed.scope)
+        if (
+            record is None
+            or observed.request_id != record.request_id
+            or observed.manifest_digest != record.manifest_digest
+        ):
+            raise ReviewFault("execution_target_mismatch")
+        if observed.terminal.outcome == "completed":
+            # Only the unchanged ordinary completion port can establish v1
+            # completion. A stop observation cannot manufacture its missing row.
+            if (
+                connection.execute(
+                    "SELECT 1 FROM execution_results r JOIN execution_launches l "
+                    "ON l.attempt_id=r.attempt_id WHERE l.claim_id=?",
+                    (str(authority.claim_id),),
+                ).fetchone()
+                is None
+            ):
+                raise ReviewFault("execution_conflict")
+            legacy = self._execution_result(
+                connection,
+                DockerLaunchScope(
+                    project_id=authority.project_id,
+                    canonical_root=authority.canonical_root,
+                    claim_id=cast(UUID, authority.claim_id),
+                ),
+            )
+            if (
+                legacy.disposition != "completed"
+                or self._result_stop_terminal(legacy) != observed.terminal
+            ):
+                raise ReviewFault("execution_conflict")
+        if record.terminal is not None:
+            if record.terminal != observed.terminal:
+                raise ReviewFault("execution_conflict")
+            if capture is not None:
+                view, _ = self._stop_payload(connection, authority, record)
+                if view.payload_state == "missing":
+                    raise ReviewFault("execution_conflict")
+            self._commit_write(connection, fd)
+            return record
+        terminal = observed.terminal
+        if (
+            authority.state != AuthorityState.CONSUMED
+            or authority.claim_state not in {"claimed", "unknown"}
+            or (authority.claim_state == "unknown" and terminal.outcome != "unknown")
+        ):
+            raise ReviewFault("execution_outcome_unknown")
+        if terminal.evidence == "not_started":
+            if connection.execute(
+                "SELECT 1 FROM execution_launches WHERE claim_id=?", (str(authority.claim_id),)
+            ).fetchone():
+                raise ReviewFault("execution_outcome_unknown")
+            # Positive no-launch evidence is the committed stop fence plus the
+            # mandatory journal-before-mutation rule, not a missing row alone.
+        elif terminal.evidence == "owned":
+            owned = observed.owned
+            assert owned is not None
+            launch = self._launch_status(
+                connection,
+                DockerLaunchScope(
+                    project_id=authority.project_id,
+                    canonical_root=authority.canonical_root,
+                    claim_id=cast(UUID, authority.claim_id),
+                ),
+            )
+            if (
+                launch.intent != owned.intent
+                or launch.container_id != owned.container_id
+                or launch.created_at != owned.created_at
+                or terminal.exit_code != launch.exit_code
+            ):
+                raise ReviewFault("execution_target_mismatch")
+            if terminal.outcome != "unknown" and (
+                launch.uncertain
+                or "cleaned" not in launch.phases
+                or ("start_intent" in launch.phases and "exited" not in launch.phases)
+            ):
+                raise ReviewFault("execution_outcome_unknown")
+            if terminal.output_facts is not None and (
+                terminal.output_facts.retention_limit != authority.manifest.profile.output_bytes
+            ):
+                raise ReviewFault("execution_target_mismatch")
+        elif terminal.outcome != "unknown":
+            raise ReviewFault("execution_outcome_unknown")
+        try:
+            updated = ExecutionStopRecord.model_validate(
+                {
+                    **record.model_dump(),
+                    "terminal": terminal.model_dump(),
+                }
+            )
+        except ValueError:
+            raise ReviewFault("execution_conflict") from None
+        self._write_stop(connection, authority, updated)
+        if capture is not None:
+            self._insert_stop_payload(connection, authority, updated, capture)
+        connection.execute(
+            "UPDATE execution_authorities SET claim_state=? WHERE proposal_id=?",
+            (
+                "unknown" if terminal.outcome == "unknown" else "finished",
+                str(authority.proposal_id),
+            ),
+        )
+        self._commit_write(connection, fd)
+        return updated
 
     def _authority_work(
         self, connection: sqlite3.Connection, operation: AuthorityOperation, root: int, fd: int

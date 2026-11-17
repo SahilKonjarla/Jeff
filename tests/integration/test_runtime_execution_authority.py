@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from pathlib import Path
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,8 +27,14 @@ from jeff.application.execution import (
     DockerOwnedContainer,
     DockerTargetDeclaration,
     ExecutionCall,
+    ExecutionInspectionScope,
     ExecutionManifest,
     ExecutionProfile,
+    ExecutionStopCapture,
+    ExecutionStopObservation,
+    ExecutionStopRecord,
+    ExecutionStopRequest,
+    ExecutionStopTerminal,
     PreparedInputBinding,
     PreparedInputs,
     ReviewFault,
@@ -143,6 +150,7 @@ def authority_store(
     clock: dict[str, int] | None = None,
     *,
     retention_clock: Callable[[], int] | None = None,
+    retention_monotonic: Callable[[], float] | None = None,
 ) -> Iterator[tuple[SQLiteStorage, Project, ExecutionManifest, UUID]]:
     layout = RuntimeLayout(data_dir=root / "d", runtime_dir=root / "r", uid=os.geteuid())
     owner = RuntimeStateStore(layout).acquire(create=True)
@@ -168,6 +176,7 @@ def authority_store(
             owner,
             instance_id=generation,
             retention_clock=retention_clock,
+            retention_monotonic=retention_monotonic,
             review_clock=(lambda: clock["wall"]) if clock is not None else None,
             review_monotonic=(lambda: float(clock["mono"])) if clock is not None else None,
         )
@@ -296,6 +305,145 @@ def completion(
         ),
         output=capture.seal(),
     )
+
+
+def stopped_sample(
+    store: SQLiteStorage,
+    project: Project,
+    manifest: ExecutionManifest,
+    generation: UUID,
+    *,
+    retain: bool = True,
+) -> tuple[ExecutionStopRecord, ExecutionStopCapture]:
+    from jeff.domain.execution import fingerprint
+
+    intent = launch_intent(store, project, manifest, generation)
+    for phase in ("create_intent", "created", "start_intent", "exited", "cleaned"):
+        store.record(fact(intent, phase), deadline=time.monotonic() + 5)
+    scope = ExecutionInspectionScope(
+        project_id=project.project_id,
+        canonical_root=project.root,
+        owner_instance_id=generation,
+        approval_id=intent.record.approval_id,
+    )
+    request = ExecutionStopRequest(
+        **scope.model_dump(), request_id=uuid4(), manifest_digest=manifest.fingerprint
+    )
+    record = store.request_stop(request, deadline=time.monotonic() + 5)
+    capture = GuardedOutputCollector(manifest.profile.output_bytes)
+    capture.accept("stdout", b"safe prefix\n")
+    digest_helper = completion(intent).model_copy(update={"output": capture.seal(abort=True)})
+    owned = digest_helper.owned
+    observation = ExecutionStopObservation(
+        scope=scope,
+        request_id=record.request_id,
+        manifest_digest=manifest.fingerprint,
+        owned=owned,
+        terminal=ExecutionStopTerminal(
+            outcome="cancelled",
+            evidence="owned",
+            cleanup_verified=True,
+            exit_code=7,
+            attempt_id=intent.attempt_id,
+            ownership_digest=fingerprint(
+                {
+                    "intent": intent.fingerprint,
+                    "container": owned.container_id,
+                    "birth": owned.created_at,
+                }
+            ),
+            output_facts=digest_helper.output_facts,
+            output_digest=digest_helper.output_digest,
+        ),
+    )
+    sample = ExecutionStopCapture(observation=observation, output=digest_helper.output)
+    final = (
+        store.finish_stop_with_capture(observation, sample.output, deadline=time.monotonic() + 5)
+        if retain
+        else (store.finish_stop(observation, deadline=time.monotonic() + 5))
+    )
+    return final, sample
+
+
+def test_stop_and_legacy_payloads_share_sixteen_known_slots_without_backfilling_metadata(
+    tmp_path: Path,
+) -> None:
+    with authority_store(tmp_path) as (store, project, manifest, generation):
+        first = None
+        for index in range(17):
+            if index % 2:
+                stopped_sample(store, project, manifest, generation)
+            else:
+                intent = launch_intent(store, project, manifest, generation)
+                for phase in ("create_intent", "created", "start_intent", "exited", "cleaned"):
+                    store.record(fact(intent, phase), deadline=time.monotonic() + 5)
+                store.complete_execution(completion(intent), deadline=time.monotonic() + 5)
+                if first is None:
+                    first = intent
+        assert first is not None
+        oldest = store.execution_result(launch_scope(first), deadline=time.monotonic() + 5)
+        assert oldest.payload_state == "retired" and oldest.retirement_reason == "capacity"
+        with closing(sqlite3.connect(store.owner.store.layout.database)) as sql:
+            assert sql.execute(
+                "SELECT (SELECT count(*) FROM execution_results WHERE stdout IS NOT NULL) + "
+                "(SELECT count(*) FROM execution_stop_payloads WHERE stdout IS NOT NULL)"
+            ).fetchone() == (16,)
+        metadata_only, sample = stopped_sample(store, project, manifest, generation, retain=False)
+        inspection = store.inspect_execution(metadata_only.scope, deadline=time.monotonic() + 5)
+        assert inspection.stop is not None and inspection.stop.payload_state == "missing"
+        with pytest.raises(ReviewFault):
+            store.finish_stop_with_capture(
+                sample.observation, sample.output, deadline=time.monotonic() + 5
+            )
+        assert (
+            store.inspect_stop(metadata_only.scope, deadline=time.monotonic() + 5) == metadata_only
+        )
+
+
+@pytest.mark.parametrize("kind", ("age", "clock", "tamper"))
+def test_stop_archive_age_clock_and_tampering_never_expose_unavailable_text(
+    tmp_path: Path, kind: str
+) -> None:
+    clock = {"wall": 100000000, "mono": 1000.0}
+    with authority_store(
+        tmp_path,
+        retention_clock=lambda: int(clock["wall"]),
+        retention_monotonic=lambda: clock["mono"],
+    ) as (store, project, manifest, generation):
+        record, sample = stopped_sample(store, project, manifest, generation)
+        original = store.inspect_execution(record.scope, deadline=time.monotonic() + 5)
+        assert original.stop_output == sample.output and original.stop is not None
+        if kind == "age":
+            clock["wall"] += 31 * 86400000
+            clock["mono"] += 31 * 86400
+        elif kind == "clock":
+            clock["wall"] -= 1
+        else:
+            store.close(timeout=5)
+            with closing(sqlite3.connect(store.owner.store.layout.database)) as sql, sql:
+                sql.execute("UPDATE execution_stop_payloads SET stdout='evil prefix' || char(10)")
+            reopened = SQLiteStorage(store.owner, instance_id=generation)
+            reopened.start()
+            try:
+                assert reopened.wait_ready(5).state == "ready"
+                with pytest.raises(ReviewFault) as altered:
+                    reopened.inspect_execution(record.scope, deadline=time.monotonic() + 5)
+                assert altered.value.code == "storage_schema_unsupported"
+            finally:
+                reopened.close(timeout=5)
+            return
+        inspected = store.inspect_execution(record.scope, deadline=time.monotonic() + 5)
+        assert inspected.stop is not None
+        assert inspected.stop.payload_state == ("expired" if kind == "age" else "clock_unconfirmed")
+        assert (
+            inspected.stop_output is None
+            and inspected.stop.output_facts == original.stop.output_facts
+        )
+        if kind == "age":
+            store.retire(deadline=time.monotonic() + 5)
+            retired = store.inspect_execution(record.scope, deadline=time.monotonic() + 5)
+            assert retired.stop is not None and retired.stop.payload_state == "retired"
+            assert retired.stop.retirement_reason == "age" and retired.stop_output is None
 
 
 def test_completion_atomically_records_sanitized_output_and_releases_admission(
@@ -565,6 +713,10 @@ def test_results_restart_and_signed_schema7_migration_preserve_exclusions(
                     closing(sqlite3.connect(store.owner.store.layout.database)) as fixture,
                     fixture,
                 ):
+                    fixture.execute("DROP TABLE execution_stop_payloads")
+                    fixture.execute("DELETE FROM schema_migrations WHERE version=10")
+                    fixture.execute("DROP TABLE execution_lifecycles")
+                    fixture.execute("DELETE FROM schema_migrations WHERE version=9")
                     fixture.execute("DROP TABLE execution_results")
                     fixture.execute("DELETE FROM schema_migrations WHERE version=8")
                     fixture.execute("PRAGMA user_version=7")
@@ -598,7 +750,7 @@ def test_results_restart_and_signed_schema7_migration_preserve_exclusions(
                 again = SQLiteStorage(store.owner, instance_id=uuid4())
                 again.start()
                 try:
-                    assert again.wait_ready(5).schema_version == 8
+                    assert again.wait_ready(5).schema_version == 10
                     assert (
                         again.lookup(project) == project
                         and store.owner.store.layout.settings.read_bytes() == settings
@@ -1020,6 +1172,10 @@ def test_clean_schema5_migration_preserves_registration_settings_and_legacy_revi
         ).items[0]
         store.close(timeout=5)
         with closing(sqlite3.connect(layout.database)) as fixture, fixture:
+            fixture.execute("DROP TABLE execution_stop_payloads")
+            fixture.execute("DELETE FROM schema_migrations WHERE version=10")
+            fixture.execute("DROP TABLE execution_lifecycles")
+            fixture.execute("DELETE FROM schema_migrations WHERE version=9")
             fixture.execute("DROP TABLE execution_results")
             fixture.execute("DELETE FROM schema_migrations WHERE version=8")
             fixture.execute("DROP TABLE execution_launch_events")
@@ -1034,7 +1190,7 @@ def test_clean_schema5_migration_preserves_registration_settings_and_legacy_revi
         migrated = SQLiteStorage(store.owner, instance_id=new_generation)
         migrated.start()
         try:
-            assert migrated.wait_ready(5).schema_version == 8
+            assert migrated.wait_ready(5).schema_version == 10
             assert migrated.lookup(project) == project
             assert layout.settings.read_bytes() == settings_before
             observed = migrated.review(
@@ -1217,6 +1373,10 @@ def test_journal_restart_and_clean_schema6_migration_never_restore_permission(
                     closing(sqlite3.connect(store.owner.store.layout.database)) as fixture,
                     fixture,
                 ):
+                    fixture.execute("DROP TABLE execution_stop_payloads")
+                    fixture.execute("DELETE FROM schema_migrations WHERE version=10")
+                    fixture.execute("DROP TABLE execution_lifecycles")
+                    fixture.execute("DELETE FROM schema_migrations WHERE version=9")
                     fixture.execute("DROP TABLE execution_results")
                     fixture.execute("DELETE FROM schema_migrations WHERE version=8")
                     fixture.execute("DROP TABLE execution_launch_events")
@@ -1227,7 +1387,7 @@ def test_journal_restart_and_clean_schema6_migration_never_restore_permission(
             again = SQLiteStorage(store.owner, instance_id=new_generation)
             again.start()
             try:
-                assert again.wait_ready(5).schema_version == 8
+                assert again.wait_ready(5).schema_version == 10
                 assert (
                     again.lookup(project) == project
                     and store.owner.store.layout.settings.read_bytes() == settings
@@ -1252,3 +1412,883 @@ def test_journal_restart_and_clean_schema6_migration_never_restore_permission(
                     assert snapshot.uncertain and snapshot.container_id == "e" * 64
             finally:
                 again.close(timeout=5)
+
+
+def test_sql_control_reservation_stays_inside_sixteen_pending_positions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    from jeff.application.execution import ExecutionCancelCall
+
+    original = sqlite3.connect
+    entered, release = threading.Event(), threading.Event()
+    armed = [False]
+
+    class Paused(sqlite3.Connection):
+        def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+            if armed[0] and sql.startswith("SELECT project_id,canonical_root FROM projects"):
+                armed[0] = False
+                entered.set()
+                assert release.wait(3)
+            return super().execute(sql, parameters)
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        return cast(sqlite3.Connection, original(*args, **{**kwargs, "factory": Paused}))
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    with authority_store(tmp_path) as (store, project, manifest, generation):
+        proposed = store.authority(
+            command(
+                project,
+                generation,
+                operation="propose",
+                manifest=manifest,
+                current_manifest_digest=manifest.fingerprint,
+            ),
+            deadline=time.monotonic() + 5,
+        ).record
+        store.authority(
+            command(
+                project,
+                generation,
+                operation="approve",
+                approval_id=proposed.approval_id,
+                current_manifest_digest=manifest.fingerprint,
+            ),
+            deadline=time.monotonic() + 5,
+        )
+        call = ExecutionCancelCall(
+            request_id=uuid4(),
+            approval_id=proposed.approval_id,
+            reviewed_manifest_digest=manifest.fingerprint,
+        )
+        with ThreadPoolExecutor(max_workers=1) as observer:
+            armed[0] = True
+            lookup = observer.submit(store.lookup, project, deadline=time.monotonic() + 5)
+            try:
+                assert entered.wait(1)
+                # The public nonblocking control port provides deterministic admission
+                # while the one existing SQL actor is paused, without private queue reads.
+                queued = [
+                    store.submit_cancel(call, deadline=time.monotonic() + 5) for _ in range(15)
+                ]
+                with pytest.raises(StorageFault) as ordinary:
+                    store.lookup(project, deadline=time.monotonic() + 5)
+                assert ordinary.value.code == "storage_busy"
+                queued.append(store.submit_cancel(call, deadline=time.monotonic() + 5))
+                with pytest.raises(StorageFault) as full:
+                    store.submit_cancel(call, deadline=time.monotonic() + 5)
+                assert full.value.code == "storage_busy"
+            finally:
+                release.set()
+            assert lookup.result(timeout=2) == project
+            first = queued[0].result(timeout=2)
+            assert all(f.result(timeout=2) == first for f in queued)
+            assert first.terminal is not None and first.terminal.evidence == "not_started"
+
+
+def test_stop_revokes_approved_authority_atomically_and_replays_first_facts(tmp_path: Path) -> None:
+    from jeff.application.execution import ExecutionInspectionScope, ExecutionStopRequest
+
+    with authority_store(tmp_path) as (store, project, manifest, generation):
+        proposed = store.authority(
+            command(
+                project,
+                generation,
+                operation="propose",
+                manifest=manifest,
+                current_manifest_digest=manifest.fingerprint,
+            ),
+            deadline=time.monotonic() + 5,
+        ).record
+        scope = ExecutionInspectionScope(
+            project_id=project.project_id,
+            canonical_root=project.root,
+            owner_instance_id=generation,
+            approval_id=proposed.approval_id,
+        )
+        request = ExecutionStopRequest(
+            **scope.model_dump(),
+            request_id=uuid4(),
+            manifest_digest=manifest.fingerprint,
+        )
+        assert store.inspect_stop(scope, deadline=time.monotonic() + 5) is None
+        with pytest.raises(ReviewFault):  # Pending reviews still use deny.
+            store.request_stop(request, deadline=time.monotonic() + 5)
+        store.authority(
+            command(
+                project,
+                generation,
+                operation="approve",
+                approval_id=proposed.approval_id,
+                current_manifest_digest=manifest.fingerprint,
+            ),
+            deadline=time.monotonic() + 5,
+        )
+        first = store.request_stop(request, deadline=time.monotonic() + 5)
+        assert first.terminal is not None and first.terminal.outcome == "cancelled"
+        assert first.terminal.evidence == "not_started" and first.terminal.cleanup_verified
+        assert store.request_stop(request, deadline=time.monotonic() + 5) == first
+        duplicate = request.model_copy(update={"request_id": uuid4()})
+        assert store.request_stop(duplicate, deadline=time.monotonic() + 5) == first
+        assert store.inspect_stop(scope, deadline=time.monotonic() + 5) == first
+        with pytest.raises(ReviewFault):
+            store.request_stop(
+                request.model_copy(update={"reason": "shutdown"}), deadline=time.monotonic() + 5
+            )
+        with pytest.raises(ReviewFault):
+            store.authority(
+                command(
+                    project,
+                    generation,
+                    operation="claim",
+                    approval_id=proposed.approval_id,
+                    current_manifest_digest=manifest.fingerprint,
+                ),
+                deadline=time.monotonic() + 5,
+            )
+        shown = store.authority(
+            command(
+                project,
+                generation,
+                operation="show",
+                approval_id=proposed.approval_id,
+            ),
+            deadline=time.monotonic() + 5,
+        )
+        assert shown.record.state.value == "invalidated" and shown.launch_claim is None
+        assert shown.record.claim_id is None
+
+
+def test_stop_prelaunch_fence_requires_no_inflight_create_and_never_adopts(tmp_path: Path) -> None:
+    from jeff.application.execution import (
+        ExecutionInspectionScope,
+        ExecutionStopObservation,
+        ExecutionStopRequest,
+        ExecutionStopTerminal,
+    )
+
+    for inflight in (False, True):
+        with authority_store(tmp_path / str(inflight)) as (store, project, manifest, generation):
+            intent = launch_intent(store, project, manifest, generation)
+            scope = ExecutionInspectionScope(
+                project_id=project.project_id,
+                canonical_root=project.root,
+                owner_instance_id=generation,
+                approval_id=intent.record.approval_id,
+            )
+            if inflight:
+                store.record(fact(intent, "create_intent"), deadline=time.monotonic() + 5)
+            request = ExecutionStopRequest(
+                **scope.model_dump(),
+                request_id=uuid4(),
+                manifest_digest=manifest.fingerprint,
+            )
+            first = store.request_stop(request, deadline=time.monotonic() + 5)
+            assert first.terminal is None
+            if not inflight:
+                with pytest.raises(DockerBackendFault):
+                    store.record(fact(intent, "create_intent"), deadline=time.monotonic() + 5)
+            observation = ExecutionStopObservation(
+                scope=scope,
+                request_id=first.request_id,
+                manifest_digest=manifest.fingerprint,
+                terminal=ExecutionStopTerminal(
+                    outcome="cancelled",
+                    evidence="not_started",
+                    cleanup_verified=True,
+                ),
+            )
+            if inflight:
+                with pytest.raises(ReviewFault):
+                    store.finish_stop(observation, deadline=time.monotonic() + 5)
+                pending = store.inspect_stop(scope, deadline=time.monotonic() + 5)
+                assert pending is not None and pending.terminal is None
+            else:
+                final = store.finish_stop(observation, deadline=time.monotonic() + 5)
+                assert final.terminal == observation.terminal
+                assert store.finish_stop(observation, deadline=time.monotonic() + 5) == final
+                shown = store.authority(
+                    command(
+                        project,
+                        generation,
+                        operation="show",
+                        approval_id=scope.approval_id,
+                    ),
+                    deadline=time.monotonic() + 5,
+                )
+                assert shown.record.claim_state == "finished" and shown.launch_claim is None
+                with pytest.raises(DockerBackendFault):
+                    store.record(fact(intent, "create_intent"), deadline=time.monotonic() + 5)
+
+
+def test_stop_natural_completion_wins_without_rewriting_legacy_result(tmp_path: Path) -> None:
+    from jeff.application.execution import ExecutionInspectionScope, ExecutionStopRequest
+
+    for request_before in (True, False):
+        with authority_store(tmp_path / str(request_before)) as (
+            store,
+            project,
+            manifest,
+            generation,
+        ):
+            intent = launch_intent(store, project, manifest, generation)
+            scope = ExecutionInspectionScope(
+                project_id=project.project_id,
+                canonical_root=project.root,
+                owner_instance_id=generation,
+                approval_id=intent.record.approval_id,
+            )
+            request = ExecutionStopRequest(
+                **scope.model_dump(),
+                request_id=uuid4(),
+                manifest_digest=manifest.fingerprint,
+            )
+            for phase in ("create_intent", "created", "start_intent"):
+                store.record(fact(intent, phase), deadline=time.monotonic() + 5)
+            if request_before:
+                assert store.request_stop(request, deadline=time.monotonic() + 5).terminal is None
+            for phase in ("exited", "cleaned"):
+                store.record(fact(intent, phase), deadline=time.monotonic() + 5)
+            observed = completion(intent)
+            original = observed.fingerprint
+            result = store.complete_execution(observed, deadline=time.monotonic() + 5)
+            assert result.disposition == "completed" and result.completion_digest == original
+            if not request_before:
+                store.request_stop(request, deadline=time.monotonic() + 5)
+            stopped = store.inspect_stop(scope, deadline=time.monotonic() + 5)
+            assert stopped is not None and stopped.terminal is not None
+            assert stopped.terminal.outcome == "completed"
+            assert stopped.terminal.exit_code == 7
+            assert store.request_stop(request, deadline=time.monotonic() + 5) == stopped
+            assert (
+                store.execution_result(launch_scope(intent), deadline=time.monotonic() + 5)
+                == result
+            )
+
+
+def test_stop_known_owned_exit_keeps_partial_logs_distinct_and_unknown_quarantined(
+    tmp_path: Path,
+) -> None:
+    from jeff.application.execution import (
+        DockerOutputFacts,
+        ExecutionInspectionScope,
+        ExecutionStopObservation,
+        ExecutionStopRequest,
+        ExecutionStopTerminal,
+    )
+    from jeff.domain.execution import fingerprint
+
+    for uncertain in (False, True):
+        with authority_store(tmp_path / str(uncertain)) as (store, project, manifest, generation):
+            intent = launch_intent(store, project, manifest, generation)
+            scope = ExecutionInspectionScope(
+                project_id=project.project_id,
+                canonical_root=project.root,
+                owner_instance_id=generation,
+                approval_id=intent.record.approval_id,
+            )
+            for phase in ("create_intent", "created", "start_intent"):
+                store.record(fact(intent, phase), deadline=time.monotonic() + 5)
+            request = ExecutionStopRequest(
+                **scope.model_dump(),
+                request_id=uuid4(),
+                manifest_digest=manifest.fingerprint,
+                reason="timeout",
+            )
+            first = store.request_stop(request, deadline=time.monotonic() + 5)
+            for phase in ("exited", "cleaned"):
+                store.record(fact(intent, phase), deadline=time.monotonic() + 5)
+            owned = completion(intent).owned
+            capture = GuardedOutputCollector(manifest.profile.output_bytes)
+            capture.accept("stdout", b"partial")
+            snapshot = capture.seal(abort=True)
+            facts = DockerOutputFacts.model_validate(
+                snapshot.model_dump(exclude={"stdout", "stderr"})
+            )
+            terminal = ExecutionStopTerminal(
+                outcome="timed_out",
+                evidence="owned",
+                cleanup_verified=True,
+                exit_code=7,
+                attempt_id=intent.attempt_id,
+                ownership_digest=fingerprint(
+                    {
+                        "intent": intent.fingerprint,
+                        "container": owned.container_id,
+                        "birth": owned.created_at,
+                    }
+                ),
+                output_facts=facts,
+                output_digest="a" * 64,
+            )
+            observation = ExecutionStopObservation(
+                scope=scope,
+                request_id=first.request_id,
+                manifest_digest=manifest.fingerprint,
+                terminal=terminal,
+                owned=owned,
+            )
+            if not uncertain:
+                forged_completed = observation.model_copy(
+                    update={
+                        "terminal": terminal.model_copy(update={"outcome": "completed"}),
+                    }
+                )
+                with pytest.raises(ReviewFault):
+                    store.finish_stop(forged_completed, deadline=time.monotonic() + 5)
+            if uncertain:
+                store.record(fact(intent, "unknown"), deadline=time.monotonic() + 5)
+                with pytest.raises(ReviewFault):
+                    store.finish_stop(observation, deadline=time.monotonic() + 5)
+                observation = observation.model_copy(
+                    update={"terminal": terminal.model_copy(update={"outcome": "unknown"})}
+                )
+            final = store.finish_stop(observation, deadline=time.monotonic() + 5)
+            assert final.terminal is not None and final.terminal.output_facts is not None
+            assert (
+                final.terminal.output_facts.aborted and not final.terminal.output_facts.stdout_eof
+            )
+            assert final.terminal.outcome == ("unknown" if uncertain else "timed_out")
+            shown = store.authority(
+                command(project, generation, operation="show", approval_id=scope.approval_id),
+                deadline=time.monotonic() + 5,
+            )
+            assert shown.record.claim_state == ("unknown" if uncertain else "finished")
+            # Wire12 projects separate terminal facts, never a fabricated v1 result
+            # or retroactively attached text for this metadata-only DB9 record.
+            inspected = store.inspect_execution(scope, deadline=time.monotonic() + 5)
+            assert inspected.completion_state == "stop_recorded" and inspected.result is None
+            assert inspected.stop is not None and inspected.stop.outcome == final.terminal.outcome
+            assert inspected.stop.payload_state == "missing" and inspected.stop_output is None
+            assert store.snapshot().state == "ready"
+
+
+def test_schema8_to9_signs_source_before_ddl_preserves_v1_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_connect = sqlite3.connect
+    for fail_ddl in (False, True):
+        with authority_store(tmp_path / str(fail_ddl)) as (store, project, manifest, generation):
+            intent = launch_intent(store, project, manifest, generation)
+            for phase in ("create_intent", "created", "start_intent", "exited", "cleaned"):
+                store.record(fact(intent, phase), deadline=time.monotonic() + 5)
+            original = store.complete_execution(completion(intent), deadline=time.monotonic() + 5)
+            store.close(timeout=5)
+            layout = store.owner.store.layout
+            with closing(original_connect(layout.database)) as fixture, fixture:
+                fixture.execute("DROP TABLE execution_stop_payloads")
+                fixture.execute("DELETE FROM schema_migrations WHERE version=10")
+                fixture.execute("DROP TABLE execution_lifecycles")
+                fixture.execute("DELETE FROM schema_migrations WHERE version=9")
+                fixture.execute("PRAGMA user_version=8")
+            before = layout.database.read_bytes()
+            settings = layout.settings.read_bytes()
+            signed: list[int] = []
+            ddl: list[str] = []
+            arm = store.owner.arm_storage_recovery
+
+            def signed_arm(
+                *args: Any,
+                _signed: list[int] = signed,
+                _arm: Callable[..., _RecoveryPermit] = arm,
+                **kwargs: Any,
+            ) -> _RecoveryPermit:
+                _signed.append(int(kwargs["schema_version"]))
+                return _arm(*args, **kwargs)
+
+            class Migration(sqlite3.Connection):
+                def execute(
+                    self,
+                    sql: str,
+                    parameters: Any = (),
+                    /,
+                    *,
+                    _signed: list[int] = signed,
+                    _ddl: list[str] = ddl,
+                    _fail: bool = fail_ddl,
+                ) -> sqlite3.Cursor:
+                    if sql.startswith("CREATE TABLE execution_lifecycles"):
+                        assert _signed and _signed[-1] == 8
+                        _ddl.append(sql)
+                        if _fail:
+                            raise sqlite3.OperationalError("synthetic DB9 DDL refusal")
+                    return super().execute(sql, parameters)
+
+            def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+                return cast(
+                    sqlite3.Connection, original_connect(*args, **{**kwargs, "factory": Migration})
+                )
+
+            with monkeypatch.context() as patch:
+                patch.setattr(store.owner, "arm_storage_recovery", signed_arm)
+                patch.setattr(sqlite3, "connect", connect)
+                migrated = SQLiteStorage(store.owner, instance_id=uuid4())
+                migrated.start()
+                try:
+                    state = migrated.wait_ready(5)
+                    assert len(ddl) == 1 and signed[0] == 8
+                    if fail_ddl:
+                        assert state.state == "failed"
+                    else:
+                        assert state.schema_version == 10
+                        assert (
+                            migrated.execution_result(
+                                launch_scope(intent), deadline=time.monotonic() + 5
+                            )
+                            == original
+                        )
+                        assert migrated.lookup(project) == project
+                finally:
+                    migrated.close(timeout=5)
+            assert layout.settings.read_bytes() == settings
+            if fail_ddl:
+                assert layout.database.read_bytes() == before
+
+
+@pytest.mark.parametrize("failure", ("none", "ddl", "permit"))
+def test_db10_migration_signs_exact_source9_before_ddl_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    original_connect = sqlite3.connect
+    with authority_store(tmp_path) as (store, project, manifest, generation):
+        intent = launch_intent(store, project, manifest, generation)
+        for phase in ("create_intent", "created", "start_intent", "exited", "cleaned"):
+            store.record(fact(intent, phase), deadline=time.monotonic() + 5)
+        original = store.complete_execution(completion(intent), deadline=time.monotonic() + 5)
+        store.close(timeout=5)
+        layout = store.owner.store.layout
+        with closing(original_connect(layout.database)) as sql, sql:
+            sql.execute("DROP TABLE execution_stop_payloads")
+            sql.execute("DELETE FROM schema_migrations WHERE version=10")
+            sql.execute("PRAGMA user_version=9")
+        before = layout.database.read_bytes()
+        settings = layout.settings.read_bytes()
+        signed: list[int] = []
+        ddl: list[str] = []
+        arm = store.owner.arm_storage_recovery
+
+        def signed_arm(*args: Any, **kwargs: Any) -> _RecoveryPermit:
+            signed.append(int(kwargs["schema_version"]))
+            if failure == "permit":
+                raise StorageFault("storage_recovery_required")
+            return arm(*args, **kwargs)
+
+        class Migration(sqlite3.Connection):
+            def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+                if sql.startswith("CREATE TABLE execution_stop_payloads"):
+                    assert signed == [9]
+                    ddl.append(sql)
+                    if failure == "ddl":
+                        raise sqlite3.OperationalError("synthetic DB10 DDL refusal")
+                return super().execute(sql, parameters)
+
+        def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+            return cast(
+                sqlite3.Connection, original_connect(*args, **{**kwargs, "factory": Migration})
+            )
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store.owner, "arm_storage_recovery", signed_arm)
+            patch.setattr(sqlite3, "connect", connect)
+            migrated = SQLiteStorage(store.owner, instance_id=uuid4())
+            migrated.start()
+            try:
+                state = migrated.wait_ready(5)
+                assert signed and signed[0] == 9
+                if failure != "none":
+                    assert state.state == "failed"
+                else:
+                    assert state.schema_version == 10
+                    assert (
+                        migrated.execution_result(
+                            launch_scope(intent), deadline=time.monotonic() + 5
+                        )
+                        == original
+                    )
+                    assert migrated.lookup(project) == project
+                assert len(ddl) == (0 if failure == "permit" else 1)
+            finally:
+                migrated.close(timeout=5)
+        assert layout.settings.read_bytes() == settings
+        if failure != "none":
+            assert layout.database.read_bytes() == before
+
+
+def test_stop_claim_races_scope_and_namespace_never_reissue_permission(tmp_path: Path) -> None:
+    from jeff.application.execution import (
+        ExecutionInspectionScope,
+        ExecutionStopObservation,
+        ExecutionStopRequest,
+        ExecutionStopTerminal,
+    )
+
+    for index in range(4):
+        with authority_store(tmp_path / str(index)) as (store, project, manifest, generation):
+            proposal = command(
+                project,
+                generation,
+                operation="propose",
+                manifest=manifest,
+                current_manifest_digest=manifest.fingerprint,
+            )
+            record = store.authority(proposal, deadline=time.monotonic() + 5).record
+            store.authority(
+                command(
+                    project,
+                    generation,
+                    operation="approve",
+                    approval_id=record.approval_id,
+                    current_manifest_digest=manifest.fingerprint,
+                ),
+                deadline=time.monotonic() + 5,
+            )
+            scope = ExecutionInspectionScope(
+                project_id=project.project_id,
+                canonical_root=project.root,
+                owner_instance_id=generation,
+                approval_id=record.approval_id,
+            )
+            request = ExecutionStopRequest(
+                **scope.model_dump(), request_id=uuid4(), manifest_digest=manifest.fingerprint
+            )
+            for changes in (
+                {"owner_instance_id": uuid4()},
+                {"canonical_root": project.root / "wrong"},
+                {"manifest_digest": "b" * 64},
+                {"request_id": proposal.request_id},
+            ):
+                with pytest.raises(ReviewFault):
+                    store.request_stop(
+                        request.model_copy(update=changes), deadline=time.monotonic() + 5
+                    )
+            claim = command(
+                project,
+                generation,
+                operation="claim",
+                approval_id=record.approval_id,
+                current_manifest_digest=manifest.fingerprint,
+            )
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                stop_future = pool.submit(
+                    store.request_stop, request, deadline=time.monotonic() + 5
+                )
+                claim_future = pool.submit(store.authority, claim, deadline=time.monotonic() + 5)
+                stopped = stop_future.result(timeout=5)
+                try:
+                    claimed = claim_future.result(timeout=5)
+                except ReviewFault:
+                    assert stopped.terminal is not None
+                else:
+                    assert claimed.launch_claim is not None and stopped.terminal is None
+                    replay = store.authority(claim, deadline=time.monotonic() + 5)
+                    assert replay.launch_claim is None
+                    store.finish_stop(
+                        ExecutionStopObservation(
+                            scope=scope,
+                            request_id=stopped.request_id,
+                            manifest_digest=manifest.fingerprint,
+                            terminal=ExecutionStopTerminal(
+                                outcome="cancelled", evidence="not_started", cleanup_verified=True
+                            ),
+                        ),
+                        deadline=time.monotonic() + 5,
+                    )
+            assert (
+                store.request_stop(request, deadline=time.monotonic() + 5).request_id
+                == stopped.request_id
+            )
+            final = store.inspect_stop(scope, deadline=time.monotonic() + 5)
+            assert final is not None and final.terminal is not None
+            assert final.terminal.outcome == "cancelled"
+
+
+def test_stop_rollback_lost_commit_ack_and_restart_never_restore_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jeff.application.execution import ExecutionStopRequest
+
+    for mode in ("rollback", "lost_ack"):
+        with authority_store(tmp_path / mode) as (store, project, manifest, generation):
+            record = store.authority(
+                command(
+                    project,
+                    generation,
+                    operation="propose",
+                    manifest=manifest,
+                    current_manifest_digest=manifest.fingerprint,
+                ),
+                deadline=time.monotonic() + 5,
+            ).record
+            store.authority(
+                command(
+                    project,
+                    generation,
+                    operation="approve",
+                    approval_id=record.approval_id,
+                    current_manifest_digest=manifest.fingerprint,
+                ),
+                deadline=time.monotonic() + 5,
+            )
+            request = ExecutionStopRequest(
+                project_id=project.project_id,
+                canonical_root=project.root,
+                owner_instance_id=generation,
+                approval_id=record.approval_id,
+                request_id=uuid4(),
+                manifest_digest=manifest.fingerprint,
+            )
+            commit = store._commit_write
+
+            def failed_commit(
+                connection: sqlite3.Connection,
+                fd: int,
+                *,
+                _mode: str = mode,
+                _commit: Callable[[sqlite3.Connection, int], None] = commit,
+            ) -> None:
+                if _mode == "lost_ack":
+                    _commit(connection, fd)
+                    raise StorageFault("storage_outcome_unconfirmed")
+                raise StorageFault("storage_busy")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(store, "_commit_write", failed_commit)
+                with pytest.raises(ReviewFault):
+                    store.request_stop(request, deadline=time.monotonic() + 5)
+            if mode == "rollback":
+                from jeff.application.execution import ExecutionInspectionScope
+
+                scope = ExecutionInspectionScope.model_validate(
+                    request.model_dump(exclude={"request_id", "manifest_digest", "reason"})
+                )
+                assert store.inspect_stop(scope, deadline=time.monotonic() + 5) is None
+                shown = store.authority(
+                    command(project, generation, operation="show", approval_id=record.approval_id),
+                    deadline=time.monotonic() + 5,
+                )
+                assert shown.record.state.value == "approved" and shown.launch_claim is None
+            else:
+                store.close(timeout=5)
+                new_generation = uuid4()
+                reopened = SQLiteStorage(store.owner, instance_id=new_generation)
+                reopened.start()
+                try:
+                    assert reopened.wait_ready(5).state == "ready"
+                    shown = reopened.authority(
+                        command(
+                            project,
+                            new_generation,
+                            operation="show",
+                            approval_id=record.approval_id,
+                        ),
+                        deadline=time.monotonic() + 5,
+                    )
+                    assert shown.record.state.value == "invalidated" and shown.launch_claim is None
+                    with pytest.raises(ReviewFault):
+                        reopened.request_stop(
+                            request.model_copy(update={"owner_instance_id": new_generation}),
+                            deadline=time.monotonic() + 5,
+                        )
+                    with pytest.raises(ReviewFault):
+                        reopened.authority(
+                            command(
+                                project,
+                                new_generation,
+                                operation="claim",
+                                approval_id=record.approval_id,
+                                current_manifest_digest=manifest.fingerprint,
+                            ),
+                            deadline=time.monotonic() + 5,
+                        )
+                finally:
+                    reopened.close(timeout=5)
+
+
+def test_stop_replay_keeps_first_utc_and_budgets_without_restarting_a_timer(tmp_path: Path) -> None:
+    from jeff.application.execution import ExecutionInspectionScope, ExecutionStopRequest
+
+    clock = {"wall": 100_000, "mono": 100}
+    with authority_store(tmp_path, clock) as (store, project, manifest, generation):
+        intent = launch_intent(store, project, manifest, generation)
+        scope = ExecutionInspectionScope(
+            project_id=project.project_id,
+            canonical_root=project.root,
+            owner_instance_id=generation,
+            approval_id=intent.record.approval_id,
+        )
+        request = ExecutionStopRequest(
+            **scope.model_dump(),
+            request_id=uuid4(),
+            manifest_digest=manifest.fingerprint,
+        )
+        first = store.request_stop(request, deadline=time.monotonic() + 5)
+        assert first.requested_at_ms == 100_000 and first.clock_confirmed
+        clock.update(wall=120_000, mono=120)
+        assert store.request_stop(request, deadline=time.monotonic() + 5) == first
+        assert (
+            store.request_stop(
+                request.model_copy(
+                    update={
+                        "request_id": uuid4(),
+                        "reason": "shutdown",
+                    }
+                ),
+                deadline=time.monotonic() + 5,
+            )
+            == first
+        )
+        assert (first.grace_seconds, first.cleanup_seconds, first.completion_seconds) == (5, 10, 5)
+        assert "monotonic" not in first.model_dump_json()
+
+
+def test_stop_guarded_capture_is_atomic_and_inspectable(tmp_path: Path) -> None:
+    from jeff.application.execution import (
+        ExecutionInspectionScope,
+        ExecutionStopObservation,
+        ExecutionStopRequest,
+        ExecutionStopTerminal,
+    )
+    from jeff.domain.execution import fingerprint
+
+    with authority_store(tmp_path) as (store, project, manifest, generation):
+        intent = launch_intent(store, project, manifest, generation)
+        for phase in ("create_intent", "created", "start_intent", "exited", "cleaned"):
+            store.record(fact(intent, phase), deadline=time.monotonic() + 5)
+        owned = DockerOwnedContainer(
+            intent=intent, container_id="e" * 64, created_at="2026-01-01T00:00:00Z"
+        )
+        # Use the exact birth observation from the journal helper, not an invented handle.
+        owned = owned.model_copy(update={"created_at": fact(intent, "created").created_at})
+        scope = ExecutionInspectionScope(
+            project_id=project.project_id,
+            canonical_root=project.root,
+            owner_instance_id=generation,
+            approval_id=intent.record.approval_id,
+        )
+        first = store.request_stop(
+            ExecutionStopRequest(
+                **scope.model_dump(), request_id=uuid4(), manifest_digest=manifest.fingerprint
+            ),
+            deadline=time.monotonic() + 5,
+        )
+        capture = GuardedOutputCollector(manifest.profile.output_bytes)
+        capture.accept("stdout", b"safe prefix\n")
+        snapshot = capture.seal(abort=True)
+        digest_helper = DockerCompletion(
+            owned=owned,
+            outcome=DockerJobOutcome(
+                exit_code=7, timed_out=False, outcome_unknown=False, cleanup_verified=True
+            ),
+            output=snapshot,
+        )
+        observation = ExecutionStopObservation(
+            scope=scope,
+            request_id=first.request_id,
+            manifest_digest=manifest.fingerprint,
+            owned=owned,
+            terminal=ExecutionStopTerminal(
+                outcome="cancelled",
+                evidence="owned",
+                cleanup_verified=True,
+                exit_code=7,
+                attempt_id=intent.attempt_id,
+                ownership_digest=fingerprint(
+                    {
+                        "intent": intent.fingerprint,
+                        "container": owned.container_id,
+                        "birth": owned.created_at,
+                    }
+                ),
+                output_facts=digest_helper.output_facts,
+                output_digest=digest_helper.output_digest,
+            ),
+        )
+        bad = snapshot.model_copy(update={"stdout": "fake prefix\n"})
+        with pytest.raises((ReviewFault, ValueError)):
+            store.finish_stop_with_capture(observation, bad, deadline=time.monotonic() + 5)
+        assert store.inspect_stop(scope, deadline=time.monotonic() + 5) == first
+        final = store.finish_stop_with_capture(observation, snapshot, deadline=time.monotonic() + 5)
+        assert final.terminal == observation.terminal
+        assert (
+            store.finish_stop_with_capture(observation, snapshot, deadline=time.monotonic() + 5)
+            == final
+        )
+        inspected = store.inspect_execution(scope, deadline=time.monotonic() + 5)
+        assert inspected.completion_state == "stop_recorded" and inspected.result is None
+        assert inspected.stop is not None and inspected.stop.outcome == "cancelled"
+        assert (
+            inspected.stop.payload_state == "retained" and inspected.stop.output_facts is not None
+        )
+        assert inspected.stop.output_facts.aborted
+        assert inspected.stop_output == snapshot
+        with closing(sqlite3.connect(store.owner.store.layout.database)) as sql:
+            assert sql.execute("SELECT count(*) FROM execution_results").fetchone() == (0,)
+            assert sql.execute("SELECT count(*) FROM execution_stop_payloads").fetchone() == (1,)
+
+
+def test_cancel_submission_resolves_indexed_scope_without_cwd_and_excludes_uuid_reuse(
+    tmp_path: Path,
+) -> None:
+    from concurrent.futures import Future
+
+    from jeff.application.execution import ExecutionCancelCall
+
+    with authority_store(tmp_path) as (store, project, manifest, generation):
+        proposed = store.authority(
+            command(
+                project,
+                generation,
+                operation="propose",
+                manifest=manifest,
+                current_manifest_digest=manifest.fingerprint,
+            ),
+            deadline=time.monotonic() + 5,
+        ).record
+        store.authority(
+            command(
+                project,
+                generation,
+                operation="approve",
+                approval_id=proposed.approval_id,
+                current_manifest_digest=manifest.fingerprint,
+            ),
+            deadline=time.monotonic() + 5,
+        )
+        call = ExecutionCancelCall(
+            request_id=uuid4(),
+            approval_id=proposed.approval_id,
+            reviewed_manifest_digest=manifest.fingerprint,
+        )
+        future = store.submit_cancel(call, deadline=time.monotonic() + 5)
+        assert isinstance(future, Future)
+        first = future.result(timeout=5)
+        assert (
+            first.scope.project_id == project.project_id
+            and first.scope.canonical_root == project.root
+        )
+        assert first.terminal is not None and first.terminal.evidence == "not_started"
+        assert store.submit_cancel(call, deadline=time.monotonic() + 5).result(timeout=5) == first
+        with pytest.raises(ReviewFault):
+            store.submit_cancel(
+                call.model_copy(update={"reviewed_manifest_digest": "0" * 64}),
+                deadline=time.monotonic() + 5,
+            ).result(timeout=5)
+        with pytest.raises(ReviewFault):
+            store.authority(
+                command(
+                    project,
+                    generation,
+                    operation="claim",
+                    request_id=call.request_id,
+                    approval_id=proposed.approval_id,
+                    current_manifest_digest=manifest.fingerprint,
+                ),
+                deadline=time.monotonic() + 5,
+            )

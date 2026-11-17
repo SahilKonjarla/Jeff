@@ -22,6 +22,7 @@ from jeff.application.execution import (
     DockerBackendFault,
     DockerCLIIdentity,
     DockerTargetDeclaration,
+    ExecutionCancelClient,
     ExecutionClient,
     ExecutionService,
     FreshExecutionClient,
@@ -121,6 +122,7 @@ def create_internal_execution(
         instance_id=instance_id,
         proposal_lookup=storage,
         inspection=storage,
+        stop_store=storage,
     )
 
 
@@ -221,6 +223,11 @@ def create_project_client() -> ProjectClient:
 
 def create_execution_client() -> ExecutionClient:
     """Review-only RPC client; no installation or backend access at construction."""
+    return RuntimeProjectClient(_selected_layout)
+
+
+def create_cancellation_client() -> ExecutionCancelClient:
+    """Lazy authenticated cancellation client; no cwd, defaults discovery or job adoption."""
     return RuntimeProjectClient(_selected_layout)
 
 
@@ -338,19 +345,26 @@ async def _serve(
         try:
             await serving
         finally:
-            # Native work/threads close before SQL and raw lifetime ownership can end.
-            if dispatcher is not None:
-                dispatcher.request_close()
-                while not dispatcher.closed:
+            # No successful shutdown after the original absolute budget. If a
+            # cooperative syscall/thread outlives it, main still retains the raw
+            # inherited ownership FD until kernel exit; no PID signalling/adoption.
+            try:
+                if dispatcher is not None:
+                    dispatcher.request_close()
+                    while not dispatcher.closed:
+                        server.check_stop_budget()
+                        await asyncio.sleep(0.01)
+                    dispatcher.close(timeout=0)
+                while not git_runner.closed:
+                    server.check_stop_budget()
                     await asyncio.sleep(0.01)
-                dispatcher.close(timeout=0)
-            while not git_runner.closed:
-                await asyncio.sleep(0.01)
-            # Cooperative observation, not an executor/cancelled wait mistaken for SQL exit.
-            storage.request_close()
-            while not storage.closed:
-                await asyncio.sleep(0.01)
-            storage.close(timeout=0)
+            finally:
+                # Seal SQL even on drain failure, without claiming a live actor has exited.
+                storage.request_close()
+                while not storage.closed:
+                    server.check_stop_budget()
+                    await asyncio.sleep(0.01)
+                storage.close(timeout=0)
 
 
 def main() -> int:

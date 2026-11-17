@@ -20,7 +20,7 @@ from jeff.application.projects import ErrorData, Failure
 from jeff.application.storage import StorageIssueCode, StorageReadiness, storage_failure
 from jeff.domain.runtime import RuntimeIdentity, RuntimeSnapshot, RuntimeState
 
-PROTOCOL_REVISION = 11
+PROTOCOL_REVISION = 12
 MAC_SOCKET_PATH_BYTES = 103
 MAC_PATH_BYTES = 1023  # Darwin PATH_MAX=1024, reserving the terminator.
 MAC_NAME_BYTES = 255
@@ -222,6 +222,7 @@ ProjectCapability = Literal[
     "activity.subscribe",
     "execution.review",
     "execution.v1",
+    "execution.cancel.v1",
 ]
 
 
@@ -231,6 +232,7 @@ class ControlObservation(_RuntimeModel):
     state: RuntimeState
     identity: RuntimeIdentityData | None = None
     control_ready: StrictBool = False
+    execution_control_ready: StrictBool = False
     application_ready: StrictBool = False
     available_operations: tuple[ProjectCapability, ...] = ()
     storage: StorageReadiness = Field(default_factory=StorageReadiness)

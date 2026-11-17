@@ -129,3 +129,58 @@ def test_fresh_manifest_is_distinct_and_input_inventory_is_bounded() -> None:
                 PreparedFile(path=f"file-{i}.py", size=1048576, sha256="2" * 64) for i in range(9)
             )
         )
+
+
+def test_stop_contract_separates_timing_ownership_and_log_completeness() -> None:
+    from jeff.application.execution import (
+        DockerJobOutcome,
+        ExecutionInspectionScope,
+        ExecutionStopRecord,
+        ExecutionStopRequest,
+        ExecutionStopTerminal,
+    )
+
+    scope = ExecutionInspectionScope(
+        project_id=uuid4(),
+        canonical_root=Path("/synthetic/project"),
+        owner_instance_id=uuid4(),
+        approval_id=uuid4(),
+    )
+    request = ExecutionStopRequest(
+        **scope.model_dump(),
+        request_id=uuid4(),
+        manifest_digest="a" * 64,
+    )
+    record = ExecutionStopRecord(
+        scope=scope,
+        request_id=request.request_id,
+        manifest_digest=request.manifest_digest,
+        reason="cancel",
+        requested_at_ms=100,
+        clock_confirmed=True,
+    )
+    assert (record.grace_seconds, record.cleanup_seconds, record.completion_seconds) == (5, 10, 5)
+    assert record.terminal is None and len(record.fingerprint) == 64
+    assert ExecutionStopRecord.model_validate_json(record.model_dump_json()) == record
+    with pytest.raises(ValidationError):
+        record.cleanup_seconds = 10
+    for changes in ({"grace_seconds": 6}, {"cleanup_seconds": 11}, {"completion_seconds": 6}):
+        with pytest.raises(ValidationError):
+            ExecutionStopRecord.model_validate({**record.model_dump(), **changes})
+    terminal = ExecutionStopTerminal(
+        outcome="cancelled",
+        evidence="not_started",
+        cleanup_verified=True,
+    )
+    assert terminal.exit_code is None and terminal.output_facts is None
+    with pytest.raises(ValidationError):
+        ExecutionStopTerminal(outcome="cancelled", evidence="not_started", cleanup_verified=False)
+    with pytest.raises(ValidationError):
+        ExecutionStopTerminal(outcome="cancelled", evidence="owned", cleanup_verified=True)
+    # DB8 outcomes retain their original digest inputs: no new default cancellation key.
+    assert DockerJobOutcome().model_dump() == {
+        "exit_code": None,
+        "timed_out": False,
+        "outcome_unknown": False,
+        "cleanup_verified": False,
+    }

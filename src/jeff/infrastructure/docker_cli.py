@@ -28,6 +28,7 @@ from jeff.application.execution import (
     DockerLaunchIntent,
     DockerOutputSink,
     DockerTargetDeclaration,
+    ExecutionStopSignal,
     VerifiedDockerTarget,
 )
 from jeff.domain.execution import fingerprint
@@ -272,7 +273,15 @@ class _DockerCLI:
         except OSError:
             raise DockerBackendFault("docker_unavailable") from None
 
-    def read(self, query: Query, *, endpoint: str, image_id: str | None, deadline: float) -> bytes:
+    def read(
+        self,
+        query: Query,
+        *,
+        endpoint: str,
+        image_id: str | None,
+        deadline: float,
+        stop: ExecutionStopSignal | None = None,
+    ) -> bytes:
         args: tuple[str, ...]
         if query == "client.version" and image_id is None:
             args = ("version", "--format", "{{json .Client.Version}}")
@@ -286,7 +295,7 @@ class _DockerCLI:
             args = ("image", "inspect", "--format", _IMAGE_FORMAT, "--", image_id)
         else:
             raise DockerBackendFault("docker_unsafe_configuration")
-        return self._control(args, endpoint=endpoint, deadline=deadline)
+        return self._control(args, endpoint=endpoint, deadline=deadline, stop=stop)
 
     def _environment(self) -> dict[str, str]:
         return {
@@ -305,6 +314,7 @@ class _DockerCLI:
         endpoint: str,
         deadline: float,
         observe_reply: Callable[[bytes], None] | None = None,
+        stop: ExecutionStopSignal | None = None,
     ) -> bytes:
         self.check()
         socket_identity = self._socket(endpoint)
@@ -312,6 +322,7 @@ class _DockerCLI:
             [str(self.binary), "--config", str(self.config), "--host", endpoint, *args],
             self._environment(),
             min(deadline, time.monotonic() + 5),
+            stop=stop,
         )
         if observe_reply is not None:
             observe_reply(result)  # Capture bounded neutral evidence before post-operation checks.
@@ -322,7 +333,14 @@ class _DockerCLI:
             raise DockerBackendFault("docker_timeout")
         return result
 
-    def _capture(self, argv: list[str], environment: dict[str, str], deadline: float) -> bytes:
+    def _capture(
+        self,
+        argv: list[str],
+        environment: dict[str, str],
+        deadline: float,
+        *,
+        stop: ExecutionStopSignal | None = None,
+    ) -> bytes:
         if deadline <= time.monotonic():
             raise DockerBackendFault("docker_timeout")
         process: subprocess.Popen[bytes] | None = None
@@ -330,6 +348,8 @@ class _DockerCLI:
         output, count, stderr_count = bytearray(), 0, 0
         diagnostic_prefix = bytearray()  # At most2KiB in RAM, never persisted/reported.
         try:
+            if stop is not None:
+                stop.check()
             process = subprocess.Popen(
                 argv,
                 cwd=self.config,
@@ -344,6 +364,8 @@ class _DockerCLI:
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, label)
             while selector.get_map() or process.poll() is None:
+                if stop is not None:
+                    stop.check()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise DockerBackendFault("docker_timeout")
@@ -468,6 +490,18 @@ class DockerLifecycleCLI(_DockerCLI):
             deadline=deadline,
         )
 
+    def stop_gracefully(
+        self, endpoint: str, container_id: str, *, grace_seconds: int, deadline: float
+    ) -> None:
+        if type(grace_seconds) is not int or not 0 <= grace_seconds <= 5:
+            raise DockerBackendFault("docker_unsafe_configuration")
+        # Docker may escalate internally at the end of this remaining grace budget.
+        self._control(
+            ("container", "stop", "--timeout", str(grace_seconds), "--", self._id(container_id)),
+            endpoint=endpoint,
+            deadline=deadline,
+        )
+
     def kill(self, endpoint: str, container_id: str, *, deadline: float) -> None:
         self._control(
             ("container", "kill", "--signal", "KILL", "--", self._id(container_id)),
@@ -494,6 +528,37 @@ class DockerLifecycleCLI(_DockerCLI):
     def attach(
         self, endpoint: str, container_id: str, sink: DockerOutputSink, *, deadline: float
     ) -> int:
+        return self._attach(endpoint, container_id, sink, deadline=deadline)
+
+    def attach_cancellable(
+        self,
+        endpoint: str,
+        container_id: str,
+        sink: DockerOutputSink,
+        stop: ExecutionStopSignal,
+        observe_running: Callable[[], None],
+        *,
+        deadline: float,
+    ) -> int:
+        return self._attach(
+            endpoint,
+            container_id,
+            sink,
+            deadline=deadline,
+            stop=stop,
+            observe_running=observe_running,
+        )
+
+    def _attach(
+        self,
+        endpoint: str,
+        container_id: str,
+        sink: DockerOutputSink,
+        *,
+        deadline: float,
+        stop: ExecutionStopSignal | None = None,
+        observe_running: Callable[[], None] | None = None,
+    ) -> int:
         self.check()
         socket_identity = self._socket(endpoint)
         if not math.isfinite(deadline) or deadline <= time.monotonic():
@@ -512,7 +577,10 @@ class DockerLifecycleCLI(_DockerCLI):
         ]
         process: subprocess.Popen[bytes] | None = None
         selector = selectors.DefaultSelector()
+        next_observation = 0.0
         try:
+            if stop is not None:
+                stop.check()
             process = subprocess.Popen(
                 argv,
                 cwd=self.config,
@@ -527,9 +595,14 @@ class DockerLifecycleCLI(_DockerCLI):
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, label)
             while selector.get_map() or process.poll() is None:
+                if stop is not None:
+                    stop.check()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise DockerBackendFault("docker_timeout")
+                if observe_running is not None and time.monotonic() >= next_observation:
+                    observe_running()  # Same owner, bounded exact-identity read-only probe.
+                    next_observation = time.monotonic() + 0.5
                 for key, _ in selector.select(min(0.05, remaining)):
                     try:
                         chunk = os.read(key.fd, 16384)
@@ -654,24 +727,60 @@ class DockerTargetInspector:
     def verify_target(
         self, declaration: DockerTargetDeclaration, *, deadline: float
     ) -> VerifiedDockerTarget:
+        return self._verify_target(declaration, deadline=deadline)
+
+    def verify_target_cancellable(
+        self, declaration: DockerTargetDeclaration, stop: ExecutionStopSignal, *, deadline: float
+    ) -> VerifiedDockerTarget:
+        if stop.authority.manifest.profile != declaration.profile:
+            raise DockerBackendFault("docker_authority_required")
+        return self._verify_target(declaration, deadline=deadline, stop=stop)
+
+    def _verify_target(
+        self,
+        declaration: DockerTargetDeclaration,
+        *,
+        deadline: float,
+        stop: ExecutionStopSignal | None = None,
+    ) -> VerifiedDockerTarget:
         if not math.isfinite(deadline) or deadline <= time.monotonic():
             raise DockerBackendFault("docker_timeout")
         deadline = min(deadline, time.monotonic() + 20)
         profile = declaration.profile
+
+        def read(query: Query, *, endpoint: str, image_id: str | None, deadline: float) -> bytes:
+            if stop is None:
+                return self._reader.read(
+                    query, endpoint=endpoint, image_id=image_id, deadline=deadline
+                )
+            stop.check()
+            if isinstance(self._reader, _DockerCLI):
+                result = self._reader.read(
+                    query, endpoint=endpoint, image_id=image_id, deadline=deadline, stop=stop
+                )
+            else:
+                # Private injected readers are cooperative; production polls its captured CLI.
+                result = self._reader.read(
+                    query,
+                    endpoint=endpoint,
+                    image_id=image_id,
+                    deadline=min(deadline, time.monotonic() + 1),
+                )
+            stop.check()
+            return result
+
         try:
+            if stop is not None:
+                stop.check()
             self._reader.check()
             version = _json(
-                self._reader.read(
-                    "client.version", endpoint=profile.endpoint, image_id=None, deadline=deadline
-                )
+                read("client.version", endpoint=profile.endpoint, image_id=None, deadline=deadline)
             )
             if not isinstance(version, str) or not re.fullmatch(r"29\.[0-9]+\.[0-9]+", version):
                 raise DockerBackendFault("docker_unsupported")
             engine = _Engine.model_validate(
                 _json(
-                    self._reader.read(
-                        "engine.info", endpoint=profile.endpoint, image_id=None, deadline=deadline
-                    )
+                    read("engine.info", endpoint=profile.endpoint, image_id=None, deadline=deadline)
                 )
             )
             arch = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64", "amd64": "amd64"}.get(
@@ -692,7 +801,7 @@ class DockerTargetInspector:
                 raise DockerBackendFault("docker_unsupported")
             image = _Image.model_validate(
                 _json(
-                    self._reader.read(
+                    read(
                         "image.inspect",
                         endpoint=profile.endpoint,
                         image_id=profile.image_id,
@@ -728,9 +837,7 @@ class DockerTargetInspector:
                 raise DockerBackendFault("docker_target_mismatch")
             final_engine = _Engine.model_validate(
                 _json(
-                    self._reader.read(
-                        "engine.info", endpoint=profile.endpoint, image_id=None, deadline=deadline
-                    )
+                    read("engine.info", endpoint=profile.endpoint, image_id=None, deadline=deadline)
                 )
             )
             if final_engine != engine:

@@ -231,6 +231,11 @@ def test_legacy_catalog_reports_upgrade_without_migrating(stopped: RuntimeLayout
     # Synthetic schema3 catalog, NOT a retained-installed-version compatibility claim.
     with closing(sqlite3.connect(stopped.database)) as connection, connection:
         connection.executescript(
+            "DROP TABLE execution_stop_payloads; DROP TABLE execution_lifecycles;"
+            "DROP TABLE execution_results;"
+            "DROP TABLE execution_launch_events; DROP TABLE execution_launches;"
+            "DROP TABLE execution_authority_operations; DROP TABLE execution_authorities;"
+            "DROP TABLE execution_operations; DROP TABLE execution_reviews;"
             "DROP INDEX receipts_expirable; DROP TABLE request_tombstones;"
             "DROP TABLE activity_meta;"
             "CREATE TABLE activity_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
@@ -238,7 +243,7 @@ def test_legacy_catalog_reports_upgrade_without_migrating(stopped: RuntimeLayout
             "coverage_started_at_ms INTEGER NOT NULL CHECK(coverage_started_at_ms>=0), "
             "high_water INTEGER NOT NULL CHECK(high_water>=0), "
             "generation INTEGER NOT NULL CHECK(generation>=0));"
-            "DELETE FROM schema_migrations WHERE version=4; PRAGMA user_version=3;"
+            "DELETE FROM schema_migrations WHERE version>=4; PRAGMA user_version=3;"
         )
     before = snapshot(stopped)
     result = RuntimeDiagnosticsAdapter(lambda: stopped).inspect()

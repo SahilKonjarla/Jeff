@@ -22,12 +22,15 @@ from jeff.application.dispatch import (
 from jeff.application.execution import (
     ExecutionAdmission,
     ExecutionCall,
+    ExecutionCancelCall,
     ExecutionReply,
     ExecutionService,
     ExecutionStartCall,
     ExecutionStarter,
     ExecutionStartReply,
+    ExecutionStopRecord,
     FreshExecutionCall,
+    FreshExecutionControl,
     FreshExecutionReply,
     FreshExecutionService,
 )
@@ -175,10 +178,38 @@ class RuntimeDispatcher:
                 self._outstanding_actions += 1
         return result
 
-    def begin_drain(self) -> None:
-        """Seal external work, retain the same workers for admitted stream final reads."""
+    @property
+    def shutdown_confirmed(self) -> bool:
+        with self._mutex:
+            fresh = self.fresh
+        return not isinstance(fresh, FreshExecutionControl) or fresh.shutdown_confirmed
+
+    @property
+    def cancellation_available(self) -> bool:
+        with self._mutex:
+            fresh = self.fresh
+        return isinstance(fresh, FreshExecutionControl) and fresh.cancellation_available
+
+    def submit_cancel(
+        self, call: ExecutionCancelCall, deadline: float
+    ) -> Future[ExecutionStopRecord]:
+        """Direct control submission: no ordinary worker reservation or execution mutex."""
+        with self._mutex:
+            fresh = self.fresh
+            closing = self._closing.is_set()
+        if closing:
+            raise ControlFault("runtime_busy")
+        if not isinstance(fresh, FreshExecutionControl) or not fresh.cancellation_available:
+            raise ControlFault("runtime_capability_unavailable")
+        return fresh.submit_cancel(call, deadline=deadline)
+
+    def begin_drain(self, deadline: float | None = None) -> None:
+        """Seal admission first, then signal the same live owner without waiting for I/O."""
         with self._mutex:
             self._draining = True
+            fresh = self.fresh
+        if deadline is not None and isinstance(fresh, FreshExecutionControl):
+            fresh.begin_shutdown(deadline)
 
     def request_close(self) -> None:
         """Seal admission; queued refusals and active workers still require real drain."""
