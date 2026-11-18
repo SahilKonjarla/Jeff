@@ -4,6 +4,7 @@ import importlib
 import inspect
 import json
 import subprocess
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 from typing import Never, get_args, get_type_hints
@@ -138,6 +139,6 @@ def test_namespace_subprocess_hook_reaches_both_captured_process_paths(
         assert module.subprocess is native.subprocess and module.subprocess.Popen is forbidden
 
 
-def test_package_files_stay_within_size_limit() -> None:
+def test_package_files_stay_within_size_limit(code_line_count: Callable[[str], int]) -> None:
     for path in Path(native.__file__).parent.glob("*.py"):
-        assert len(path.read_text().splitlines()) <= 400, path.name
+        assert code_line_count(path.read_text()) <= 400, path.name

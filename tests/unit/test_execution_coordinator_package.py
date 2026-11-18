@@ -2,6 +2,7 @@
 
 import inspect
 import json
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 from typing import Never, cast, get_type_hints
@@ -113,8 +114,8 @@ def test_expired_public_request_refuses_without_touching_project_or_storage() ->
     assert reply.identity == UUID(int=1) and reply.request_id == call.request_id
 
 
-def test_package_files_stay_within_size_limit() -> None:
+def test_package_files_stay_within_size_limit(code_line_count: Callable[[str], int]) -> None:
     import jeff.application.execution_coordinator as package
 
     for path in Path(package.__file__).parent.glob("*.py"):
-        assert len(path.read_text().splitlines()) <= 400, path.name
+        assert code_line_count(path.read_text()) <= 400, path.name

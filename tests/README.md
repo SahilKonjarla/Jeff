@@ -1,5 +1,11 @@
 # Tests
 
+## Code-size policy
+
+Keep Python files in `src/`, `tests/` and `scripts/` within **400 code-bearing lines**, not400 total physical lines. Exclude blank and comment-only lines, Python-recognized module/class/function docstrings, and multiline string/bytes literal spans (including multiline f-strings). Count code surrounding those spans, including assignments and calls; inline comments do not exempt a code line. Ordinary single-line string expressions that are not docstrings still count.
+
+The shared `code_line_count` fixture in `tests/conftest.py` uses AST spans and Python tokens without importing/executing inspected files. The13 extracted-package size guards use it; `tests/unit/test_code_size.py` covers exclusions, Unicode positions, surrounding code and the400/401 boundary. These are package-scoped guards, not a universal repository-wide size test. Ruff's100-character line-length setting remains unchanged.
+
 **Current M03 checkpoint:** Step2 is explicitly accepted by Sahil.198 selected source tests and distinct real source, isolated installed and Sahil manual proofs passed. Budget5/6:5created,3started,5removed with verified absence. Public execution remains disabled; whole-Phase3 acceptance and any additional runtime/test authority remain separate. Counts/scopes below are historical checkpoints unless expressly identified as current.
 
 **Status:** M02 accepted; subsequent approved test-only cleanup has **334 test functions/692 collected source cases** and an explicit **290-case installed selection**. The accepted M02 baseline was697 source/343 installed passes; those immutable receipts remain historical evidence. Cleanup validation ran112 affected source +9 installed cases, zero skips, plus Ruff/format/mypy—not a fresh full692/290 execution. [Cleanup scope/evidence](../.agent-work/reports/m02-test-cleanup.md). Jeff targets macOS only. Alternate-user/hosted validation remains deferred/unperformed.

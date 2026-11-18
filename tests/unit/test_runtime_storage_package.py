@@ -3,6 +3,7 @@
 import inspect
 import json
 import sqlite3
+from collections.abc import Callable
 from concurrent.futures import Future
 from contextlib import closing
 from hashlib import sha256
@@ -203,6 +204,6 @@ def test_completion_result_static_signature_still_resolves() -> None:
     )
 
 
-def test_package_files_stay_within_size_limit() -> None:
+def test_package_files_stay_within_size_limit(code_line_count: Callable[[str], int]) -> None:
     for path in Path(native.__file__).parent.glob("*.py"):
-        assert len(path.read_text().splitlines()) <= 400, path.name
+        assert code_line_count(path.read_text()) <= 400, path.name

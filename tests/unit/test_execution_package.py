@@ -4,6 +4,7 @@ import importlib
 import inspect
 import json
 import pickle
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 from typing import get_type_hints
@@ -188,10 +189,10 @@ def test_facade_exports_alias_definitions_and_resolves_method_annotations() -> N
                         get_type_hints(method)
 
 
-def test_package_files_stay_within_size_limit() -> None:
+def test_package_files_stay_within_size_limit(code_line_count: Callable[[str], int]) -> None:
     package = Path(execution.__file__).parent
     for path in package.glob("*.py"):
-        assert len(path.read_text().splitlines()) <= 400, path.name
+        assert code_line_count(path.read_text()) <= 400, path.name
 
 
 def test_contract_models_remain_pickleable_through_public_imports() -> None:

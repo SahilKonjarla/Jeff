@@ -161,6 +161,8 @@ The sandbox has a loopback service, a **deliberate1-pass/1-fail pytest example**
 
 ## Development and safety
 
+Python files in `src/`, `tests/` and `scripts/` should stay within **400 code-bearing lines**. Blank lines, comment-only lines, Python docstrings and multiline string/bytes literal spans do not count. Code outside a literal on the same line still counts; inline comments do not exempt code. Package-size tests share the AST/token-based counter in `tests/conftest.py`. This is separate from Ruff's100-character line-length setting.
+
 From the source root, after selecting a **fresh private Git-negative arena outside every checkout**:
 
 ```bash

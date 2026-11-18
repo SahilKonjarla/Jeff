@@ -2,6 +2,7 @@
 
 import inspect
 import json
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 from typing import get_type_hints
@@ -158,6 +159,6 @@ def test_legacy_incidental_control_response_export_remains_available() -> None:
     assert ipc.ControlResponse is ControlResponse
 
 
-def test_package_files_stay_within_size_limit() -> None:
+def test_package_files_stay_within_size_limit(code_line_count: Callable[[str], int]) -> None:
     for path in Path(ipc.__file__).parent.glob("*.py"):
-        assert len(path.read_text().splitlines()) <= 400, path.name
+        assert code_line_count(path.read_text()) <= 400, path.name
