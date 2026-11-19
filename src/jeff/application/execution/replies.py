@@ -13,7 +13,7 @@ from .admission import ExecutionAdmission
 from .output import DockerOutputFacts, DockerOutputSnapshot
 from .requests import ExecutionLivePhase, FreshExecutionOperation
 from .stop_views import ExecutionStopView
-from .views import FreshExecutionCompletion, FreshExecutionView
+from .views import FreshExecutionCompletion, FreshExecutionPage, FreshExecutionView
 
 
 class ExecutionCancelReply(_Model):
@@ -41,6 +41,7 @@ class FreshExecutionReply(_Model):
     identity: UUID | None = None
     ok: StrictBool
     view: FreshExecutionView | None = None
+    page: FreshExecutionPage | None = None
     admission: ExecutionAdmission | None = None
     completion: FreshExecutionCompletion | None = None
     completion_state: (
@@ -61,6 +62,7 @@ class FreshExecutionReply(_Model):
                 value is not None
                 for value in (
                     self.view,
+                    self.page,
                     self.admission,
                     self.completion,
                     self.completion_state,
@@ -72,6 +74,20 @@ class FreshExecutionReply(_Model):
                 raise ValueError("Refusals cannot carry success facts.")
         elif self.identity is None:
             raise ValueError("Success requires authenticated instance correlation.")
+        elif self.operation in {"approvals.list", "jobs.list"}:
+            if self.page is None or any(
+                value is not None
+                for value in (
+                    self.view,
+                    self.admission,
+                    self.completion,
+                    self.completion_state,
+                    self.stop,
+                    self.execution_phase,
+                    self.output,
+                )
+            ):
+                raise ValueError("Listings carry only scoped public pages.")
         elif self.operation == "start":
             if (
                 self.admission is None
@@ -91,6 +107,8 @@ class FreshExecutionReply(_Model):
                 raise ValueError("Start acknowledges only the matching committed claim.")
         elif self.view is None or self.admission is not None:
             raise ValueError("Non-start success requires original scoped facts.")
+        if self.page is not None and self.operation not in {"approvals.list", "jobs.list"}:
+            raise ValueError("Only listings carry pages.")
         if (
             self.completion is not None
             or self.completion_state is not None

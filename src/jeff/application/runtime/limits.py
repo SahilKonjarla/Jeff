@@ -6,7 +6,7 @@ from pydantic import Field, StrictInt, model_validator
 
 from .base import _RuntimeModel
 
-PROTOCOL_REVISION = 12
+PROTOCOL_REVISION = 13
 
 
 MAC_SOCKET_PATH_BYTES = 103

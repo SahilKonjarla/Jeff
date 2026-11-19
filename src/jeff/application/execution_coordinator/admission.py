@@ -13,6 +13,7 @@ from jeff.application.execution import (
     DockerOutputCapture,
     DockerTargetDeclaration,
     ExecutionAdmission,
+    ExecutionStartRefused,
     ExecutionStopRecord,
     ExecutionStopSignal,
 )
@@ -45,10 +46,16 @@ def start(
     with _active(self, admission_deadline):
         if not callable(on_admitted):
             raise DockerBackendFault("docker_authority_required")
-        project = _project(self, directory, admission_deadline)
-        record = _load(self, project, approval_id, expected_manifest_digest, admission_deadline)
+        try:
+            project = _project(self, directory, admission_deadline)
+            record = _load(self, project, approval_id, expected_manifest_digest, admission_deadline)
+        except DockerBackendFault as error:
+            if error.code == "docker_authority_required":
+                # This invocation has not entered claim. Do not classify later faults by code.
+                raise ExecutionStartRefused("docker_authority_required") from None
+            raise
         if record.state not in (AuthorityState.APPROVED, AuthorityState.CONSUMED):
-            raise DockerBackendFault("docker_authority_required")
+            raise ExecutionStartRefused("docker_authority_required")
         capture: DockerOutputCapture | None = None
         job_deadline = time.monotonic() + record.manifest.profile.timeout_seconds
         stop = None

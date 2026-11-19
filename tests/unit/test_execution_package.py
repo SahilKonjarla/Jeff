@@ -15,8 +15,8 @@ from pydantic import BaseModel
 from jeff.application import execution
 from jeff.domain.execution import AuthorityState, fingerprint
 
-# Captured from the original module before extraction, using the pinned Pydantic version.
-SCHEMA_DIGEST = "4046625cc984bf1934fe373af123ae38c5d01fac29280f7d46fba010f3ef4c2e"
+# Fresh list request/page/reader scopes extend schemas; persisted facts remain unchanged.
+SCHEMA_DIGEST = "77950bae8bb87158bd506e945c24d4a79f661cd4a442cb1c0c0f9d854f5342b9"
 FACTS_DIGEST = "420777cfd00a528e39fc76893005ea6780d76c507513ca8c5c9e6cd7a783dbfa"
 
 

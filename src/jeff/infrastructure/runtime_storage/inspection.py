@@ -9,11 +9,16 @@ from jeff.application.execution import (
     DockerLaunchScope,
     ExecutionInspection,
     ExecutionInspectionScope,
+    ExecutionListScope,
     ExecutionStopView,
+    FreshExecutionPage,
+    FreshExecutionView,
     ProposalRequestScope,
     ReviewFault,
+    parse_execution_cursor,
 )
 from jeff.application.storage import StorageFault
+from jeff.domain.execution import AuthorityState
 
 from .binding import _method
 from .catalog import _AUTHORITY_COLUMNS
@@ -43,9 +48,15 @@ def _inspect_execution(
         root,
         fd,
     ).record
-    if record.owner_instance_id != scope.owner_instance_id:
-        raise ReviewFault("execution_target_mismatch")
-    stop = self._read_stop(connection, record, scope)
+    # The current reader/project was checked above. Persisted facts still bind to
+    # the original owner; historical observation never transfers mutation authority.
+    original_scope = ExecutionInspectionScope(
+        project_id=record.project_id,
+        canonical_root=record.canonical_root,
+        owner_instance_id=record.owner_instance_id,
+        approval_id=record.approval_id,
+    )
+    stop = self._read_stop(connection, record, original_scope)
     has_legacy = (
         connection.execute(
             "SELECT 1 FROM execution_results r JOIN execution_launches l "
@@ -81,6 +92,10 @@ def _inspect_execution(
         claim_id=record.claim_id,
     )
     launch = self._launch_status(connection, launch_scope)
+    if launch.intent.record.model_dump(exclude={"claim_state"}) != record.model_dump(
+        exclude={"claim_state"}
+    ):
+        raise StorageFault("storage_schema_unsupported")
     result_row = connection.execute(
         "SELECT 1 FROM execution_results WHERE attempt_id=?", (str(launch.intent.attempt_id),)
     ).fetchone()
@@ -103,6 +118,66 @@ def _inspect_execution(
         completion_state="recorded",
         result=result,
         stop=stop_view,
+    )
+
+
+@_method
+def _list_executions(
+    self: "SQLiteStorage", connection: sqlite3.Connection, scope: ExecutionListScope
+) -> FreshExecutionPage:
+    if self.instance_id is None or scope.owner_instance_id != self.instance_id:
+        raise ReviewFault("execution_target_mismatch")
+    project, path = str(scope.project_id), str(scope.canonical_root)
+    if (
+        connection.execute(
+            "SELECT 1 FROM projects WHERE project_id=? AND canonical_root=?", (project, path)
+        ).fetchone()
+        is None
+    ):
+        raise ReviewFault("execution_target_mismatch")
+    condition = ""
+    values: list[object] = [project, path]
+    if scope.after is not None:
+        stamp, identifier = parse_execution_cursor(scope.after)
+        if (
+            connection.execute(
+                "SELECT 1 FROM execution_authorities WHERE project_id=? AND canonical_root=? "
+                "AND created_at_ms=? AND proposal_id=?",
+                (project, path, stamp, identifier),
+            ).fetchone()
+            is None
+        ):
+            raise ReviewFault("execution_conflict")
+        condition = " AND (created_at_ms<? OR (created_at_ms=? AND proposal_id<?))"
+        values.extend((stamp, stamp, identifier))
+    rows = connection.execute(
+        "SELECT " + _AUTHORITY_COLUMNS + " FROM execution_authorities "
+        "WHERE project_id=? AND canonical_root=?"
+        + condition
+        + " ORDER BY created_at_ms DESC,proposal_id DESC LIMIT ?",
+        (*values, scope.limit + 1),
+    ).fetchall()
+    now, mono, healthy = self._review_time()
+    items = []
+    for row in rows[: scope.limit]:
+        record = self._authority_record(row)
+        if record.state in (AuthorityState.PENDING, AuthorityState.APPROVED):
+            deadline = self._authority_deadlines.get(str(record.proposal_id))
+            # Match authority expiry semantics without changing durable rows or permission.
+            if not healthy or record.owner_instance_id != self.instance_id or deadline is None:
+                record = record.model_copy(update={"state": AuthorityState.INVALIDATED})
+            elif now >= record.expires_at_ms or mono >= deadline:
+                record = record.model_copy(update={"state": AuthorityState.EXPIRED})
+        items.append(FreshExecutionView.from_record(record))
+    after = None
+    if len(rows) > scope.limit:
+        last = items[-1]
+        after = f"{last.created_at_ms}:{last.proposal_id}"
+    return FreshExecutionPage(
+        project_id=scope.project_id,
+        canonical_root=scope.canonical_root,
+        items=tuple(items),
+        next_after=after,
     )
 
 

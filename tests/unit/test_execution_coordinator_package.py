@@ -38,8 +38,9 @@ PUBLIC_MEMBERS = (
     "start",
     "run",
 )
-# Captured before extraction; excludes definition-module metadata, not annotations/defaults.
-SIGNATURE_DIGEST = "c536227f1fa2b43a758b0380445f11ce8ce947d1c3018482c6b02e8e303344ad"
+# Optional keyword-only listing port is the sole extension to the extracted interface.
+LEGACY_SIGNATURE_DIGEST = "c536227f1fa2b43a758b0380445f11ce8ce947d1c3018482c6b02e8e303344ad"
+SIGNATURE_DIGEST = "cddd69486f43a3d3fa24a91a90e6c479c7e55008584ce402912bd583b48c2e38"
 
 
 def _signatures() -> dict[str, str]:
@@ -75,9 +76,23 @@ def _coordinator() -> ExecutionCoordinator:
     )
 
 
-def test_public_signatures_and_annotations_preserve_original_interface() -> None:
-    serialized = json.dumps(_signatures(), sort_keys=True).encode()
-    assert sha256(serialized).hexdigest() == SIGNATURE_DIGEST
+def test_public_signatures_add_only_an_optional_listing_port() -> None:
+    signatures = _signatures()
+    assert sha256(json.dumps(signatures, sort_keys=True).encode()).hexdigest() == SIGNATURE_DIGEST
+    constructor = inspect.signature(ExecutionCoordinator.__init__)
+    listing = constructor.parameters["listing"]
+    assert listing.kind == inspect.Parameter.KEYWORD_ONLY and listing.default is None
+    signatures["__init__"] = str(
+        constructor.replace(
+            parameters=[
+                parameter for name, parameter in constructor.parameters.items() if name != "listing"
+            ]
+        )
+    )
+    assert (
+        sha256(json.dumps(signatures, sort_keys=True).encode()).hexdigest()
+        == LEGACY_SIGNATURE_DIGEST
+    )
 
 
 def test_constructor_and_idle_shutdown_remain_cold() -> None:

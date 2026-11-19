@@ -16,6 +16,7 @@ from jeff.application.execution import (
     DockerLaunchScope,
     ExecutionCancelCall,
     ExecutionInspectionScope,
+    ExecutionListScope,
     ExecutionStopCapture,
     ExecutionStopObservation,
     ExecutionStopRequest,
@@ -61,6 +62,7 @@ def _submit(
         "authority",
         "proposal_lookup",
         "execution_inspect",
+        "execution_list",
         "launch_record",
         "launch_status",
         "execution_complete",
@@ -82,6 +84,7 @@ def _submit(
     | AuthorityOperation
     | ProposalRequestScope
     | ExecutionInspectionScope
+    | ExecutionListScope
     | DockerLaunchEvent
     | DockerLaunchScope
     | DockerCompletion

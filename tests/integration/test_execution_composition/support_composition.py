@@ -136,6 +136,7 @@ def composed(
                 instance_id=generation,
                 proposal_lookup=store,
                 inspection=store,
+                listing=store,
                 stop_store=store if cancellable else None,
             )
             yield coordinator, store, project, docker

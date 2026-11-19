@@ -70,6 +70,7 @@ def create_internal_execution(
         instance_id=instance_id,
         proposal_lookup=storage,
         inspection=storage,
+        listing=storage,
         stop_store=storage,
     )
 

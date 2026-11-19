@@ -229,6 +229,8 @@ class SQLiteStorage:
 
     inspect_execution = requests.inspect_execution
 
+    list_executions = requests.list_executions
+
     lookup_proposal = requests.lookup_proposal
 
     record = requests.record
@@ -280,6 +282,8 @@ class SQLiteStorage:
     _authority_payload_digest = staticmethod(_authority._authority_payload_digest)
 
     _inspect_execution = inspection._inspect_execution
+
+    _list_executions = inspection._list_executions
 
     _lookup_proposal = inspection._lookup_proposal
 

@@ -155,3 +155,23 @@ def register(
 
     fresh_inspection_command("show")
     fresh_inspection_command("logs")
+
+    def fresh_list_command(name: str, operation: Literal["approvals.list", "jobs.list"]) -> None:
+        group = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
+        fresh_app.add_typer(
+            group, name=name, help="Discover fresh executable records, not legacy reviews."
+        )
+
+        @group.command("list")
+        def listing(
+            after: Annotated[
+                str | None, typer.Option("--after", help="next_after from this project page.")
+            ] = None,
+            limit: int = typer.Option(16, "--limit", min=1, max=32),
+            json_output: bool = typer.Option(False, "--json"),
+        ) -> None:
+            """Read newest-first public facts; pagination grants no execution authority."""
+            fresh_action(operation, json_output, after=after, limit=limit)
+
+    fresh_list_command("approvals", "approvals.list")
+    fresh_list_command("jobs", "jobs.list")

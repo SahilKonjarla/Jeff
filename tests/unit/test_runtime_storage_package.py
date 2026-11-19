@@ -17,9 +17,10 @@ from jeff.application.execution import DockerExecutionResult
 from jeff.application.storage import Receipt, ReceiptScope
 from jeff.infrastructure import runtime_storage as native
 
-INTERFACE_DIGEST = "2c16af3d2be5534b78c6f74b7494f84c55eb629ccf9d3543eee6d3d08f6c59cd"
+# Listing read methods and the finite actor operation/scope are deliberate additions.
+INTERFACE_DIGEST = "1c8637f99c2acbd2529ca814dffe21799f71b47f6e7ca4ad9af1377b88490ee9"
 CATALOG_DIGEST = "866b0e2f909b5e4920cd17ed29d3fbe963eb1f790bc03c35beaf7512a6b7f9b5"
-WORK_DIGEST = "f7fbfee4a251900b2bc786a3d4bba0e821973fccd1788bb53fd2f6e282e6134e"
+WORK_DIGEST = "97afc003e5d9bc5ba2cc35954f1a9e9558e70813accdc47afe5dc8b57897496f"
 
 
 def _digest(value: object) -> str:

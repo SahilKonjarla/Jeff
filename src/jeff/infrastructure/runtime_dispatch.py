@@ -20,6 +20,7 @@ from jeff.application.dispatch import (
     dispatch_failure,
 )
 from jeff.application.execution import (
+    AuthorityClaimRefused,
     ExecutionAdmission,
     ExecutionCall,
     ExecutionCancelCall,
@@ -27,12 +28,14 @@ from jeff.application.execution import (
     ExecutionService,
     ExecutionStartCall,
     ExecutionStarter,
+    ExecutionStartRefused,
     ExecutionStartReply,
     ExecutionStopRecord,
     FreshExecutionCall,
     FreshExecutionControl,
     FreshExecutionReply,
     FreshExecutionService,
+    fresh_execution_failure,
 )
 from jeff.application.projects import Failure
 from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS, ControlFault
@@ -303,14 +306,28 @@ class RuntimeDispatcher:
                 except InvalidStateError:
                     pass  # Lost observer does not cancel the worker owning the claim.
 
-        service.start(
-            call.directory,
-            call.approval_id,
-            call.reviewed_manifest_digest,
-            request_id=call.request_id,
-            admission_deadline=work.deadline,
-            on_admitted=admitted,
-        )
+        try:
+            service.start(
+                call.directory,
+                call.approval_id,
+                call.reviewed_manifest_digest,
+                request_id=call.request_id,
+                admission_deadline=work.deadline,
+                on_admitted=admitted,
+            )
+        except (ExecutionStartRefused, AuthorityClaimRefused) as error:
+            if not isinstance(call, FreshExecutionCall):
+                raise  # Preserve the legacy Start reply contract.
+            if not work.result.done():
+                work.result.set_result(
+                    FreshExecutionReply(
+                        ok=False,
+                        operation=call.operation,
+                        request_id=call.request_id,
+                        identity=self.dispatch.identity.instance_id,
+                        error=fresh_execution_failure(error.code),
+                    )
+                )
         if not work.result.done():
             work.result.set_result(self._refused(call, unknown=True))
 

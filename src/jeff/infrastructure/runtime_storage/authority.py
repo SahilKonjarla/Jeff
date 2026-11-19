@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from jeff.application.execution import (
+    AuthorityClaimRefused,
     AuthorityOperation,
     AuthorityRecord,
     AuthorityResult,
@@ -178,11 +179,15 @@ def _authority_work(
         )
         if record.state != required:
             self._commit_write(connection, fd)
-            raise ReviewFault(
+            code = (
                 "execution_expired"
                 if record.state in {AuthorityState.EXPIRED, AuthorityState.INVALIDATED}
                 else "execution_conflict"
             )
+            if operation.operation == "claim":
+                # Commit/retirement above must confirm before publishing no-new-claim proof.
+                raise AuthorityClaimRefused(code)
+            raise ReviewFault(code)
         if operation.operation in {"approve", "claim"} and (
             operation.current_manifest_digest != record.manifest_digest
         ):

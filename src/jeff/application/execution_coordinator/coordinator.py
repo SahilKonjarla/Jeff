@@ -21,6 +21,7 @@ from jeff.application.execution import (
     DockerTargetVerifier,
     ExecutionAdmission,
     ExecutionCancelCall,
+    ExecutionListReader,
     ExecutionLivePhase,
     ExecutionProfile,
     ExecutionResultReader,
@@ -64,6 +65,7 @@ class ExecutionCoordinator:
         instance_id: UUID,
         proposal_lookup: ProposalLookupStore | None = None,
         inspection: ExecutionResultReader | None = None,
+        listing: ExecutionListReader | None = None,
         stop_store: ExecutionStopStore | None = None,
     ) -> None:
         self.projects, self.registry, self.authority = (projects, registry, authority)
@@ -72,6 +74,7 @@ class ExecutionCoordinator:
         self.profiles, self.declarations, self.instance_id = (profiles, declarations, instance_id)
         self.proposal_lookup = proposal_lookup
         self.inspection = inspection
+        self.listing = listing
         self._mutex = threading.Lock()
         self.stop_store = stop_store
         self._control_mutex = threading.Lock()

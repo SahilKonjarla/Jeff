@@ -157,6 +157,16 @@ def render_execution(
         typer.echo(json.dumps(reply.model_dump(mode="json"), ensure_ascii=True))
     elif reply.error is not None:
         typer.echo(f"{reply.error.error.code}: {reply.error.error.message}", err=True)
+    elif reply.page is not None:
+        typer.echo(f"Project: {reply.page.project_id}; root: {reply.page.canonical_root}")
+        for item in reply.page.items:
+            typer.echo(
+                f"Approval: {item.approval_id}; job: {item.job_id}; "
+                f"state: {item.state.value}; claim: {item.claim_state or 'none'}"
+            )
+        if reply.page.next_after is not None:
+            typer.echo(f"Next --after: {reply.page.next_after}")
+        typer.echo("Discovery only; inspect the exact manifest before any decision.")
     elif reply.admission is not None:
         typer.echo(
             f"Job: {reply.admission.job_id}\nClaim: {reply.admission.claim_state}; "

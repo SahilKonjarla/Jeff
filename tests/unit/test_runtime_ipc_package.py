@@ -27,8 +27,9 @@ from jeff.application.runtime import ControlRequest, ControlResponse
 from jeff.infrastructure import runtime_ipc as ipc
 from jeff.infrastructure.runtime_state import Ownership
 
-SCHEMA_DIGEST = "4dbc6f3deed67848afd557bda69b67e559eec52889508fe64f3e4ddcd3a6c010"
-WIRE_DIGEST = "091fc7f93c0c2a569e284dd4597dbb047f3a66f2ed107c521d08489c08aa7d2d"
+# Wire 13 adds fresh page queries; IPC class interfaces remain unchanged.
+SCHEMA_DIGEST = "6019fbe341ceeca9b4794f5275acc10f1e10004f5252aec421428ea48f7e3ad3"
+WIRE_DIGEST = "205d09e0d5eaf651c6202e7b8b67fd379ef96351b78e60e787e6b55f53e4aa10"
 SIGNATURE_DIGEST = "ee18ba33d22549c92b1f74b9179c695f6a9b53d4694f7814a58d3d27ae03f2fe"
 
 
@@ -44,7 +45,7 @@ def _wire() -> dict[str, object]:
     directory = Path("/synthetic/project")
     identity, request_id = UUID(int=1), UUID(int=2)
     messages = (
-        ControlRequest(revision=12, request_id=request_id, operation="hello"),
+        ControlRequest(revision=13, request_id=request_id, operation="hello"),
         ProjectRequest(
             expected_instance_id=identity,
             call=ProjectCall(request_id=request_id, directory=directory, operation="config"),

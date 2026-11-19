@@ -15,8 +15,9 @@ from jeff.application import dispatch
 from jeff.application import runtime as runtime_contracts
 from jeff.application.runtime import RuntimeIdentityData
 
-SCHEMA_DIGEST = "a5ffbf1b7dfad9e9232eeef9c7f736086b3035ed6479a17582caa80e48383692"
-WIRE_DIGEST = "5d3ad2d8e6100c22a1e8542af4790b875f7e3ddb18a1faadb7b5e3955619951d"
+# Wire 13 adds fresh read-only enumeration; service interfaces remain unchanged.
+SCHEMA_DIGEST = "8490c51cf9731937d21900cbe10f231c7987e074a39d2dde1ce497c9451932e5"
+WIRE_DIGEST = "7b01dce05c238a4db5d0511169cf6b3b7c358a4612954cf1ab8f5a2866d76f86"
 SIGNATURE_DIGEST = "566af34c1f88990b1b1d48fb08b07dc388c89b588ebfa51e6faee3420ad12328"
 
 

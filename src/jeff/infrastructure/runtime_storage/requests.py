@@ -20,10 +20,12 @@ from jeff.application.execution import (
     ExecutionData,
     ExecutionInspection,
     ExecutionInspectionScope,
+    ExecutionListScope,
     ExecutionStopCapture,
     ExecutionStopObservation,
     ExecutionStopRecord,
     ExecutionStopRequest,
+    FreshExecutionPage,
     ProposalRequestScope,
     ReviewFault,
     ReviewOperation,
@@ -227,6 +229,16 @@ def inspect_execution(
 ) -> ExecutionInspection:
     try:
         return cast(ExecutionInspection, self._submit("execution_inspect", scope, deadline))
+    except StorageFault as error:
+        raise ReviewFault(error.code) from None
+
+
+@_method
+def list_executions(
+    self: "SQLiteStorage", scope: ExecutionListScope, *, deadline: float
+) -> FreshExecutionPage:
+    try:
+        return cast(FreshExecutionPage, self._submit("execution_list", scope, deadline))
     except StorageFault as error:
         raise ReviewFault(error.code) from None
 

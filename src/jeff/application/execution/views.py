@@ -4,14 +4,15 @@ from pathlib import Path
 from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import Field, StrictInt, model_validator
+from pydantic import Field, StrictInt, field_validator, model_validator
 
 from jeff.domain.execution import AuthorityState
 
-from ._model import _Model
+from ._model import _Model, absolute_path
 from .authority import AuthorityRecord
 from .manifests import ExecutionManifest
 from .output import DockerJobOutcome, DockerOutputFacts
+from .requests import parse_execution_cursor
 
 
 class FreshExecutionView(_Model):
@@ -62,6 +63,44 @@ class FreshExecutionView(_Model):
                 )
             }
         )
+
+
+class FreshExecutionPage(_Model):
+    """Bounded public review/job facts, newest first; concurrent scans are not snapshots."""
+
+    project_id: UUID
+    canonical_root: Path
+    items: tuple[FreshExecutionView, ...] = Field(default=(), max_length=32)
+    next_after: str | None = Field(default=None, max_length=56)
+
+    @field_validator("canonical_root")
+    @classmethod
+    def root(cls, value: Path) -> Path:
+        return absolute_path(value)
+
+    def within(self, *, after: str | None, limit: int) -> bool:
+        """Check query bounds; project and authenticated identity binding remain mandatory."""
+        boundary = parse_execution_cursor(after) if after is not None else None
+        return len(self.items) <= limit and (
+            boundary is None
+            or all((item.created_at_ms, str(item.proposal_id)) < boundary for item in self.items)
+        )
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        keys = [(item.created_at_ms, str(item.proposal_id)) for item in self.items]
+        if len(set(keys)) != len(keys) or keys != sorted(keys, reverse=True):
+            raise ValueError("Listing order or identities disagree.")
+        if any(
+            (item.project_id, item.canonical_root) != (self.project_id, self.canonical_root)
+            for item in self.items
+        ):
+            raise ValueError("Listing crosses project scope.")
+        if self.next_after is not None and (
+            not keys or parse_execution_cursor(self.next_after) != keys[-1]
+        ):
+            raise ValueError("Cursor does not bind the final listed record.")
+        return self
 
 
 class FreshExecutionCompletion(_Model):

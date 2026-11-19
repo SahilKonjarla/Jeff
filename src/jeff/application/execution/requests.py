@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, StrictInt, field_validator, model_validator
 
 from jeff.domain.execution import (
     ARGV_BYTES,
@@ -20,7 +20,19 @@ from .prepared_inputs import PreparedInputFault, canonical_prepared_paths
 ExecutionLivePhase = Literal["claim_pending", "admitted", "running_observed", "stop_requested"]
 
 
-FreshExecutionOperation = Literal["propose", "approve", "deny", "start", "show", "logs"]
+FreshExecutionOperation = Literal[
+    "propose", "approve", "deny", "start", "show", "logs", "approvals.list", "jobs.list"
+]
+
+
+def parse_execution_cursor(value: str) -> tuple[int, str]:
+    """An immutable ordering boundary, never authority or a database row identifier."""
+    stamp, identifier = value.split(":", 1)
+    number = int(stamp)
+    canonical = str(UUID(identifier))
+    if not 0 <= number <= 9223372036854775807 or stamp != str(number) or identifier != canonical:
+        raise ValueError("Invalid execution page cursor.")
+    return number, canonical
 
 
 class FreshExecutionCall(_Model):
@@ -35,6 +47,15 @@ class FreshExecutionCall(_Model):
     paths: tuple[str, ...] = Field(default=(), max_length=PREPARED_FILE_LIMIT)
     approval_id: UUID | None = None
     reviewed_manifest_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    after: str | None = Field(default=None, max_length=56)
+    limit: StrictInt = Field(default=16, ge=1, le=32)
+
+    @field_validator("after")
+    @classmethod
+    def cursor(cls, value: str | None) -> str | None:
+        if value is not None:
+            parse_execution_cursor(value)
+        return value
 
     @field_validator("directory")
     @classmethod
@@ -43,6 +64,19 @@ class FreshExecutionCall(_Model):
 
     @model_validator(mode="after")
     def shape(self) -> Self:
+        if self.operation in {"approvals.list", "jobs.list"}:
+            if (
+                self.profile_name is not None
+                or self.argv
+                or self.paths
+                or self.approval_id is not None
+                or self.reviewed_manifest_digest is not None
+            ):
+                raise ValueError("Listings accept scope and pagination only.")
+            fingerprint(self.model_dump(mode="json"))
+            return self
+        if self.after is not None or self.limit != 16:
+            raise ValueError("Only listings accept pagination.")
         if self.operation == "propose":
             if (
                 self.profile_name is None
@@ -67,6 +101,28 @@ class FreshExecutionCall(_Model):
             raise ValueError("Decisions and starts require the exact reviewed digest only.")
         fingerprint(self.model_dump(mode="json"))
         return self
+
+
+class ExecutionListScope(_Model):
+    """Current authenticated reader and exact registered project; no mutation authority."""
+
+    project_id: UUID
+    canonical_root: Path
+    owner_instance_id: UUID
+    after: str | None = Field(default=None, max_length=56)
+    limit: StrictInt = Field(default=16, ge=1, le=32)
+
+    @field_validator("canonical_root")
+    @classmethod
+    def root(cls, value: Path) -> Path:
+        return absolute_path(value)
+
+    @field_validator("after")
+    @classmethod
+    def cursor(cls, value: str | None) -> str | None:
+        if value is not None:
+            parse_execution_cursor(value)
+        return value
 
 
 class ExecutionCancelCall(_Model):

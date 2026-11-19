@@ -21,12 +21,14 @@ from .replies import ExecutionCancelReply, FreshExecutionReply
 from .requests import (
     ExecutionCancelCall,
     ExecutionInspectionScope,
+    ExecutionListScope,
     ExecutionLivePhase,
     FreshExecutionCall,
 )
 from .review_models import ExecutionCall, ExecutionData, ExecutionReply, ReviewOperation
 from .stop_records import ExecutionStopObservation, ExecutionStopRecord, ExecutionStopRequest
 from .stop_signal import ExecutionStopSignal
+from .views import FreshExecutionPage
 
 
 class ReviewStore(Protocol):
@@ -172,6 +174,12 @@ class FreshExecutionClient(Protocol):
 
 class FreshExecutionService(ExecutionStarter, Protocol):
     def execute(self, call: FreshExecutionCall, deadline: float) -> FreshExecutionReply: ...
+
+
+class ExecutionListReader(Protocol):
+    def list_executions(
+        self, scope: ExecutionListScope, *, deadline: float
+    ) -> FreshExecutionPage: ...
 
 
 class ExecutionResultReader(Protocol):

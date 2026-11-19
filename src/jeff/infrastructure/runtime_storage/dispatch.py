@@ -12,6 +12,7 @@ from jeff.application.execution import (
     DockerLaunchScope,
     ExecutionCancelCall,
     ExecutionInspectionScope,
+    ExecutionListScope,
     ExecutionStopCapture,
     ExecutionStopObservation,
     ExecutionStopRequest,
@@ -90,6 +91,9 @@ def _execute(
     if work.operation == "execution_inspect":
         assert isinstance(work.payload, ExecutionInspectionScope)
         return self._inspect_execution(connection, work.payload, root, fd)
+    if work.operation == "execution_list":
+        assert isinstance(work.payload, ExecutionListScope)
+        return self._list_executions(connection, work.payload)
     if work.operation == "proposal_lookup":
         assert isinstance(work.payload, ProposalRequestScope)
         return self._lookup_proposal(connection, work.payload)

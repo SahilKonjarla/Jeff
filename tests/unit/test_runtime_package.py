@@ -14,9 +14,10 @@ from pydantic import SecretStr, ValidationError
 from jeff.application import runtime
 from jeff.application.projects import ErrorData, Failure
 
-SCHEMA_DIGEST = "7510be362ab2508be1f7798369f972f48a51c4855e6a8a302ac9313ad49af395"
+# Wire 13 intentionally replaces 12; value caps and interface fingerprints are unchanged.
+SCHEMA_DIGEST = "fdab12db88fb300d409077bf168539103d1b8ddce87312f69010b801413fecb8"
 INTERFACE_DIGEST = "57685a7755c889d4195084e4caf4597ba1e2d161e5c606ab92da710a369f2592"
-VALUE_DIGEST = "96564898c80e68d8d2aa7a7ae5226366cc5f1a212997db8a9435ea212b310621"
+VALUE_DIGEST = "46794fa126fe7884b7b0569fbea79a193e7eeba1920a2923012e9cde63be0037"
 
 
 def _digest(value: object) -> str:
@@ -97,23 +98,23 @@ def _values() -> dict[str, object]:
         "observation": observation,
         "success": runtime.ControlSuccess(data=observation),
         # Fixed synthetic input only: default serialization must remain masked.
-        "auth_request": runtime.AuthRequest.model_validate({"revision": 12, "token": "0" * 64}),
-        "auth_success": runtime.AuthAccepted(revision=12, authenticated=True, identity=identity),
+        "auth_request": runtime.AuthRequest.model_validate({"revision": 13, "token": "0" * 64}),
+        "auth_success": runtime.AuthAccepted(revision=13, authenticated=True, identity=identity),
         "auth_refused": runtime.AuthAccepted(
-            revision=12, authenticated=False, error="runtime_authentication_failed"
+            revision=13, authenticated=False, error="runtime_authentication_failed"
         ),
-        "hello": runtime.ControlRequest(revision=12, request_id=UUID(int=2), operation="hello"),
+        "hello": runtime.ControlRequest(revision=13, request_id=UUID(int=2), operation="hello"),
         "stop": runtime.ControlRequest(
-            revision=12,
+            revision=13,
             request_id=UUID(int=3),
             operation="stop",
             expected_instance_id=identity.instance_id,
         ),
         "response": runtime.ControlResponse(
-            revision=12, request_id=UUID(int=2), observation=observation
+            revision=13, request_id=UUID(int=2), observation=observation
         ),
-        "error": runtime.ControlResponse(revision=12, request_id=UUID(int=2), error="runtime_busy"),
-        "startup": runtime.StartupResult(revision=12, instance_id=identity.instance_id),
+        "error": runtime.ControlResponse(revision=13, request_id=UUID(int=2), error="runtime_busy"),
+        "startup": runtime.StartupResult(revision=13, instance_id=identity.instance_id),
     }
     return {
         "wire": {name: item.model_dump_json() for name, item in values.items()},
@@ -160,8 +161,8 @@ def test_wire_defaults_caps_and_failure_message_order_are_identical() -> None:
 @pytest.mark.parametrize("token", [SecretStr("0" * 64), "A" * 64, "short", 0, True])
 def test_authentication_still_accepts_only_raw_lowercase_hex_input(token: object) -> None:
     with pytest.raises(ValidationError):
-        runtime.AuthRequest.model_validate({"revision": 12, "token": token})
-    auth = runtime.AuthRequest.model_validate({"revision": 12, "token": "0" * 64})
+        runtime.AuthRequest.model_validate({"revision": 13, "token": token})
+    auth = runtime.AuthRequest.model_validate({"revision": 13, "token": "0" * 64})
     assert "0" * 64 not in repr(auth) and "0" * 64 not in auth.model_dump_json()
     assert len(auth.token.get_secret_value()) == 64
 
@@ -169,13 +170,13 @@ def test_authentication_still_accepts_only_raw_lowercase_hex_input(token: object
 def test_revision_field_bounds_are_captured_not_redefined_by_root_reassignment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime, "PROTOCOL_REVISION", 13)
+    monkeypatch.setattr(runtime, "PROTOCOL_REVISION", 14)
     assert (
-        runtime.ControlRequest(revision=12, request_id=UUID(int=1), operation="hello").revision
-        == 12
+        runtime.ControlRequest(revision=13, request_id=UUID(int=1), operation="hello").revision
+        == 13
     )
     with pytest.raises(ValidationError):
-        runtime.ControlRequest(revision=13, request_id=UUID(int=1), operation="hello")
+        runtime.ControlRequest(revision=14, request_id=UUID(int=1), operation="hello")
 
 
 def test_validator_keeps_runtime_root_role_hook(monkeypatch: pytest.MonkeyPatch) -> None:

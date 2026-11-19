@@ -229,6 +229,10 @@ class RuntimeProjectClient:
                         or reply.operation != call.operation
                     ):
                         raise ControlFault("runtime_ownership_unconfirmed")
+                    if reply.page is not None and not reply.page.within(
+                        after=call.after, limit=call.limit
+                    ):
+                        raise ControlFault("runtime_ownership_unconfirmed")
                     if reply.admission is not None and (
                         reply.admission.approval_id != call.approval_id
                         or reply.admission.manifest_digest != call.reviewed_manifest_digest

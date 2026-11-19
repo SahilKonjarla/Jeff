@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from jeff.application.execution import (
     DockerBackendFault,
     ExecutionInspectionScope,
+    ExecutionListScope,
     FreshExecutionCall,
     FreshExecutionCompletion,
     FreshExecutionReply,
@@ -27,6 +28,32 @@ def execute(
     """Public intent gateway. Starts must use the existing owned-worker observer seam."""
     try:
         _deadline(deadline)
+        if call.operation in {"approvals.list", "jobs.list"}:
+            if self.listing is None:
+                raise DockerBackendFault("docker_authority_required")
+            project = _project(self, call.directory, deadline)
+            page = self.listing.list_executions(
+                ExecutionListScope(
+                    project_id=project.project_id,
+                    canonical_root=project.root,
+                    owner_instance_id=self.instance_id,
+                    after=call.after,
+                    limit=call.limit,
+                ),
+                deadline=deadline,
+            )
+            if (page.project_id, page.canonical_root) != (
+                project.project_id,
+                project.root,
+            ) or not page.within(after=call.after, limit=call.limit):
+                raise DockerBackendFault("docker_authority_required")
+            return FreshExecutionReply(
+                ok=True,
+                request_id=call.request_id,
+                operation=call.operation,
+                identity=self.instance_id,
+                page=page,
+            )
         if call.operation == "propose":
             assert call.profile_name is not None
             record = self.propose(

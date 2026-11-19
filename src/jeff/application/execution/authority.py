@@ -9,7 +9,26 @@ from pydantic import Field, StrictInt, field_validator, model_validator
 from jeff.domain.execution import AuthorityState
 
 from ._model import _Model, absolute_path
+from .docker_faults import DockerBackendFault
 from .manifests import ExecutionManifest
+from .review_models import ReviewFault
+
+
+class AuthorityClaimRefused(ReviewFault):
+    """Trusted claim rejection after confirmed transaction resolution, with no new claim.
+
+    Not a generic claim exception: lost acknowledgements and postclaim validation
+    failures must retain their original uncertainty. Earlier consumed work may exist.
+    """
+
+
+class ExecutionStartRefused(DockerBackendFault):
+    """Trusted proof this Start cannot grant a new claim or dispatch new execution.
+
+    Raise only before entering claim. Never infer this from an error code or missing
+    admission; faults from inside claim require authoritative transaction evidence.
+    Earlier execution under consumed authority may still exist; this is not a retry grant.
+    """
 
 
 class AuthorityOperation(_Model):

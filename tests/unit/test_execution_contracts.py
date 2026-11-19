@@ -1,5 +1,6 @@
 """Public review contracts: exact declared actions, never launch authority."""
 
+import subprocess
 from pathlib import Path
 from uuid import UUID
 
@@ -55,7 +56,7 @@ def test_review_request_is_an_explicit_bounded_wire_kind() -> None:
         expected_instance_id=UUID("00000000-0000-4000-8000-000000000002"), call=call
     )
     assert request.kind == "execution"
-    assert request.revision == PROTOCOL_REVISION == 12
+    assert request.revision == PROTOCOL_REVISION == 13
     assert request.call == call
 
 
@@ -71,6 +72,41 @@ def test_review_request_is_an_explicit_bounded_wire_kind() -> None:
 def test_sensitive_argument_channels_refuse_before_review(argument: str) -> None:
     with pytest.raises(ValidationError):
         ExecutionCall(directory=Path("/work/demo"), operation="propose", argv=("python", argument))
+
+
+def test_production_or_broadened_profiles_refuse_before_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production targets are unsupported, not inferred from arbitrary program text."""
+    profile = ExecutionProfile(
+        name="python",
+        project_id=UUID("00000000-0000-4000-8000-000000000001"),
+        canonical_root=Path("/work/demo"),
+        engine_id="declared-local-engine",
+        endpoint="unix:///private/tmp/declared-docker.sock",
+        image_id="sha256:" + "1" * 64,
+        platform="linux/arm64",
+        toolchain="Python 3.12",
+        executable="/usr/local/bin/python",
+    )
+    payload = profile.model_dump(mode="json")
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Unsupported profiles must refuse before filesystem/process I/O")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "Popen", forbidden)
+        patch.setattr(Path, "stat", forbidden)
+        for change in (
+            {"environment": "production"},
+            {"environment": "unclassified"},
+            {"network": "host"},
+            {"user": "0:0"},
+            {"project_view": "live"},
+            {"endpoint": "tcp://production.invalid:2375"},
+        ):
+            with pytest.raises(ValidationError):
+                ExecutionProfile.model_validate({**payload, **change})
 
 
 def test_client_cannot_change_review_only_provenance() -> None:

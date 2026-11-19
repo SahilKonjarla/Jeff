@@ -1,5 +1,35 @@
 # Tests
 
+## Fresh discovery — source/fake and authenticated in-process RPC
+
+`integration/test_execution_composition/test_listing.py` covers fresh discovery, separate legacy rows, mixed authority/claim states, stable bounded pages, exact project/current-reader scope, dual-clock expiry without authority writes, and replacement-reader completed/unknown history. `test_listing_rpc.py` exercises both CLI list groups through an authenticated local server with synthetic Docker and rejects stale instance targets; its separately labelled injected-transport cases reject over-limit/repeated pages. Unit listing contracts/CLI cases cover strict inputs, lazy factories and public page envelopes. Wire13 snapshots intentionally replace12 while retaining old/future rejection, legacy semantics, unchanged SQL catalog/persisted fingerprints and existing interface guards. The final finite selection passed270 cases in28.65s,0skips, including33 new listing cases; earlier tracer runs overlap and are not additional unique passes. Strict mypy368 files, Ruff and the shared400-code-line check (368 Python files, maximum371) passed. Bounded independent read-only safety/API review found no scoped blocker; it did not independently execute or hash-verify these tests. These are source fixtures—not installed-wheel, separate native-daemon, real Docker or fault proof. M03 remains open.
+
+## Phase5 Step3B — four safe installed physical windows
+
+Attempt3 passed4 approved native-owner fault windows: before claim, claimed/before Create, verified original removal/before terminal submission, and durable terminal commit/before internal worker acknowledgement. Eight daemon starts,4 genuine captured-Popen faults and2 real container runs/removals were exercised, distinct from Step3A's46 synthetic source-style cases. Original source-controlled assertions checked restart facts, current-reader/original-owner binding, old/new-UUID replay/control refusal and fourth-case retained output/EOF. Lead pinned49 public receipts and verified4 stopped statuses; these are not independent Docker/process census. [Result](../.agent-work/temporary/m03-phase3/phase5-physical-attempt-3-result.json).
+
+Earlier fixture-prerequisite failure and expired-consent attempts remain spent, not reset/refunded;30 offline helper guards and a separate SQL-only readiness smoke validated the minimal fixture correction. Active/ambiguous-container owner-loss cases remain excluded/unproved. No additional physical/human run is implied. Sahil separately accepted Phase5 with documented validation exceptions and declined a new Sahil handoff; independent normal human inspection and unsafe fault windows remain unrun/unproved. [Acceptance](../.agent-work/temporary/m03-phase3/phase5-acceptance.json). Do not rerun any consumed helper/authority.
+
+## Phase5 Step3A — fresh installed source-style selection
+
+A new noneditable171-module wheel, SHA256 `6f00a0dae77f8f2ed4e86017d23422f940dbd239f79315a4c4fcd85fd883a0ab`, passed exactly46 installed cases in12.88s: Step1's17 restart cases, Step2's26 adapter history cases and3 CLI/authenticated in-process RPC cases. All14 bounded packaging/identity/help/collection/test commands exited0;0 skips. The ten copied test/helper inputs and all171 source/build/wheel/site Python modules were hash-checked. Session hooks verified installed origin during collection and execution;150 loaded Jeff modules were observed at each finish, with all171 site files separately checked.
+
+These are copied source-style tests against an isolated installed artifact with synthetic Docker, not46 process-backed installed acceptance scenarios. No application daemon, real Docker query/container, sentinel or crash ran; no downloads or normal-state migration. That selection itself did not prove physical windows; the separately authorized Step3B evidence is above. Phase5 was later explicitly accepted with the documented human/fault evidence exceptions above, not by this selected test run. Do not rerun the spent package helper or reuse historical live handoffs. [Local result](../.agent-work/temporary/m03-phase3/phase5-step3a-result.json).
+
+## Phase5 Step2 — historical observation source coverage
+
+Two `test_historical_inspection.py` modules under `integration/test_runtime_execution_authority/` and `integration/test_execution_composition/` cover original-owner completed/quarantined results, retained/missing partial-stop text, no-launch revocation, unknown claim/launch facts, expired/retired output, reader/project/root/approval refusal and corrupted original bindings. The composition cases use the current CLI, authenticated in-process Unix-socket server and SQL owner with synthetic Docker; current response identity and private-field omission are checked, and reads/rejected mutations must add no backend metadata queries or lifecycle calls.
+
+The finite regression passed110 cases (29 new Step2 cases plus related existing/Step1/architecture cases) in28.92s. Ruff/format passed3 changed Python files; strict mypy passed173 source files. Tested Python pins were stable before/after while documentation changed separately.
+
+These tests use fresh runtime-instance UUIDs but retain owned synthetic fixture lifetimes. They are not daemon-process death, a new installed wheel, real Docker operations or physical recovery-window evidence. Mutation ownership and unknown quarantine remain intact; Phase4's missing human shutdown repeat is not retroactively passed.
+
+## Phase5 Step1 — restart reconciliation source coverage
+
+`integration/test_runtime_execution_authority/test_restart_reconciliation.py` adds17 cases at the existing storage authority/journal/completion/stop APIs: repeated restart of unused decisions; claim-only through cleaned-without-completion uncertainty; lost caller replies after committed claim/completion; immutable completed/quarantined results; refusal of replacement-owner stop mutations; and expiry without permission or quarantine release.17 new plus18 related existing claim/journal/completion/stop/restart regressions passed35/35, with Ruff/format and strict mypy checks. No production behavior changed.
+
+The fixture closes/reopens the SQL actor with a new instance UUID under its existing owned synthetic namespace. It neither kills a daemon nor creates/controls a container. Caller reply loss occurs after a real adapter commit, not at a proven kernel/transport crash barrier. Old public show/logs owner scoping was unchanged at that Step1 checkpoint; Step2's source extension is described above. Installed/physical Phase5 validation remains separate; older checkpoint counts below are historical, not current full-suite evidence.
+
 ## Code-size policy
 
 Keep Python files in `src/`, `tests/` and `scripts/` within **400 code-bearing lines**, not400 total physical lines. Exclude blank and comment-only lines, Python-recognized module/class/function docstrings, and multiline string/bytes literal spans (including multiline f-strings). Count code surrounding those spans, including assignments and calls; inline comments do not exempt a code line. Ordinary single-line string expressions that are not docstrings still count.
