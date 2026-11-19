@@ -18,3 +18,4 @@ class _Session:
     sink: DockerOutputSink | None = None
     outcome: DockerJobOutcome | None = None
     completion_attempted: bool = False
+    guard_uncertain: bool = False

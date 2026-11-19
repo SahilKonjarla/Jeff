@@ -7,15 +7,19 @@ import selectors
 import subprocess
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Literal, cast
 
 from jeff.application.execution import (
     DockerBackendFault,
     DockerLaunchIntent,
     DockerOutputSink,
+    DockerOwnedContainer,
     ExecutionStopSignal,
+    GuardV2Terminal,
 )
 
+from .guarded import GuardAttachment
 from .metadata import _Engine, _json
 from .transport import _DockerCLI
 
@@ -25,6 +29,38 @@ class DockerLifecycleCLI(_DockerCLI):
 
     Not composed into bootstrap/RPC/CLI until real journal/input/output adapters exist.
     """
+
+    def __init__(
+        self, binary: Path, config: Path, home: Path, *, deadline: float | None = None
+    ) -> None:
+        super().__init__(binary, config, home, deadline=deadline)
+        self._guarded: dict[int, GuardAttachment] = {}
+
+    def attach_guarded(
+        self,
+        handle: DockerOwnedContainer,
+        sink: DockerOutputSink,
+        stop: ExecutionStopSignal | None,
+        observe_running: Callable[[], None] | None,
+        *,
+        deadline: float,
+    ) -> tuple[int, GuardV2Terminal]:
+        from .guarded import attach
+
+        if id(handle) in self._guarded:
+            raise DockerBackendFault("docker_authority_required")
+        capture = GuardAttachment(handle)
+        self._guarded[id(handle)] = capture
+        return attach(self, capture, sink, stop, observe_running, deadline=deadline)
+
+    def release_guarded(self, handle: DockerOwnedContainer, *, deadline: float) -> bool:
+        capture = self._guarded.get(id(handle))
+        if capture is None:
+            return True
+        if capture.handle is not handle or not capture.release(deadline):
+            return False
+        del self._guarded[id(handle)]
+        return True
 
     @staticmethod
     def _id(container_id: str) -> str:

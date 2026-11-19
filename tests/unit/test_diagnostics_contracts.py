@@ -232,8 +232,10 @@ def test_phase2_doctor_accepts_current_and_legacy_settings_and_current_live_read
     assert "execution.review" in live.runtime.available_operations
     with pytest.raises(ValidationError):
         DoctorReport.model_validate({**stopped_payload(), "database_schema_version": 4})
+    guarded = DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 4})
+    assert doctor_result(guarded).ok
     with pytest.raises(ValidationError):
-        DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 4})
+        DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 5})
 
 
 def live_payload() -> dict[str, Any]:

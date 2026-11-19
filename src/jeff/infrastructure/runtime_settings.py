@@ -11,6 +11,7 @@ from jeff.application.runtime import ControlFault
 from jeff.application.storage import (
     SETTINGS_LIMIT,
     ConfiguredRuntimeSettings,
+    GuardedRuntimeSettings,
     LoadedRuntimeSettings,
     RuntimeSettings,
     StorageFault,
@@ -57,9 +58,14 @@ def parse_settings(payload: bytes) -> LoadedRuntimeSettings:
         if (
             isinstance(value, dict)
             and type(value.get("schema_version")) is int
-            and value["schema_version"] == 3
+            and value["schema_version"] in (3, 4)
         ):
-            return ConfiguredRuntimeSettings.model_validate(value)
+            model = (
+                GuardedRuntimeSettings
+                if value["schema_version"] == 4
+                else ConfiguredRuntimeSettings
+            )
+            return model.model_validate(value)
         return RuntimeSettings.model_validate(value)
     except (ValueError, TypeError, RecursionError, yaml.YAMLError, ValidationError):
         raise StorageFault("settings_invalid") from None

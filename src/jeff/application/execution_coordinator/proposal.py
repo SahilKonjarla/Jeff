@@ -79,20 +79,23 @@ def propose(
                 # Replay original facts; refresh existing expiry without target
                 # queries, source reads, another snapshot or launch authority.
                 return _load(self, project, prior.approval_id, prior.manifest_digest, deadline)
+        if self.require_guard and self.guards is None:
+            raise DockerBackendFault("docker_unsafe_configuration")
         declaration = _declaration(self, profile)
         _target(self, declaration, deadline)
         prepared = self.preparer.prepare(project, paths, deadline=deadline)
         manifest = ExecutionManifest(profile=profile, argv=argv, inputs=prepared)
         binding = self.inputs.verify(manifest, deadline=deadline)
         self.inputs.check(binding, manifest, deadline=deadline)
+        action = self.guards.prepare(manifest, deadline=deadline) if self.guards else manifest
         _deadline(deadline)
         return self.authority.authority(
             _operation(
                 self,
                 project,
                 operation="propose",
-                manifest=manifest,
-                current_manifest_digest=manifest.fingerprint,
+                manifest=action,
+                current_manifest_digest=action.fingerprint,
                 **({"request_id": request_id} if request_id is not None else {}),
             ),
             deadline=deadline,

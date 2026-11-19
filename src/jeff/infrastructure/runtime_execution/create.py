@@ -12,6 +12,9 @@ from jeff.application.execution import (
     DockerOwnedContainer,
     DockerTargetDeclaration,
     ExecutionStopSignal,
+    GuardedDockerBackend,
+    GuardedExecutionManifest,
+    workload,
 )
 
 from .policy import _policy_mapping, _state_fault
@@ -60,10 +63,14 @@ def create(
         observed_container_id: str | None = None
         intent_attempted = False
         try:
+            if isinstance(record.manifest, GuardedExecutionManifest):
+                if self.guards is None or not isinstance(self.backend, GuardedDockerBackend):
+                    raise DockerBackendFault("docker_unsafe_configuration")
+                self.guards.check(record.manifest, deadline=deadline)
             target = self._verify(declaration, deadline, stop)
             if target.declaration_digest != declaration.fingerprint:
                 raise DockerBackendFault("docker_target_mismatch")
-            binding = self.inputs.verify(record.manifest, deadline=deadline)
+            binding = self.inputs.verify(workload(record.manifest), deadline=deadline)
             intent = DockerLaunchIntent(
                 attempt_id=uuid4(),
                 record=record,
@@ -72,7 +79,7 @@ def create(
                 nonce=secrets.token_hex(16),
             )
             self._declarations[intent.attempt_id] = declaration
-            self.inputs.check(binding, record.manifest, deadline=deadline)
+            self.inputs.check(binding, workload(record.manifest), deadline=deadline)
             self._engine(intent, deadline)
             if stop is not None:
                 stop.check()
@@ -114,6 +121,8 @@ def create(
                     observed_container_id = error.observed_container_id
                 self._unknown(intent, cleanup_deadline, handle, observed_container_id)
             if handle is not None:
+                if isinstance(record.manifest, GuardedExecutionManifest):
+                    self._sessions[handle.container_id].guard_uncertain = True
                 self._cleanup(self._sessions[handle.container_id], cleanup_deadline)
             if isinstance(error, DockerBackendFault):
                 raise

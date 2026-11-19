@@ -1,6 +1,12 @@
 """Fixed container create arguments, scratch limits and ownership labels."""
 
-from jeff.application.execution import DockerLaunchIntent
+from jeff.application.execution import (
+    DockerLaunchIntent,
+    GuardedExecutionManifest,
+    guard_arguments,
+)
+
+from .guard_artifacts import resource_path
 
 
 def ownership_labels(intent: DockerLaunchIntent) -> dict[str, str]:
@@ -69,5 +75,24 @@ def create_arguments(intent: DockerLaunchIntent) -> tuple[str, ...]:
         result.extend(("--label", f"{key}={value}"))
     for key, value in intent.target.effective_environment:
         result.extend(("--env", f"{key}={value}"))
-    result.extend((p.image_id, *intent.record.manifest.argv[1:]))
+    action = intent.record.manifest
+    if isinstance(action, GuardedExecutionManifest):
+        entrypoint = result.index("--entrypoint") + 1
+        result[entrypoint] = action.artifact.container_executable
+        result.extend(
+            (
+                "--init=false",
+                "--interactive",
+                "--attach=stdin",
+                "--attach=stdout",
+                "--attach=stderr",
+                "--mount",
+                f"type=bind,source={resource_path(action.artifact)},"
+                f"target={action.artifact.container_executable},readonly,"
+                "bind-propagation=rprivate",
+            )
+        )
+        result.extend((p.image_id, *guard_arguments(action)))
+    else:
+        result.extend((p.image_id, *action.argv[1:]))
     return tuple(result)

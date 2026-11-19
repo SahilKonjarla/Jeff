@@ -38,9 +38,9 @@ PUBLIC_MEMBERS = (
     "start",
     "run",
 )
-# Optional keyword-only listing port is the sole extension to the extracted interface.
+# Optional listing and explicit guard verifier/requirement extend the extracted interface.
 LEGACY_SIGNATURE_DIGEST = "c536227f1fa2b43a758b0380445f11ce8ce947d1c3018482c6b02e8e303344ad"
-SIGNATURE_DIGEST = "cddd69486f43a3d3fa24a91a90e6c479c7e55008584ce402912bd583b48c2e38"
+SIGNATURE_DIGEST = "eb7a93028642f51e5bb902d4a263c9e9cf21ce62924b6fcb8f99ac245b14ccee"
 
 
 def _signatures() -> dict[str, str]:
@@ -76,16 +76,21 @@ def _coordinator() -> ExecutionCoordinator:
     )
 
 
-def test_public_signatures_add_only_an_optional_listing_port() -> None:
+def test_public_signatures_add_only_explicit_optional_listing_and_guard_ports() -> None:
     signatures = _signatures()
     assert sha256(json.dumps(signatures, sort_keys=True).encode()).hexdigest() == SIGNATURE_DIGEST
     constructor = inspect.signature(ExecutionCoordinator.__init__)
     listing = constructor.parameters["listing"]
     assert listing.kind == inspect.Parameter.KEYWORD_ONLY and listing.default is None
+    for name, default in (("guards", None), ("require_guard", False)):
+        parameter = constructor.parameters[name]
+        assert parameter.kind == inspect.Parameter.KEYWORD_ONLY and parameter.default is default
     signatures["__init__"] = str(
         constructor.replace(
             parameters=[
-                parameter for name, parameter in constructor.parameters.items() if name != "listing"
+                parameter
+                for name, parameter in constructor.parameters.items()
+                if name not in {"listing", "guards", "require_guard"}
             ]
         )
     )

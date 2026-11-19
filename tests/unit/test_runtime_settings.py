@@ -126,7 +126,7 @@ def test_settings3_backend_is_opt_in_bound_and_legacy_bytes_are_preserved(tmp_pa
     "payload",
     [
         b"{}",
-        b"schema_version: 4\nhistory: {retention_days: 30}",
+        b"schema_version: 5\nhistory: {retention_days: 30}",
         b"schema_version: 1\nhistory: {retention_days: true}",
         b"schema_version: 1\nhistory: {retention_days: '30'}",
         b"schema_version: 1\nhistory: {retention_days: 0}",

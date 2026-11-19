@@ -26,6 +26,7 @@ from jeff.application.execution import (
     ExecutionStopRecord,
     ExecutionStopSignal,
     ExecutionStopStore,
+    GuardExecutionVerifier,
     PreparedInputVerifier,
     VerifiedDockerTarget,
 )
@@ -51,9 +52,11 @@ class DockerJobController:
         journal: DockerLaunchJournal,
         *,
         owner_instance_id: UUID,
+        guards: GuardExecutionVerifier | None = None,
     ) -> None:
         self.verifier, self.backend, self.inputs, self.journal = verifier, backend, inputs, journal
         self.owner_instance_id = owner_instance_id
+        self.guards = guards
         self._mutex = threading.Lock()
         self._used_claims: set[UUID] = set()
         self._sessions: dict[str, _Session] = {}

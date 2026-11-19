@@ -3,7 +3,12 @@
 from pathlib import Path
 from uuid import UUID
 
-from jeff.application.execution import DockerCLIIdentity, DockerTargetDeclaration
+from jeff.application.execution import (
+    DockerCLIIdentity,
+    DockerTargetDeclaration,
+    GuardedDockerBackendConfiguration,
+    GuardExecutionPolicy,
+)
 from jeff.application.execution_coordinator import ExecutionCoordinator
 from jeff.application.projects import Failure, ProjectService
 from jeff.infrastructure.runtime_state import Ownership
@@ -25,6 +30,8 @@ def create_internal_execution(
     declarations: tuple[DockerTargetDeclaration, ...],
     expected_binary: DockerCLIIdentity | None = None,
     deadline: float | None = None,
+    guard_policy: GuardExecutionPolicy | None = None,
+    require_guard: bool = False,
 ) -> ExecutionCoordinator:
     """Construct adapters without Docker queries, implicit discovery or new workers.
 
@@ -52,8 +59,11 @@ def create_internal_execution(
         verifier.identity != expected_binary or backend.identity != expected_binary
     ):
         raise _runtime.DockerBackendFault("docker_unsafe_configuration")
+    from jeff.infrastructure.runtime_execution.guard_artifacts import InstalledGuardVerifier
+
+    guards = InstalledGuardVerifier(guard_policy) if guard_policy is not None else None
     controller = _runtime.DockerJobController(
-        verifier, backend, inputs, storage, owner_instance_id=instance_id
+        verifier, backend, inputs, storage, owner_instance_id=instance_id, guards=guards
     )
     return _runtime.ExecutionCoordinator(
         projects,
@@ -72,6 +82,8 @@ def create_internal_execution(
         inspection=storage,
         listing=storage,
         stop_store=storage,
+        guards=guards,
+        require_guard=require_guard,
     )
 
 
@@ -110,6 +122,10 @@ def create_configured_execution(
                 declarations=configuration.declarations,
                 expected_binary=configuration.binary,
                 deadline=deadline,
+                guard_policy=configuration.guard
+                if isinstance(configuration, GuardedDockerBackendConfiguration)
+                else None,
+                require_guard=True,
             )
         active()
         return built

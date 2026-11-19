@@ -1,0 +1,231 @@
+"""Required guarded proposal→claim→existing controller→durable result seam, synthetic Docker."""
+
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import cast
+from uuid import uuid4
+
+import pytest
+
+from jeff.application.execution import (
+    DockerBackendFault,
+    DockerExecutionResult,
+    ExecutionManifest,
+    ExecutionStopRecord,
+    FreshExecutionView,
+    GuardedExecutionManifest,
+)
+from jeff.infrastructure.runtime_execution.arguments import create_arguments
+from jeff.infrastructure.runtime_execution.guard_artifacts import InstalledGuardVerifier
+
+from .support_composition import approved, composed, pending, show
+from .support_guarded import policy
+
+
+def test_settings4_reaches_existing_cold_bootstrap_without_starting_processes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jeff.application.execution import GuardedDockerBackendConfiguration
+    from jeff.bootstrap.runtime import create_configured_execution
+
+    def no_child(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Cold guarded bootstrap must not launch any child")
+
+    monkeypatch.setattr("subprocess.Popen", no_child)
+    with composed(tmp_path, configured=True, guarded=True) as (coordinator, store, _, docker):
+        assert isinstance(store.execution_backend, GuardedDockerBackendConfiguration)
+        result = create_configured_execution(
+            owner=store.owner,
+            storage=store,
+            projects=coordinator.projects,
+            instance_id=coordinator.instance_id,
+            deadline=time.monotonic() + 5,
+        )
+        assert isinstance(result, type(coordinator))
+        assert result.require_guard and result.guards is not None
+        assert not docker.calls and not docker.queries
+
+
+def test_guarded_approval_runs_once_and_preserves_original_workload(tmp_path: Path) -> None:
+    with composed(tmp_path, guarded=True) as (coordinator, store, project, docker):
+        record = approved(coordinator, project)
+        assert isinstance(record.manifest, GuardedExecutionManifest)
+        assert record.manifest_digest != record.manifest.original.fingerprint
+        view = FreshExecutionView.from_record(record)
+        assert view.authority_kind == "guarded_execution_v1"
+        assert FreshExecutionView.model_validate_json(view.model_dump_json()) == view
+        result = coordinator.run(
+            project.root, record.approval_id, record.manifest_digest, deadline=time.monotonic() + 5
+        )
+        assert result.disposition == "completed" and result.outcome.exit_code == 0
+        assert result.output is not None and result.output.stdout == "public output\n"
+        assert docker.calls.count("create") == docker.calls.count("attach_guarded") == 1
+        assert "attach" not in docker.calls
+        args = create_arguments(docker.intents[0])
+        assert "--interactive" in args and "--init=false" in args and "--jfg2" in args
+        assert record.manifest_digest in args
+        assert result.owned.intent.record.manifest == record.manifest
+        assert show(store, project, record.approval_id).manifest == record.manifest
+        with pytest.raises(DockerBackendFault):
+            coordinator.run(
+                project.root,
+                record.approval_id,
+                record.manifest_digest,
+                deadline=time.monotonic() + 5,
+            )
+        assert docker.calls.count("create") == 1
+
+
+def test_workload124_is_not_timeout(tmp_path: Path) -> None:
+    with composed(tmp_path, guarded=True) as (coordinator, _, project, docker):
+        docker.exit_code = 124
+        record = approved(coordinator, project)
+        result = coordinator.run(
+            project.root, record.approval_id, record.manifest_digest, deadline=time.monotonic() + 5
+        )
+        assert result.disposition == "completed"
+        assert result.outcome.exit_code == 124 and result.outcome.timed_out is False
+
+
+def test_valid_guard_deadline_uses_existing_durable_timeout_path(tmp_path: Path) -> None:
+    with composed(tmp_path, guarded=True, cancellable=True) as (coordinator, _, project, docker):
+        # Disable only the fake's interactive cancellation wait for this typed deadline case.
+        docker.cancel_mode = False
+        docker.failure = "deadline"
+        record = approved(coordinator, project)
+        result = coordinator.start(
+            project.root,
+            record.approval_id,
+            record.manifest_digest,
+            request_id=uuid4(),
+            admission_deadline=time.monotonic() + 5,
+            on_admitted=lambda _: None,
+        )
+        assert isinstance(result, ExecutionStopRecord)
+        assert result.terminal is not None and result.terminal.outcome == "timed_out"
+        assert result.terminal.cleanup_verified and result.terminal.exit_code == 124
+        assert "stop" not in docker.calls and "kill" not in docker.calls
+
+
+@pytest.mark.parametrize("failure", ["protocol", "clock_fault"])
+def test_uncertain_guard_never_stops_removes_retries_or_calls_it_timeout(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    with composed(tmp_path, guarded=True) as (coordinator, store, project, docker):
+        docker.failure = failure
+        record = approved(coordinator, project)
+        result = coordinator.run(
+            project.root, record.approval_id, record.manifest_digest, deadline=time.monotonic() + 5
+        )
+        assert isinstance(result, DockerExecutionResult) and result.disposition == "quarantined"
+        assert result.outcome.outcome_unknown and not result.outcome.timed_out
+        assert not result.outcome.cleanup_verified
+        assert not {"stop", "kill", "remove", "release_guarded"}.intersection(docker.calls)
+        assert show(store, project, record.approval_id).claim_state == "unknown"
+
+
+@pytest.mark.parametrize("unknown_stop", [False, True])
+def test_guarded_active_cancel_keeps_cleanup_with_original_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unknown_stop: bool,
+) -> None:
+    from jeff.application.execution import ExecutionCancelCall
+
+    with composed(tmp_path, guarded=True, cancellable=True) as (coordinator, _, project, docker):
+        record = approved(coordinator, project)
+        docker.entered = threading.Event()
+        if unknown_stop:
+
+            def lost_stop(endpoint: str, container_id: str, *, deadline: float) -> None:
+                docker.calls.append("stop")
+                raise DockerBackendFault("docker_mutation_unconfirmed")
+
+            monkeypatch.setattr(docker, "stop", lost_stop)
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            work = worker.submit(
+                coordinator.start,
+                project.root,
+                record.approval_id,
+                record.manifest_digest,
+                request_id=uuid4(),
+                admission_deadline=time.monotonic() + 5,
+                on_admitted=lambda _: None,
+            )
+            assert docker.entered.wait(2)
+            coordinator.submit_cancel(
+                ExecutionCancelCall(
+                    request_id=uuid4(),
+                    approval_id=record.approval_id,
+                    reviewed_manifest_digest=record.manifest_digest,
+                ),
+                deadline=time.monotonic() + 2,
+            ).result(timeout=3)
+            result = work.result(timeout=5)
+        assert isinstance(result, ExecutionStopRecord) and result.terminal is not None
+        if unknown_stop:
+            assert result.terminal.outcome == "unknown" and not result.terminal.cleanup_verified
+            assert not {"kill", "remove", "release_guarded"}.intersection(docker.calls)
+        else:
+            assert result.terminal.outcome == "cancelled" and result.terminal.cleanup_verified
+            assert docker.calls.index("stop") < docker.calls.index("remove")
+            assert docker.calls.index("remove") < docker.calls.index("release_guarded")
+
+
+def test_backend_without_guard_transport_refuses_before_create(tmp_path: Path) -> None:
+    from jeff.infrastructure.runtime_execution import DockerJobController
+
+    from .support_docker import Docker
+
+    with composed(tmp_path, guarded=True) as (coordinator, _, project, _):
+        record = approved(coordinator, project)
+        unsupported = Docker()
+        cast(DockerJobController, coordinator.controller).backend = unsupported
+        with pytest.raises(DockerBackendFault):
+            coordinator.run(
+                project.root,
+                record.approval_id,
+                record.manifest_digest,
+                deadline=time.monotonic() + 5,
+            )
+        assert unsupported.calls == []
+
+
+def test_guard_policy_change_invalidates_approval_before_claim(tmp_path: Path) -> None:
+    with composed(tmp_path, guarded=True) as (coordinator, store, project, docker):
+        record = pending(coordinator, project)
+        coordinator.guards = InstalledGuardVerifier(
+            policy().model_copy(update={"deadline_margin_ns": 200000000})
+        )
+        with pytest.raises(DockerBackendFault):
+            coordinator.decide(
+                project.root,
+                record.approval_id,
+                record.manifest_digest,
+                approve=True,
+                deadline=time.monotonic() + 5,
+            )
+        assert show(store, project, record.approval_id).claim_id is None
+        assert docker.calls == []
+
+
+def test_old_facts_stay_readable_but_are_never_upgraded_to_guarded_launch(tmp_path: Path) -> None:
+    with composed(tmp_path) as (coordinator, store, project, docker):
+        record = pending(coordinator, project)
+        assert isinstance(record.manifest, ExecutionManifest)
+        original = record.model_dump_json()
+        coordinator.guards, coordinator.require_guard = InstalledGuardVerifier(policy()), True
+        with pytest.raises(DockerBackendFault):
+            coordinator.decide(
+                project.root,
+                record.approval_id,
+                record.manifest_digest,
+                approve=True,
+                deadline=time.monotonic() + 5,
+            )
+        assert show(store, project, record.approval_id).model_dump_json() == original
+        assert docker.calls == []

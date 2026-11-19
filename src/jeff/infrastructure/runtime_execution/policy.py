@@ -2,7 +2,12 @@
 
 from typing import cast
 
-from jeff.application.execution import DockerBackendFault, DockerOwnedContainer, DockerPolicyFacts
+from jeff.application.execution import (
+    DockerBackendFault,
+    DockerOwnedContainer,
+    DockerPolicyFacts,
+    GuardedExecutionManifest,
+)
 
 from .arguments import ownership_labels, scratch_options
 
@@ -43,6 +48,10 @@ def _state_fault(state: dict[str, object]) -> DockerBackendFault:
 
 def _safe_config(handle: DockerOwnedContainer, raw: dict[str, object]) -> None:
     intent, manifest = handle.intent, handle.intent.record.manifest
+    if isinstance(manifest, GuardedExecutionManifest):
+        from .guard_policy import workload_config
+
+        raw = workload_config(handle, raw)
     p = manifest.profile
     config = _policy_mapping(raw.get("Config"), "Config", "Config" in raw)
     host = _policy_mapping(raw.get("HostConfig"), "HostConfig", "HostConfig" in raw)

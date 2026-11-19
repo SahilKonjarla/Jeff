@@ -39,7 +39,7 @@ class Discovery:
 
 @contextmanager
 def composed(
-    root: Path, *, configured: bool = False, cancellable: bool = False
+    root: Path, *, configured: bool = False, cancellable: bool = False, guarded: bool = False
 ) -> Iterator[tuple[ExecutionCoordinator, SQLiteStorage, Project, Docker]]:
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = root / "p"
@@ -100,6 +100,20 @@ def composed(
                     declarations=(declared,),
                 ),
             )
+            if guarded:
+                from jeff.application.storage import GuardedRuntimeSettings
+
+                from .support_guarded import policy
+
+                assert configured_settings.backend is not None
+                configured_settings = GuardedRuntimeSettings.model_validate(
+                    configured_settings.model_dump(mode="json")
+                    | {
+                        "schema_version": 4,
+                        "backend": configured_settings.backend.model_dump(mode="json")
+                        | {"guard": policy().model_dump(mode="json")},
+                    }
+                )
             layout.settings.write_text(configured_settings.model_dump_json())
         else:
             layout.settings.write_text(settings.model_dump_json())  # JSON is valid fixture YAML.
@@ -109,12 +123,17 @@ def composed(
         try:
             assert store.wait_ready(5).state == "ready"
             store.index(project)
-            docker = Docker()
+            from jeff.infrastructure.runtime_execution.guard_artifacts import InstalledGuardVerifier
+
+            from .support_guarded import GuardedDocker, policy
+
+            guards = InstalledGuardVerifier(policy()) if guarded else None
+            docker = GuardedDocker() if guarded else Docker()
             docker.cancel_mode = cancellable
             verifier = DockerTargetInspector(_reader=docker)
             inputs = FilePreparedInputStore(owner)
             controller = DockerJobController(
-                verifier, docker, inputs, store, owner_instance_id=generation
+                verifier, docker, inputs, store, owner_instance_id=generation, guards=guards
             )
             declaration = DockerTargetDeclaration(
                 profile=profile,
@@ -138,6 +157,8 @@ def composed(
                 inspection=store,
                 listing=store,
                 stop_store=store if cancellable else None,
+                guards=guards,
+                require_guard=guarded,
             )
             yield coordinator, store, project, docker
         finally:

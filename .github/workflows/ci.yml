@@ -1,0 +1,85 @@
+name: macOS checks
+
+# Linux validation is deferred by user request, not removed from product scope.
+"on":
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Python 3.12 / macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_INPUT: "1"
+      PIP_CONFIG_FILE: /dev/null
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12.11"
+          architecture: arm64
+
+      - name: Install development environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-dev.lock -e '.[dev]'
+
+      - name: Verify an outside-Git test arena
+        run: |
+          .venv/bin/python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          checkout = Path.cwd().resolve()
+          temporary = Path(os.environ["RUNNER_TEMP"]).resolve()
+          if temporary == checkout or checkout in temporary.parents:
+              raise SystemExit("Runner temp is inside checkout; refusing tests")
+          result = subprocess.run(
+              ["/usr/bin/git", "-C", str(temporary), "rev-parse", "--show-toplevel"],
+              env={"PATH": os.defpath, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+              capture_output=True, timeout=10,
+          )
+          if result.returncode != 128 or b"not a git repository" not in result.stderr.lower():
+              raise SystemExit("Runner temp is not a verified outside-Git location")
+          arena = tempfile.mkdtemp(prefix="jeff-pytest-", dir=temporary)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"JEFF_PYTEST_BASE={arena}\n")
+          PY
+
+      - name: Run unit, architecture, integration and acceptance tests
+        run: .venv/bin/python -m pytest tests/unit tests/architecture tests/integration tests/acceptance -q --basetemp "$JEFF_PYTEST_BASE" -p no:cacheprovider
+
+      - name: Lint
+        run: .venv/bin/python -m ruff check src tests scripts
+
+      - name: Check formatting
+        run: .venv/bin/python -m ruff format --check src tests scripts
+
+      - name: Typecheck
+        run: .venv/bin/python -m mypy src tests scripts
+
+      - name: Check dependency consistency
+        run: .venv/bin/python -m pip check

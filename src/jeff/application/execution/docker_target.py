@@ -9,6 +9,7 @@ from pydantic import Field, StrictInt, field_validator, model_validator
 from jeff.domain.execution import ARGV_COUNT, fingerprint, public_text
 
 from ._model import _Model, absolute_path
+from .guard_execution import GuardExecutionPolicy
 from .profiles import ExecutionProfile
 
 
@@ -98,6 +99,12 @@ class DockerBackendConfiguration(_Model):
     @property
     def fingerprint(self) -> str:
         return fingerprint(self.model_dump(mode="json"))
+
+
+class GuardedDockerBackendConfiguration(DockerBackendConfiguration):
+    """Settings4 explicitly supplies guard identity and timing; no default substitution."""
+
+    guard: GuardExecutionPolicy
 
 
 class VerifiedDockerTarget(_Model):

@@ -143,7 +143,7 @@ class DoctorReport(_DoctorModel):
     checks: tuple[DoctorCheck, ...] = Field(min_length=7, max_length=7)
     runtime: DoctorRuntimeData | None = None
     paths: RuntimePathInspection | None = None
-    settings_schema_version: StrictInt | None = Field(default=None, ge=1, le=3)
+    settings_schema_version: StrictInt | None = Field(default=None, ge=1, le=4)
     configured_retention_days: ConfiguredRetentionDays | None = None
     database_schema_version: StrictInt | None = Field(default=None, ge=0, le=10)
     python_version: str | None = Field(
@@ -166,7 +166,7 @@ class DoctorReport(_DoctorModel):
             raise ValueError("Only validated settings expose configuration facts.")
         if self.summary == "stopped" and (
             self.runtime is not None
-            or self.settings_schema_version not in (1, 2, 3)
+            or self.settings_schema_version not in (1, 2, 3, 4)
             or self.configured_retention_days is None
             or self.database_schema_version != 10
         ):

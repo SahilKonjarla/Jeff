@@ -16,9 +16,11 @@ from jeff.application.execution import (
     DockerTargetDeclaration,
     ExecutionProfile,
     ExecutionStopSignal,
+    GuardedExecutionManifest,
     PreparedInputFault,
     ReviewFault,
     absolute_path,
+    workload,
 )
 from jeff.application.storage import StorageFault
 from jeff.domain.projects import Project
@@ -142,19 +144,26 @@ def _checked(
     deadline: float,
     stop: ExecutionStopSignal | None = None,
 ) -> DockerTargetDeclaration:
-    profile = _profile(self, project, record.manifest.profile.name)
+    action = record.manifest
+    if isinstance(action, GuardedExecutionManifest):
+        if self.guards is None:
+            raise DockerBackendFault("docker_unsafe_configuration")
+        self.guards.check(action, deadline=deadline)
+    elif self.require_guard:
+        raise DockerBackendFault("docker_authority_required")
+    profile = _profile(self, project, action.profile.name)
     if profile != record.manifest.profile:
         raise DockerBackendFault("docker_target_mismatch")
     declaration = _declaration(self, profile)
     _target(self, declaration, deadline, stop)
     if stop is not None:
         stop.check()
-    binding = self.inputs.verify(record.manifest, deadline=deadline)
+    binding = self.inputs.verify(workload(record.manifest), deadline=deadline)
     if (
         binding.snapshot_id != record.manifest.inputs.snapshot_id
         or binding.inventory_digest != record.manifest.inputs.digest
     ):
         raise DockerBackendFault("docker_policy_mismatch")
-    self.inputs.check(binding, record.manifest, deadline=deadline)
+    self.inputs.check(binding, workload(record.manifest), deadline=deadline)
     _deadline(deadline)
     return declaration

@@ -10,7 +10,7 @@ from jeff.domain.execution import AuthorityState
 
 from ._model import _Model, absolute_path
 from .authority import AuthorityRecord
-from .manifests import ExecutionManifest
+from .guard_execution import ExecutionAction
 from .output import DockerJobOutcome, DockerOutputFacts
 from .requests import parse_execution_cursor
 
@@ -18,13 +18,13 @@ from .requests import parse_execution_cursor
 class FreshExecutionView(_Model):
     """Original reviewable facts, excluding private claim/owner/controller identities."""
 
-    authority_kind: Literal["execution_v1"] = "execution_v1"
+    authority_kind: Literal["execution_v1", "guarded_execution_v1"] = "execution_v1"
     proposal_id: UUID
     approval_id: UUID
     job_id: UUID
     project_id: UUID
     canonical_root: Path
-    manifest: ExecutionManifest
+    manifest: ExecutionAction
     manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     state: AuthorityState
     created_at_ms: StrictInt = Field(ge=0)
@@ -34,7 +34,8 @@ class FreshExecutionView(_Model):
     @model_validator(mode="after")
     def consistent(self) -> Self:
         if (
-            self.manifest_digest != self.manifest.fingerprint
+            self.authority_kind != self.manifest.authority_kind
+            or self.manifest_digest != self.manifest.fingerprint
             or self.project_id != self.manifest.profile.project_id
             or self.canonical_root != self.manifest.profile.canonical_root
             or self.expires_at_ms < self.created_at_ms
@@ -46,7 +47,8 @@ class FreshExecutionView(_Model):
     @classmethod
     def from_record(cls, record: AuthorityRecord) -> Self:
         return cls.model_validate(
-            {
+            {"authority_kind": record.manifest.authority_kind}
+            | {
                 name: getattr(record, name)
                 for name in (
                     "proposal_id",

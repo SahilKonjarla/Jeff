@@ -14,7 +14,11 @@ from pydantic import (
     model_validator,
 )
 
-from jeff.application.execution import DockerBackendConfiguration, ExecutionSettings
+from jeff.application.execution import (
+    DockerBackendConfiguration,
+    ExecutionSettings,
+    GuardedDockerBackendConfiguration,
+)
 from jeff.application.history import (
     ActivityCode,
     ActivityEvent,
@@ -140,7 +144,30 @@ class ConfiguredRuntimeSettings(_StorageModel):
         return self
 
 
-LoadedRuntimeSettings = RuntimeSettings | ConfiguredRuntimeSettings
+class GuardedRuntimeSettings(ConfiguredRuntimeSettings):
+    """Settings4 requires explicit guarded backend policy; schema1/2/3 stay unchanged."""
+
+    schema_version: StrictInt = Field(ge=4, le=4)
+    backend: GuardedDockerBackendConfiguration | None = None
+
+    @model_validator(mode="after")
+    def guarded_profiles(self) -> Self:
+        if self.backend is not None:
+            for declaration in self.backend.declarations:
+                # Validate timing/platform against each original profile before any I/O.
+                from jeff.application.execution import ExecutionManifest, PreparedInputs
+
+                self.backend.guard.wrap(
+                    ExecutionManifest(
+                        profile=declaration.profile,
+                        argv=(declaration.profile.executable,),
+                        inputs=PreparedInputs(),
+                    )
+                )
+        return self
+
+
+LoadedRuntimeSettings = RuntimeSettings | ConfiguredRuntimeSettings | GuardedRuntimeSettings
 
 # Absent installations remain opt-out and keep the exact settings2 defaults.
 DEFAULT_SETTINGS = RuntimeSettings(schema_version=2, history=HistorySettings(retention_days=30))

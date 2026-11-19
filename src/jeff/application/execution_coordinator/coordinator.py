@@ -30,6 +30,7 @@ from jeff.application.execution import (
     ExecutionStopStore,
     FreshExecutionCall,
     FreshExecutionReply,
+    GuardExecutionVerifier,
     PreparedInputPreparer,
     PreparedInputVerifier,
     ProposalLookupStore,
@@ -67,6 +68,8 @@ class ExecutionCoordinator:
         inspection: ExecutionResultReader | None = None,
         listing: ExecutionListReader | None = None,
         stop_store: ExecutionStopStore | None = None,
+        guards: GuardExecutionVerifier | None = None,
+        require_guard: bool = False,
     ) -> None:
         self.projects, self.registry, self.authority = (projects, registry, authority)
         self.preparer, self.inputs, self.verifier = (preparer, inputs, verifier)
@@ -77,6 +80,7 @@ class ExecutionCoordinator:
         self.listing = listing
         self._mutex = threading.Lock()
         self.stop_store = stop_store
+        self.guards, self.require_guard = guards, require_guard
         self._control_mutex = threading.Lock()
         self._live: ExecutionStopSignal | None = None
         self._shutdown_deadline: float | None = None

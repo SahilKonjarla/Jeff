@@ -9,8 +9,8 @@ from jeff.application.execution import (
     AuthorityOperation,
     AuthorityRecord,
     AuthorityResult,
-    ExecutionManifest,
     ReviewFault,
+    decode_execution_action,
 )
 from jeff.application.storage import StorageFault
 from jeff.domain.execution import (
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 def _authority_record(row: tuple[object, ...]) -> AuthorityRecord:
     values = dict(zip(_AUTHORITY_COLUMNS.split(","), row, strict=True))
-    values["manifest"] = ExecutionManifest.model_validate_json(str(values.pop("manifest_json")))
+    values["manifest"] = decode_execution_action(str(values.pop("manifest_json")))
     return AuthorityRecord.model_validate(values)
 
 

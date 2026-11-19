@@ -6,7 +6,7 @@ import runpy
 from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
-from typing import get_type_hints
+from typing import cast, get_type_hints
 
 import pytest
 
@@ -34,8 +34,24 @@ def _interfaces() -> dict[str, object]:
     }
 
 
-def test_original_factory_and_child_interfaces_remain_identical() -> None:
-    assert _digest(_interfaces()) == INTERFACE_DIGEST
+def test_only_internal_guard_factory_parameters_extend_original_interfaces() -> None:
+    interfaces = _interfaces()
+    assert _digest(interfaces) == "c4d48bd0fc6d289d5ff2321884551be937b8622210a1bb64c1fa9147f62f9aef"
+    original = cast(dict[str, object], interfaces["create_internal_execution"])
+    signature = inspect.signature(runtime.create_internal_execution)
+    for name, default in (("guard_policy", None), ("require_guard", False)):
+        assert signature.parameters[name].default is default
+        cast(dict[str, str], original["hints"]).pop(name)
+    original["signature"] = str(
+        signature.replace(
+            parameters=[
+                p
+                for name, p in signature.parameters.items()
+                if name not in {"guard_policy", "require_guard"}
+            ]
+        )
+    )
+    assert _digest(interfaces) == INTERFACE_DIGEST
 
 
 def test_client_factories_keep_location_selection_lazy_and_root_patchable(

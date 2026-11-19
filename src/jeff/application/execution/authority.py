@@ -10,7 +10,7 @@ from jeff.domain.execution import AuthorityState
 
 from ._model import _Model, absolute_path
 from .docker_faults import DockerBackendFault
-from .manifests import ExecutionManifest
+from .guard_execution import ExecutionAction
 from .review_models import ReviewFault
 
 
@@ -44,7 +44,7 @@ class AuthorityOperation(_Model):
     canonical_root: Path
     owner_instance_id: UUID
     approval_id: UUID | None = None
-    manifest: ExecutionManifest | None = None
+    manifest: ExecutionAction | None = None
     current_manifest_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("canonical_root")
@@ -72,7 +72,7 @@ class AuthorityRecord(_Model):
     project_id: UUID
     canonical_root: Path
     owner_instance_id: UUID
-    manifest: ExecutionManifest
+    manifest: ExecutionAction
     manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     state: AuthorityState
     created_at_ms: StrictInt = Field(ge=0)

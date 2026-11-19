@@ -15,9 +15,34 @@ from pydantic import BaseModel
 from jeff.application import execution
 from jeff.domain.execution import AuthorityState, fingerprint
 
-# Fresh list request/page/reader scopes extend schemas; persisted facts remain unchanged.
-SCHEMA_DIGEST = "77950bae8bb87158bd506e945c24d4a79f661cd4a442cb1c0c0f9d854f5342b9"
+# Wire14 intentionally admits distinct guarded authority/projections and settings4 policy.
+# Wire13 schema pin (historical): 77950bae8bb87158bd506e945c24d4a79f661cd4a442cb1c0c0f9d854f5342b9.
+# Original serialized facts below MUST remain byte-for-byte unchanged.
+SCHEMA_DIGEST = "183ddabf359ea63866ff56c8ed6b5c4a906aaf2ced9c31cc591ec9b8987a1738"
 FACTS_DIGEST = "420777cfd00a528e39fc76893005ea6780d76c507513ca8c5c9e6cd7a783dbfa"
+# Non-executable guard drafts are separate; preserve the entire old schema/fact snapshots.
+GUARD_SCHEMAS = {
+    "GuardArtifact",
+    "GuardedExecutionDraft",
+    "GuardChallenge",
+    "GuardAuthorize",
+    "GuardAbort",
+}
+GUARD_SCHEMA_DIGEST = "53337a1b4a4a6a6f182b4a3e36be96cf733debb87f169aa20a1dcf7378f6d107"
+# JFG2 formats stay isolated from both permanently frozen older schema sets.
+GUARD_V2_SCHEMAS = {
+    "GuardedExecutionManifest",
+    "GuardExecutionArtifact",
+    "GuardV2Challenge",
+    "GuardV2Authorize",
+    "GuardV2Abort",
+    "GuardV2Dispatch",
+    "GuardV2Stderr",
+    "GuardV2Terminal",
+}
+# Admission docstrings now describe the implemented verifier rather than rejecting all authority.
+# Contracts-only historical pin: 71595d3441b96a4eb0051ee57051ecb848f0810c07404d5cee93645702ebe81b.
+GUARD_V2_SCHEMA_DIGEST = "ea21c20b737f818d61477697dd18edf670a4afad5d266c928e5029716a7939b5"
 
 
 def _schemas() -> dict[str, object]:
@@ -167,7 +192,24 @@ def _facts() -> dict[str, object]:
 
 
 def test_model_schemas_preserve_original_contracts() -> None:
-    assert _digest(_schemas()) == SCHEMA_DIGEST
+    schemas = _schemas()
+    assert GUARD_SCHEMAS <= schemas.keys()
+    assert GUARD_V2_SCHEMAS <= schemas.keys()
+    assert GUARD_SCHEMAS.isdisjoint(GUARD_V2_SCHEMAS)
+    assert (
+        _digest(
+            {
+                key: value
+                for key, value in schemas.items()
+                if key not in GUARD_SCHEMAS | GUARD_V2_SCHEMAS
+            }
+        )
+        == SCHEMA_DIGEST
+    )
+    assert _digest({key: schemas[key] for key in sorted(GUARD_SCHEMAS)}) == GUARD_SCHEMA_DIGEST
+    assert (
+        _digest({key: schemas[key] for key in sorted(GUARD_V2_SCHEMAS)}) == GUARD_V2_SCHEMA_DIGEST
+    )
 
 
 def test_serialization_and_persisted_fingerprints_preserve_original_facts() -> None:

@@ -12,6 +12,7 @@ from jeff.application.execution import (
     DockerOwnedContainer,
     DockerTargetDeclaration,
     ExecutionStopSignal,
+    GuardedExecutionManifest,
 )
 
 from .policy import _mapping
@@ -29,6 +30,12 @@ def run(
     cleanup_deadline: float,
     stop: ExecutionStopSignal | None = None,
 ) -> DockerJobOutcome:
+    if isinstance(handle.intent.record.manifest, GuardedExecutionManifest):
+        from .guard_run import run_guarded
+
+        return run_guarded(
+            self, handle, sink, deadline=deadline, cleanup_deadline=cleanup_deadline, stop=stop
+        )
     with self._operation():
         deadline = min(
             deadline, time.monotonic() + handle.intent.record.manifest.profile.timeout_seconds

@@ -3,7 +3,12 @@
 import time
 from typing import TYPE_CHECKING
 
-from jeff.application.execution import CancellableDockerBackend, DockerBackendFault
+from jeff.application.execution import (
+    CancellableDockerBackend,
+    DockerBackendFault,
+    GuardedDockerBackend,
+    GuardedExecutionManifest,
+)
 
 from .policy import _mapping
 from .session import _Session
@@ -20,6 +25,8 @@ def _cleanup(
     grace_deadline: float | None = None,
 ) -> bool:
     handle, intent = session.handle, session.handle.intent
+    if session.guard_uncertain:
+        return False  # Genuine captures remain observe-only; no endpoint commands or input closure.
     if session.removed:
         return True  # Confirmed prior removal is a fact, never a repeated mutation.
     try:
@@ -54,6 +61,9 @@ def _cleanup(
                         )
                 except Exception:
                     self._unknown(intent, deadline, handle)
+                    if isinstance(intent.record.manifest, GuardedExecutionManifest):
+                        session.guard_uncertain = True
+                        return False
             raw = self._read(intent, handle.container_id, deadline, handle.created_at)
             if _mapping(raw.get("State")).get("Running") is True:
                 if not session.kill_attempted:
@@ -64,6 +74,9 @@ def _cleanup(
                         )
                     except Exception:
                         self._unknown(intent, deadline, handle)
+                        if isinstance(intent.record.manifest, GuardedExecutionManifest):
+                            session.guard_uncertain = True
+                            return False
                 raw = self._read(intent, handle.container_id, deadline, handle.created_at)
         if _mapping(raw.get("State")).get("Running") is not False:
             raise DockerBackendFault("docker_cleanup_unconfirmed")
@@ -91,7 +104,16 @@ def _cleanup(
         except DockerBackendFault:
             # Keep durable uncertainty as well as memory quarantine when time remains.
             self._unknown(intent, deadline, handle)
+        if isinstance(intent.record.manifest, GuardedExecutionManifest):
+            if not isinstance(
+                self.backend, GuardedDockerBackend
+            ) or not self.backend.release_guarded(handle, deadline=deadline):
+                session.guard_uncertain = True
+                self._unknown(intent, deadline, handle)
+                return False
         return True
     except Exception:
+        if isinstance(intent.record.manifest, GuardedExecutionManifest):
+            session.guard_uncertain = True
         self._unknown(intent, deadline, handle)
         return False

@@ -12,6 +12,8 @@ from .admission import ExecutionAdmission
 from .authority import AuthorityOperation, AuthorityRecord, AuthorityResult, ProposalRequestScope
 from .completion import DockerCompletion, DockerExecutionResult
 from .docker_target import DockerCLIIdentity, DockerTargetDeclaration, VerifiedDockerTarget
+from .guard_execution import GuardedExecutionManifest
+from .guard_protocol_v2 import GuardV2Terminal
 from .inspection import ExecutionInspection
 from .launch import DockerLaunchEvent, DockerLaunchIntent, DockerOwnedContainer
 from .manifests import ExecutionManifest
@@ -128,6 +130,27 @@ class DockerExecutionController(Protocol):
         deadline: float,
     ) -> DockerExecutionResult: ...
     def terminate_remove_owned(self, handle: DockerOwnedContainer, *, deadline: float) -> bool: ...
+
+
+class GuardExecutionVerifier(Protocol):
+    def prepare(
+        self, original: ExecutionManifest, *, deadline: float
+    ) -> GuardedExecutionManifest: ...
+    def check(self, action: GuardedExecutionManifest, *, deadline: float) -> None: ...
+
+
+@runtime_checkable
+class GuardedDockerBackend(Protocol):
+    def attach_guarded(
+        self,
+        handle: DockerOwnedContainer,
+        sink: DockerOutputSink,
+        stop: ExecutionStopSignal | None,
+        observe_running: Callable[[], None] | None,
+        *,
+        deadline: float,
+    ) -> tuple[int, GuardV2Terminal]: ...
+    def release_guarded(self, handle: DockerOwnedContainer, *, deadline: float) -> bool: ...
 
 
 class DockerLifecycleBackend(Protocol):

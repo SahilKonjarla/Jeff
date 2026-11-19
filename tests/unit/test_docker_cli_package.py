@@ -122,8 +122,16 @@ def test_metadata_serialization_fingerprints_and_failure_facts_stay_identical() 
     assert _digest(_metadata()) == METADATA_DIGEST
 
 
-def test_reader_transport_and_verifier_interfaces_stay_identical() -> None:
-    assert _digest(_signatures()) == SIGNATURE_DIGEST
+def test_only_guard_attachment_and_owned_capture_state_extend_interfaces() -> None:
+    signatures = _signatures()
+    assert _digest(signatures) == "0176a0f55bc745851150fc93f38251e5151836f180d817bf8de80d6d944eda62"
+    additions = {
+        "DockerLifecycleCLI.__init__",
+        "DockerLifecycleCLI.attach_guarded",
+        "DockerLifecycleCLI.release_guarded",
+    }
+    assert additions <= signatures.keys()
+    assert _digest({k: v for k, v in signatures.items() if k not in additions}) == SIGNATURE_DIGEST
 
 
 def test_namespace_subprocess_hook_reaches_both_captured_process_paths(
