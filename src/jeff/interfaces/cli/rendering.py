@@ -1,6 +1,7 @@
 """Render typed CLI results without selecting clients or runtime state."""
 
 import json
+from uuid import UUID
 
 import typer
 
@@ -132,6 +133,18 @@ def render(
         raise typer.Exit(code=1)
 
 
+def _unknown_execution_guidance(approval_id: UUID | None = None) -> None:
+    identifier = str(approval_id) if approval_id is not None else "APPROVAL_ID"
+    typer.echo("Recovery: inspect original facts in the same installation and registered project:")
+    typer.echo(f"  jeff execution show {identifier} --json")
+    typer.echo(f"  jeff execution logs {identifier} --json")
+    typer.echo(
+        "Missing logs do not prove nonexecution or cleanup. Do not retry, reset or adopt "
+        "unknown work; preserve original IDs and seek separately authorized review. "
+        "Restart/log expiry does not clear unknown-claim quarantine."
+    )
+
+
 def render_cancellation(reply: ExecutionCancelReply, json_output: bool) -> None:
     """Keep stop-intent acceptance distinct from confirmed termination."""
     if json_output:
@@ -145,6 +158,8 @@ def render_cancellation(reply: ExecutionCancelReply, json_output: bool) -> None:
             f"cleanup: {reply.stop.cleanup_verified}; logs: {reply.stop.payload_state}"
         )
         typer.echo("Intent acceptance is not termination or complete-output confirmation.")
+        if reply.stop.outcome == "unknown":
+            _unknown_execution_guidance(reply.approval_id)
     if not reply.ok:
         raise typer.Exit(code=1)
 
@@ -167,6 +182,8 @@ def render_execution(
         if reply.page.next_after is not None:
             typer.echo(f"Next --after: {reply.page.next_after}")
         typer.echo("Discovery only; inspect the exact manifest before any decision.")
+        if any(item.claim_state == "unknown" for item in reply.page.items):
+            _unknown_execution_guidance()
     elif reply.admission is not None:
         typer.echo(
             f"Job: {reply.admission.job_id}\nClaim: {reply.admission.claim_state}; "
@@ -204,6 +221,8 @@ def render_execution(
                 f"exit: {reply.completion.outcome.exit_code}; "
                 f"text: {reply.completion.payload_state}"
             )
+        if view.claim_state == "unknown":
+            _unknown_execution_guidance(view.approval_id)
         if reply.output is not None:
             typer.echo(reply.output.stdout, nl=False)
             typer.echo(reply.output.stderr, nl=False, err=True)

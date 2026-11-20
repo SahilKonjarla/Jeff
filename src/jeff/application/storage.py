@@ -153,7 +153,16 @@ class GuardedRuntimeSettings(ConfiguredRuntimeSettings):
     @model_validator(mode="after")
     def guarded_profiles(self) -> Self:
         if self.backend is not None:
+            profiles = {(p.project_id, p.name): p for p in self.execution.profiles}
             for declaration in self.backend.declarations:
+                configured = profiles[(declaration.profile.project_id, declaration.profile.name)]
+                if any(
+                    "environment" not in p.model_fields_set or p.environment != "development"
+                    for p in (configured, declaration.profile)
+                ):
+                    raise ValueError(
+                        "Execution targets require explicit development classification."
+                    )
                 # Validate timing/platform against each original profile before any I/O.
                 from jeff.application.execution import ExecutionManifest, PreparedInputs
 

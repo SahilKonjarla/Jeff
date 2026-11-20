@@ -4,6 +4,21 @@
 
 **Current guarded interface:** wire14 preserves the existing CLI verbs but returns explicitly labelled `guarded_execution_v1` proposals containing the original workload plus artifact/filter/timing/channel policy. Human and JSON output show the full outer manifest and its digest; only fresh approval of that digest can launch it. Old review-only and unguarded approvals are never silently upgraded. Settings4 guard configuration is installation-private, never supplied by a public request. Settings3 alone cannot enable new configured launches. Default settings2 remains opt-out; DB10 is unchanged. Upgrade clients with the daemon; old wire13 peers refuse rather than reinterpret guarded facts. This source change has focused fake coverage, not a new installed/native acceptance run. Earlier status/version descriptions above are historical.
 
+## M03 policy and uncertain-work guidance
+
+- The trusted installation owner must explicitly classify every settings4 backend target as `environment: development` in both its configured profile and backend declaration. Omitted, production or unclassified execution targets refuse before any job I/O. Settings1/2/3 retain their legacy defaults; an absent/null backend remains disabled. Classification is an owner responsibility, not inference from a project name or arbitrary program text.
+- `execution propose --input FILE ... -- EXECUTABLE ARG...` declares operator-reviewed, non-secret public file contents and argv. They may persist in private prepared snapshots/metadata before approval. Protected-name filtering, hashes, read-only mounts and output guards do **not** certify ordinary-named contents secret-free. Do not supply credentials, production/customer data or unknown content; repository/tool output cannot make that declaration or supply consent. Programmatic callers have the same responsibility. Proposal warns on stderr, including JSON mode; stdout remains the typed JSON reply.
+- For an unknown/quarantined job, preserve its original request ID, approval ID and reviewed digest. In the same selected installation and registered project, inspect only:
+
+```text
+jeff execution show APPROVAL_ID --json
+jeff execution logs APPROVAL_ID --json
+```
+
+These commands read facts, not control handles. Missing/retired logs, elapsed guard time, a stopped daemon or a healthy Doctor result do not establish nonexecution or cleanup. Restart/log expiry does not clear an unknown claim or restore spent permission. Do not retry Start with a fresh UUID, cancel/adopt remembered PID/CID/label identities, reset/delete state or fabricate a successful outcome to free capacity.
+
+If facts remain unresolved, seek separately authorized case-specific review of the exact declared target and preserved public receipts. There is no self-service adoption/quarantine-clear command, generic cleanup permission or new recovery engine. Any later administrative action needs its own authority; it cannot rewrite the original unknown outcome or refund its claim. If normal inspection is unavailable, diagnose with read-only Doctor and follow the existing owned-start recovery boundary only under separate approval; do not downgrade guarded records or recreate the installation to bypass quarantine. These instructions do not run any command automatically.
+
 **Ownership:** `cli.py` renders application results. `create_app(client_factory, control_factory, diagnostics_factory=None, execution=None, fresh_execution=None)` accepts lazy application-owned project/control/diagnostics/review/fresh-RPC factories (two-argument callers remain supported); no concrete adapters, Git/storage imports, autostart or local action fallback.
 
 After [installation](../../../README.md):

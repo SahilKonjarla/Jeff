@@ -77,6 +77,13 @@ def register(
             call = FreshExecutionCall.model_validate(
                 {"directory": Path.cwd(), "request_id": uuid4(), "operation": operation, **values}
             )
+            if operation == "propose":
+                typer.echo(
+                    "Development-only: declare only arguments and files you reviewed as "
+                    "non-secret public data; argv and copied inputs may persist. "
+                    "Filename filtering, hashing and output guards are not secret certification.",
+                    err=True,
+                )
             if operation in {"propose", "approve", "deny", "start"}:
                 typer.echo(f"Request: {call.request_id}", err=True)
             reply = (
@@ -107,7 +114,7 @@ def register(
             list[str] | None,
             typer.Option(
                 "--input",
-                help="Repeated literal project-relative file; no glob/directory expansion.",
+                help="Operator-reviewed non-secret public file; no glob/directory expansion.",
             ),
         ] = None,
         request_id: Annotated[UUID | None, typer.Option("--request-id")] = None,

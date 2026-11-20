@@ -69,6 +69,34 @@ def test_settings4_requires_explicit_guard_and_preserves_settings3(
     )
     parsed = parse_settings(json.dumps(data).encode())
     assert isinstance(parsed, GuardedRuntimeSettings) and parsed.backend == backend
+    for location in ("configured", "declaration", "both"):
+        unclassified = json.loads(json.dumps(data))
+        if location in ("configured", "both"):
+            unclassified["execution"]["profiles"][0].pop("environment")
+        if location in ("declaration", "both"):
+            unclassified["backend"]["declarations"][0]["profile"].pop("environment")
+        with pytest.raises(StorageFault) as rejected:
+            parse_settings(json.dumps(unclassified).encode())
+        assert rejected.value.code == "settings_invalid"
+    disabled = json.loads(json.dumps(data))
+    disabled["execution"]["profiles"][0].pop("environment")
+    disabled["backend"] = None
+    disabled_settings = parse_settings(json.dumps(disabled).encode())
+    assert (
+        isinstance(disabled_settings, GuardedRuntimeSettings) and disabled_settings.backend is None
+    )
+    legacy = json.loads(json.dumps(data))
+    legacy["schema_version"] = 3
+    legacy["backend"].pop("guard")
+    legacy["execution"]["profiles"][0].pop("environment")
+    legacy["backend"]["declarations"][0]["profile"].pop("environment")
+    assert parse_settings(json.dumps(legacy).encode()).schema_version == 3
+    for classification in ("production", "unclassified", ""):
+        forbidden = json.loads(json.dumps(data))
+        forbidden["execution"]["profiles"][0]["environment"] = classification
+        forbidden["backend"]["declarations"][0]["profile"]["environment"] = classification
+        with pytest.raises(StorageFault):
+            parse_settings(json.dumps(forbidden).encode())
     for bad in (
         data | {"schema_version": 3},
         data
@@ -76,6 +104,19 @@ def test_settings4_requires_explicit_guard_and_preserves_settings3(
     ):
         with pytest.raises(StorageFault):
             parse_settings(json.dumps(bad).encode())
+    from jeff.application.execution import ExecutionSettings
+
+    bad_profile = profile.model_copy(update={"environment": "production"})
+    bad_backend = backend.model_copy(
+        update={"declarations": (DockerTargetDeclaration.model_construct(profile=bad_profile),)}
+    )
+    with pytest.raises(ValidationError):
+        GuardedRuntimeSettings(
+            schema_version=4,
+            history=parsed.history,
+            execution=ExecutionSettings(profiles=(bad_profile,)),
+            backend=bad_backend,
+        )
     with pytest.raises(ValidationError):
         GuardExecutionPolicy.model_validate(dict(artifacts=[guarded.artifact.model_dump()]))
 

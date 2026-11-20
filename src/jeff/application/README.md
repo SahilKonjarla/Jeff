@@ -10,6 +10,14 @@ Fresh configured execution now requires settings4 with `GuardedDockerBackendConf
 
 The existing claim/worker/controller/journal/result paths remain authoritative. Workload exit124 is not timeout; a validated guard deadline uses the existing durable timeout path. Guard faults and absent/invalid/partial status remain unknown, with genuine captured pipes retained observe-only and no automatic stop/remove/retry. This is source integration, not a new installed/native acceptance or M03 completion. The standalone sections below are historical checkpoints.
 
+## M03 policy/recovery outcomes — no new recovery subsystem
+
+Settings4 backend targets require explicit `environment: development` on both the configured profile and matching declaration, including preconstructed model values. Missing classification cannot silently inherit the legacy profile default into executable configuration; production/unclassified values refuse. Settings1/2/3, disabled backend behavior, old manifests and facts remain unchanged. Trusted installation owners classify targets; the product does not claim arbitrary destructive-intent recognition.
+
+Selected files/argv are declarations of operator-reviewed public, non-secret content, not content certification. Literal protected-name exclusion and byte hashes enforce the declared view/integrity, not universal secret discovery. CLI proposal now makes that responsibility and private persistence visible. Direct application clients share this contract.
+
+Existing unknown/restart/quarantine/no-replay state transitions remain intact. Public uncertainty errors and human inspection provide original-ID `execution show`/`execution logs` guidance, preserve missing-log uncertainty and prohibit retry/reset/adoption. Historical reads never transfer mutation authority, and restarting or expiring text does not clear unknown claims. No adoption, quarantine-release or generic admin recovery API was added; unresolved cases require separately authorized evidence review rather than fabricated completion. See [operator guidance](../interfaces/README.md#m03-policy-and-uncertain-work-guidance). Wire14/DB10/settings4/default2 remain unchanged by this slice.
+
 ## Standalone guard — source contract only (historical JFG1)
 
 The subsequent [C-source/compile-only checkpoint](../infrastructure/README.md#standalone-guard--c-source-and-compile-only-checkpoint) does not activate these drafts or change existing application/Python behavior. It adds no verified clock/transport/kernel capability or public route.

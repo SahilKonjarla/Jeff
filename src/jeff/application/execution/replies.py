@@ -177,10 +177,16 @@ def fresh_execution_failure(code: str) -> Failure:
         "execution_expired": "Approval expired or was invalidated; a fresh review is required.",
         "execution_not_found": "No fresh execution record exists in this validated scope.",
         "request_outcome_unknown": (
-            "Request outcome is unconfirmed; inspect original facts before another action."
+            "Request outcome is unconfirmed. Preserve original request/approval IDs; use "
+            "execution show APPROVAL_ID --json and execution logs APPROVAL_ID --json in the "
+            "same installation/registered project. Do not retry, reset or adopt unknown work; "
+            "seek separately authorized review. Missing logs do not prove nonexecution."
         ),
         "execution_unconfirmed": (
-            "Fresh execution facts or outcome are unconfirmed; inspect before further action."
+            "Execution is unconfirmed. Preserve original IDs; inspect execution show APPROVAL_ID "
+            "--json and execution logs APPROVAL_ID --json in the same installation/registered "
+            "project. Do not retry, reset or adopt unknown work. Unknown-claim quarantine is not "
+            "cleared by restart or log expiry; seek separately authorized review."
         ),
     }
     aliases = {
