@@ -136,7 +136,7 @@ with owner:
         )
         store.start()
         try:
-            assert store.wait_ready(5).schema_version == 4
+            assert store.wait_ready(5).schema_version == 10
             assert store.lookup(project) == project
             page = store.history(
                 HistoryRead(project_id=project_id, canonical_root=project.root),
@@ -221,7 +221,7 @@ with owner:
         store = SQLiteStorage(owner, instance_id=instance, retention_clock=lambda: clock)
         store.start()
         try:
-            assert store.wait_ready(5).schema_version == 4
+            assert store.wait_ready(5).schema_version == 10
             read = HistoryRead(project_id=project_id, canonical_root=project.root)
             before = store.history(read, deadline=time.monotonic() + 5)
             assert before.high_water == 0 and not before.items
