@@ -31,13 +31,20 @@ GUARD_V2_HEADER_BYTES = _HEADER.size
 GUARD_V2_STDERR_BYTES = 4096
 GUARD_V2_MAX_FRAME_BYTES = GUARD_V2_HEADER_BYTES + GUARD_V2_STDERR_BYTES
 GuardV2Cause = Literal["workload_exit", "workload_signal", "deadline_expired", "guard_fault"]
-GuardV2Fault = Literal["clock_regression", "startup_refused", "exec_failed", "transport_lost",
-                       "internal_error"]
+GuardV2Fault = Literal[
+    "clock_regression", "startup_refused", "exec_failed", "transport_lost", "internal_error"
+]
 _CAUSES: dict[GuardV2Cause, int] = {
-    "workload_exit": 1, "workload_signal": 2, "deadline_expired": 3, "guard_fault": 4,
+    "workload_exit": 1,
+    "workload_signal": 2,
+    "deadline_expired": 3,
+    "guard_fault": 4,
 }
 _FAULTS: dict[GuardV2Fault, int] = {
-    "clock_regression": 1, "startup_refused": 2, "exec_failed": 3, "transport_lost": 4,
+    "clock_regression": 1,
+    "startup_refused": 2,
+    "exec_failed": 3,
+    "transport_lost": 4,
     "internal_error": 5,
 }
 
@@ -109,9 +116,11 @@ class GuardV2Terminal(_Observation):
 
     @model_validator(mode="after")
     def precise(self) -> Self:
-        if ((self.exit_code is not None) != (self.cause == "workload_exit")
+        if (
+            (self.exit_code is not None) != (self.cause == "workload_exit")
             or (self.signal_number is not None) != (self.cause == "workload_signal")
-            or (self.fault is not None) != (self.cause == "guard_fault")):
+            or (self.fault is not None) != (self.cause == "guard_fault")
+        ):
             raise ValueError("Terminal cause and detail disagree.")
         return self
 
@@ -120,8 +129,14 @@ class GuardV2Terminal(_Observation):
         return self.stderr_eof and not self.stderr_dropped
 
 
-GuardV2Frame = (GuardV2Challenge | GuardV2Authorize | GuardV2Abort | GuardV2Dispatch
-                | GuardV2Stderr | GuardV2Terminal)
+GuardV2Frame = (
+    GuardV2Challenge
+    | GuardV2Authorize
+    | GuardV2Abort
+    | GuardV2Dispatch
+    | GuardV2Stderr
+    | GuardV2Terminal
+)
 
 
 def guard_v2_frame_size(header: bytes) -> int:
@@ -163,21 +178,30 @@ def encode_guard_v2_frame(frame: GuardV2Frame) -> bytes:
             detail = frame.exit_code if frame.exit_code is not None else frame.signal_number
             if frame.fault is not None:
                 detail = _FAULTS[frame.fault]
-            payload = struct.pack("!BBH", _CAUSES[frame.cause],
-                                  int(frame.stderr_eof) | (int(frame.stderr_dropped) << 1),
-                                  detail if detail is not None else 0)
+            payload = struct.pack(
+                "!BBH",
+                _CAUSES[frame.cause],
+                int(frame.stderr_eof) | (int(frame.stderr_dropped) << 1),
+                detail if detail is not None else 0,
+            )
             operation, words = 6, (frame.sequence, frame.observed_ns, 4)
         else:
             raise ValueError
-        return _HEADER.pack(b"JFG2", operation, frame.nonce.bytes,
-                            bytes.fromhex(frame.manifest_digest), *words) + payload
+        return (
+            _HEADER.pack(
+                b"JFG2", operation, frame.nonce.bytes, bytes.fromhex(frame.manifest_digest), *words
+            )
+            + payload
+        )
     except (ValueError, TypeError, AttributeError, struct.error):
         raise GuardV2ProtocolFault("Invalid JFG2 protocol input.") from None
 
 
 def decode_guard_v2_frame(data: bytes) -> GuardV2Frame:
-    if (type(data) is not bytes
-        or not GUARD_V2_HEADER_BYTES <= len(data) <= GUARD_V2_MAX_FRAME_BYTES):
+    if (
+        type(data) is not bytes
+        or not GUARD_V2_HEADER_BYTES <= len(data) <= GUARD_V2_MAX_FRAME_BYTES
+    ):
         raise GuardV2ProtocolFault("Invalid JFG2 protocol input.")
     try:
         if len(data) != guard_v2_frame_size(data[:GUARD_V2_HEADER_BYTES]):
@@ -185,19 +209,25 @@ def decode_guard_v2_frame(data: bytes) -> GuardV2Frame:
         _, operation, nonce, digest, first, second, third = _HEADER.unpack(data[:77])
         identity = UUID(bytes=nonce)
         if operation == 1:
-            return GuardV2Challenge(nonce=identity, manifest_digest=digest.hex(),
-                                    issued_ns=first, startup_deadline_ns=second,
-                                    max_runtime_ns=third)
+            return GuardV2Challenge(
+                nonce=identity,
+                manifest_digest=digest.hex(),
+                issued_ns=first,
+                startup_deadline_ns=second,
+                max_runtime_ns=third,
+            )
         if operation == 2 and second == third == 0:
             return GuardV2Authorize(nonce=identity, manifest_digest=digest.hex(), deadline_ns=first)
         if operation == 3 and first == second == third == 0:
             return GuardV2Abort(nonce=identity, manifest_digest=digest.hex())
         if operation == 4 and third == 0:
-            return GuardV2Dispatch(nonce=identity, manifest_digest=digest.hex(),
-                                  sequence=first, observed_ns=second)
+            return GuardV2Dispatch(
+                nonce=identity, manifest_digest=digest.hex(), sequence=first, observed_ns=second
+            )
         if operation == 5:
-            return GuardV2Stderr(nonce=identity, manifest_digest=digest.hex(),
-                                sequence=first, data=data[77:])
+            return GuardV2Stderr(
+                nonce=identity, manifest_digest=digest.hex(), sequence=first, data=data[77:]
+            )
         if operation != 6:
             raise ValueError
         cause, flags, detail = struct.unpack("!BBH", data[77:])
@@ -210,12 +240,16 @@ def decode_guard_v2_frame(data: bytes) -> GuardV2Frame:
         if cause_name == "deadline_expired" and detail:
             raise ValueError
         return GuardV2Terminal(
-            nonce=UUID(bytes=nonce), manifest_digest=digest.hex(), sequence=first,
-            observed_ns=second, cause=cause_name,
+            nonce=UUID(bytes=nonce),
+            manifest_digest=digest.hex(),
+            sequence=first,
+            observed_ns=second,
+            cause=cause_name,
             exit_code=detail if cause_name == "workload_exit" else None,
             signal_number=detail if cause_name == "workload_signal" else None,
             fault=fault if cause_name == "guard_fault" else None,
-            stderr_eof=bool(flags & 1), stderr_dropped=bool(flags & 2),
+            stderr_eof=bool(flags & 1),
+            stderr_dropped=bool(flags & 2),
         )
     except (ValueError, TypeError, struct.error):
         raise GuardV2ProtocolFault("Invalid JFG2 protocol input.") from None

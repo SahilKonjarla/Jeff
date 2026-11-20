@@ -21,8 +21,14 @@ from .guard_protocol_v2 import (
     guard_v2_frame_size,
 )
 
-GuardV2State = Literal["parked", "authorization_prepared", "dispatch_candidate",
-                       "terminal_candidate", "complete_candidate", "unknown"]
+GuardV2State = Literal[
+    "parked",
+    "authorization_prepared",
+    "dispatch_candidate",
+    "terminal_candidate",
+    "complete_candidate",
+    "unknown",
+]
 _MAX = 9223372036854775807
 
 
@@ -37,11 +43,13 @@ class GuardV2Session:
     def __init__(self, manifest: GuardedExecutionManifest, challenge: GuardV2Challenge) -> None:
         self._manifest = GuardedExecutionManifest.model_validate(manifest.model_dump())
         self._challenge = GuardV2Challenge.model_validate(challenge.model_dump())
-        if (self.challenge.manifest_digest != self.manifest.fingerprint
+        if (
+            self.challenge.manifest_digest != self.manifest.fingerprint
             or self.challenge.startup_deadline_ns - self.challenge.issued_ns
             != self.manifest.startup_wait_ns
             or self.challenge.max_runtime_ns
-            != self.manifest.original.profile.timeout_seconds * 1000000000):
+            != self.manifest.original.profile.timeout_seconds * 1000000000
+        ):
             raise GuardV2ProtocolFault("Invalid JFG2 session input.")
         self._state: GuardV2State = "parked"
         self._deadline: int | None = None
@@ -107,8 +115,11 @@ class GuardV2Session:
         if deadline > _MAX:
             self._fail()
         self._deadline, self._state = deadline, "authorization_prepared"
-        return GuardV2Authorize(nonce=self.challenge.nonce,
-                                manifest_digest=self.manifest.fingerprint, deadline_ns=deadline)
+        return GuardV2Authorize(
+            nonce=self.challenge.nonce,
+            manifest_digest=self.manifest.fingerprint,
+            deadline_ns=deadline,
+        )
 
     def accept_stdout(self, data: bytes) -> bytes:
         """Raw workload stdout never enters the trusted-status parser or advances state."""
@@ -123,8 +134,11 @@ class GuardV2Session:
         per call. No raw/control bytes are retained as user output. Caller must
         separately establish channel provenance; this method cannot do so.
         """
-        if (self._state in ("parked", "unknown", "complete_candidate", "terminal_candidate")
-            or type(data) is not bytes or not 0 < len(data) <= GUARD_V2_STDERR_BYTES):
+        if (
+            self._state in ("parked", "unknown", "complete_candidate", "terminal_candidate")
+            or type(data) is not bytes
+            or not 0 < len(data) <= GUARD_V2_STDERR_BYTES
+        ):
             self._fail()
         self._buffer.extend(data)
         output: list[bytes] = []
@@ -135,11 +149,13 @@ class GuardV2Session:
                     break
                 frame = decode_guard_v2_frame(bytes(self._buffer[:size]))
                 del self._buffer[:size]
-                if (not isinstance(frame, (GuardV2Dispatch, GuardV2Stderr, GuardV2Terminal))
+                if (
+                    not isinstance(frame, (GuardV2Dispatch, GuardV2Stderr, GuardV2Terminal))
                     or frame.nonce != self.challenge.nonce
                     or frame.manifest_digest != self.manifest.fingerprint
                     or frame.sequence != self._next_sequence
-                    or self._state == "terminal_candidate"):
+                    or self._state == "terminal_candidate"
+                ):
                     self._fail()
                 self._next_sequence += 1
                 if isinstance(frame, GuardV2Stderr):
@@ -161,20 +177,28 @@ class GuardV2Session:
             self._fail()
         assert deadline is not None
         if isinstance(frame, GuardV2Dispatch):
-            if (self._state != "authorization_prepared"
-                or not self._last_ns <= frame.observed_ns < deadline):
+            if (
+                self._state != "authorization_prepared"
+                or not self._last_ns <= frame.observed_ns < deadline
+            ):
                 self._fail()
             self._state = "dispatch_candidate"
         elif frame.cause in ("workload_exit", "workload_signal"):
-            if (self._state != "dispatch_candidate"
-                or not self._last_ns <= frame.observed_ns < deadline):
+            if (
+                self._state != "dispatch_candidate"
+                or not self._last_ns <= frame.observed_ns < deadline
+            ):
                 self._fail()
         elif frame.cause == "deadline_expired":
             if frame.observed_ns < max(self._last_ns, deadline):
                 self._fail()
         else:
-            if (frame.fault == "startup_refused" and self._state == "dispatch_candidate"
-                or frame.fault == "exec_failed" and self._state != "dispatch_candidate"):
+            if (
+                frame.fault == "startup_refused"
+                and self._state == "dispatch_candidate"
+                or frame.fault == "exec_failed"
+                and self._state != "dispatch_candidate"
+            ):
                 self._fail()
             if frame.fault != "clock_regression" and frame.observed_ns < self._last_ns:
                 self._fail()
@@ -184,8 +208,11 @@ class GuardV2Session:
 
     def finish(self) -> GuardV2Terminal:
         """Clean protocol EOF is still not job completion, removal or complete logs."""
-        if (self._state not in ("terminal_candidate", "complete_candidate")
-            or self._buffer or self._terminal is None):
+        if (
+            self._state not in ("terminal_candidate", "complete_candidate")
+            or self._buffer
+            or self._terminal is None
+        ):
             self._fail()
         assert self._terminal is not None
         self._state = "complete_candidate"
