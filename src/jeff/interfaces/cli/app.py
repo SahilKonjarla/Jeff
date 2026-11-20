@@ -50,8 +50,8 @@ def create_app(
     app.add_typer(debug_app, name="debug", help="Inspect bounded durable request metadata.")
 
     # Preserve registration order, including group order in public help.
-    review_commands.register(app, execution)
-    latest_pytest = execution_commands.register(app, fresh_execution, cancellation)
+    jobs = review_commands.register(app, execution)
+    latest_pytest = execution_commands.register(app, fresh_execution, cancellation, jobs=jobs)
     runtime_commands.register(app, control, diagnostics)
     project_commands.register(app, client, latest_pytest)
     history_commands.register(app, debug_app, client)

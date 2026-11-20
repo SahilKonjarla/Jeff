@@ -18,6 +18,7 @@ from jeff.application.execution import (
     ExecutionStopSignal,
     GuardedExecutionManifest,
 )
+from jeff.application.execution.log_tail import LiveLogTail
 from jeff.application.execution.pytest_report import pytest_run_token
 from jeff.domain.execution import AuthorityState
 
@@ -124,6 +125,11 @@ def start(
                 or claim.record.claim_state != "claimed"
             ):
                 raise DockerBackendFault("docker_authority_required")
+            if not replayed and capture is not None and self.attach_log_tail is not None:
+                tail = LiveLogTail()
+                self.attach_log_tail(capture, tail)
+                with self._control_mutex:
+                    self._log_tail = (record.job_id, tail)
             if stop is not None and not replayed:
                 stop.mark_claimed()
             observation = ExecutionAdmission.model_validate(

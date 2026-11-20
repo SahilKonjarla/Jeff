@@ -6,7 +6,7 @@ bytes are counted and discarded while the transport continues its finite drainin
 
 import codecs
 import json
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 from typing import Literal
 
 from jeff.application.execution import (
@@ -15,6 +15,7 @@ from jeff.application.execution import (
     DockerOutputSnapshot,
     OutputGuardReason,
 )
+from jeff.application.execution.log_tail import LiveLogTail
 from jeff.application.execution.pytest_report import (
     PYTEST_REPORT_BYTES,
     PytestReport,
@@ -107,6 +108,13 @@ class GuardedOutputCollector:
         self._guard: OutputGuardReason = "none"
         self._truncated = False
         self._snapshot: DockerOutputSnapshot | None = None
+        self._live_filter: _LiveOutputFilter | None = None
+
+    def follow_into(self, tail: LiveLogTail) -> None:
+        """Enable independent tailing before the first attach byte arrives."""
+        if any(self._source) or any(self._eof) or self._live_filter is not None:
+            raise DockerBackendFault("docker_output_failed")
+        self._live_filter = _LiveOutputFilter(tail)
 
     @property
     def retention_limit(self) -> int:
@@ -165,24 +173,27 @@ class GuardedOutputCollector:
                 return False
         return True
 
-    def _release(self) -> None:
+    def _public_bytes(self) -> Iterator[tuple[int, bytes]]:
         # UTF-8 may span arrival runs belonging to different streams. Decode each
         # stream incrementally only after all participating frames passed.
         decoders = [codecs.getincrementaldecoder("utf-8")("strict") for _ in range(2)]
         for value, channel in zip(self._window, self._tags, strict=True):
             for char in decoders[channel].decode(bytes((value,)), final=False):
-                encoded = _escaped(char)
-                if self._size + len(encoded) > self._limit:
-                    self._truncated = True
-                    self._notice(channel, b"[OUTPUT TRUNCATED]\n")
-                    return
-                self._text[channel].extend(encoded)
-                self._size += len(encoded)
+                yield channel, _escaped(char)
         for decoder in decoders:
             if decoder.decode(b"", final=True):
                 raise DockerBackendFault("docker_output_failed")
         self._window.clear()
         self._tags.clear()
+
+    def _release(self) -> None:
+        for channel, encoded in self._public_bytes():
+            if self._size + len(encoded) > self._limit:
+                self._truncated = True
+                self._notice(channel, b"[OUTPUT TRUNCATED]\n")
+                return
+            self._text[channel].extend(encoded)
+            self._size += len(encoded)
 
     def accept(self, stream: Literal["stdout", "stderr"], data: bytes) -> None:
         channel = self._channel(stream)
@@ -193,6 +204,8 @@ class GuardedOutputCollector:
             or len(data) > _CHUNK_BYTES
         ):
             raise DockerBackendFault("docker_output_failed")
+        if self._live_filter is not None:
+            self._live_filter.accept(stream, data)
         self._source[channel] = min(_INT64_MAX, self._source[channel] + len(data))
         if not data or self._guard != "none" or self._truncated:
             return
@@ -227,6 +240,8 @@ class GuardedOutputCollector:
         channel = self._channel(stream)
         if self._snapshot is not None or self._eof[channel]:
             raise DockerBackendFault("docker_output_failed")
+        if self._live_filter is not None:
+            self._live_filter.finish(stream)
         self._eof[channel] = True
         if self._guard != "none" or self._truncated:
             return
@@ -263,10 +278,35 @@ class GuardedOutputCollector:
             guard_reason=self._guard,
         )
         self._snapshot = result
+        if self._live_filter is not None:
+            self._live_filter.close(abort=abort)
         self._text[0].clear()
         self._text[1].clear()
         self._drop_pending()
         return result
+
+
+class _LiveOutputFilter(GuardedOutputCollector):
+    def __init__(self, tail: LiveLogTail) -> None:
+        super().__init__(1)
+        self._tail = tail
+
+    def _release(self) -> None:
+        text, tags = bytearray(), bytearray()
+        for channel, encoded in self._public_bytes():
+            text.extend(encoded)
+            tags.extend(bytes((channel,)) * len(encoded))
+        self._tail.publish(bytes(text), bytes(tags))
+
+    def _notice(self, channel: int, message: bytes) -> None:
+        self._tail.publish(message, bytes((channel,)) * len(message))
+        self._drop_pending()
+
+    def close(self, *, abort: bool) -> None:
+        if abort and self._guard == "none":
+            self._notice(1, b"[OUTPUT INCOMPLETE]\n")
+        self._drop_pending()
+        self._tail.close()
 
 
 class PytestOutputCollector(GuardedOutputCollector):

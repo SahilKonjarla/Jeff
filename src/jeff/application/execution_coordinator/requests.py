@@ -15,6 +15,7 @@ from jeff.application.execution import (
     ReviewFault,
     fresh_execution_failure,
 )
+from jeff.application.execution.log_tail import LiveLogPage, LiveLogTail
 from jeff.application.execution.pytest_report import (
     PYTEST_RUNNER_ARGV,
     pytest_retry_token,
@@ -47,13 +48,18 @@ def execute(
                     owner_instance_id=self.instance_id,
                     after=call.after,
                     limit=call.limit,
+                    claim_filter=call.claim_filter,
+                    kind_filter=call.kind_filter,
                 ),
                 deadline=deadline,
             )
             if (page.project_id, page.canonical_root) != (
                 project.project_id,
                 project.root,
-            ) or not page.within(after=call.after, limit=call.limit):
+            ) or not (
+                page.within(after=call.after, limit=call.limit)
+                and page.matches(call.claim_filter, call.kind_filter)
+            ):
                 raise DockerBackendFault("docker_authority_required")
             return FreshExecutionReply(
                 ok=True,
@@ -88,6 +94,7 @@ def execute(
             "tests.results",
             "tests.latest",
             "tests.retry-failed",
+            "jobs.logs",
         }:
             if self.inspection is None:
                 raise DockerBackendFault("docker_authority_required")
@@ -166,6 +173,44 @@ def execute(
                     recorded_at_ms=result.recorded_at_ms,
                 )
             )
+            log_page = None
+            if call.operation == "jobs.logs":
+                if record.job_id != call.job_id:
+                    raise ReviewFault("execution_not_found")
+                with self._control_mutex:
+                    active = self._log_tail
+                if (
+                    active is not None
+                    and active[0] == record.job_id
+                    and (result is None or result.payload_state == "retained")
+                    and (
+                        observed.stop is None
+                        or observed.stop.payload_state
+                        not in {"retired", "expired", "clock_unconfirmed"}
+                    )
+                ):
+                    log_page = active[1].read(call.log_after)
+                    if log_page.closed and record.claim_state == "claimed":
+                        log_page = log_page.model_copy(update={"closed": False})
+                elif call.log_after is not None:
+                    log_page = LiveLogPage(
+                        offset=call.log_after,
+                        next_offset=call.log_after,
+                        dropped=True,
+                        closed=True,
+                        chunks=(),
+                    )
+                else:
+                    archive = result.output if result is not None else observed.stop_output
+                    fallback = LiveLogTail()
+                    if archive is not None:
+                        for tag, text in enumerate((archive.stdout, archive.stderr)):
+                            data = text.encode("ascii")
+                            fallback.publish(data, bytes((tag,)) * len(data))
+                    fallback.close()
+                    log_page = fallback.read()
+                    if archive is None or archive.truncated or archive.aborted:
+                        log_page = log_page.model_copy(update={"dropped": True})
             return FreshExecutionReply(
                 ok=True,
                 request_id=call.request_id,
@@ -173,6 +218,7 @@ def execute(
                 identity=self.instance_id,
                 view=FreshExecutionView.from_record(record),
                 completion=completion,
+                log_page=log_page,
                 completion_state=observed.completion_state,
                 stop=observed.stop,
                 pytest_result=pytest_result,

@@ -10,6 +10,7 @@ from jeff.domain.execution import AuthorityState
 
 from ._model import _Model
 from .admission import ExecutionAdmission
+from .log_tail import LiveLogPage
 from .output import DockerOutputFacts, DockerOutputSnapshot
 from .pytest_report import PytestResult
 from .requests import ExecutionLivePhase, FreshExecutionOperation
@@ -52,6 +53,7 @@ class FreshExecutionReply(_Model):
     stop: ExecutionStopView | None = None
     execution_phase: ExecutionLivePhase | Literal["finished", "unconfirmed"] | None = None
     output: DockerOutputSnapshot | None = None
+    log_page: LiveLogPage | None = Field(default=None, exclude_if=lambda value: value is None)
     pytest_result: PytestResult | None = Field(default=None, exclude_if=lambda value: value is None)
     error: Failure | None = None
 
@@ -59,6 +61,8 @@ class FreshExecutionReply(_Model):
     def consistent(self) -> Self:
         if self.ok != (self.error is None):
             raise ValueError("Success and failure disagree.")
+        if (self.log_page is not None) != (self.ok and self.operation == "jobs.logs"):
+            raise ValueError("Only successful job log observations carry a page.")
         if self.pytest_result is not None and (
             self.operation not in {"tests.results", "tests.latest"}
             or not self.ok
@@ -128,9 +132,15 @@ class FreshExecutionReply(_Model):
             or self.completion_state is not None
             or self.stop is not None
             or self.execution_phase is not None
-        ) and self.operation not in {"show", "logs", "tests.results", "tests.latest"}:
+        ) and self.operation not in {"show", "logs", "tests.results", "tests.latest", "jobs.logs"}:
             raise ValueError("Completion is inspection only.")
-        if self.ok and self.operation in {"show", "logs", "tests.results", "tests.latest"}:
+        if self.ok and self.operation in {
+            "show",
+            "logs",
+            "tests.results",
+            "tests.latest",
+            "jobs.logs",
+        }:
             if self.completion_state is None or (self.completion_state == "recorded") != (
                 self.completion is not None
             ):

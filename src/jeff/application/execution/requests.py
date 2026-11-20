@@ -18,6 +18,8 @@ from ._model import _Model, absolute_path
 from .prepared_inputs import PreparedInputFault, canonical_prepared_paths
 
 ExecutionLivePhase = Literal["claim_pending", "admitted", "running_observed", "stop_requested"]
+JobClaimFilter = Literal["claimed", "finished", "unknown"]
+JobKindFilter = Literal["pytest", "command"]
 
 
 FreshExecutionOperation = Literal[
@@ -32,6 +34,7 @@ FreshExecutionOperation = Literal[
     "tests.results",
     "tests.latest",
     "tests.retry-failed",
+    "jobs.logs",
 ]
 
 
@@ -57,6 +60,13 @@ class FreshExecutionCall(_Model):
     paths: tuple[str, ...] = Field(default=(), max_length=PREPARED_FILE_LIMIT)
     approval_id: UUID | None = None
     job_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    claim_filter: JobClaimFilter | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    kind_filter: JobKindFilter | None = Field(default=None, exclude_if=lambda value: value is None)
+    log_after: StrictInt | None = Field(
+        default=None, ge=0, le=9223372036854775807, exclude_if=lambda value: value is None
+    )
     reviewed_manifest_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     after: str | None = Field(default=None, max_length=56)
     limit: StrictInt = Field(default=16, ge=1, le=32)
@@ -75,7 +85,13 @@ class FreshExecutionCall(_Model):
 
     @model_validator(mode="after")
     def shape(self) -> Self:
-        if self.operation in {"tests.results", "tests.latest", "tests.retry-failed"}:
+        if self.operation != "jobs.list" and (
+            self.claim_filter is not None or self.kind_filter is not None
+        ):
+            raise ValueError("Only fresh job listings accept job filters.")
+        if self.log_after is not None and self.operation != "jobs.logs":
+            raise ValueError("Only job logs accept a log cursor.")
+        if self.operation in {"tests.results", "tests.latest", "tests.retry-failed", "jobs.logs"}:
             if (
                 (self.job_id is None) != (self.operation == "tests.latest")
                 or self.approval_id is not None
@@ -137,6 +153,8 @@ class ExecutionListScope(_Model):
     project_id: UUID
     canonical_root: Path
     owner_instance_id: UUID
+    claim_filter: JobClaimFilter | None = None
+    kind_filter: JobKindFilter | None = None
     after: str | None = Field(default=None, max_length=56)
     limit: StrictInt = Field(default=16, ge=1, le=32)
 

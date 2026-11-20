@@ -3,6 +3,7 @@
 import json
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Never, cast
@@ -15,18 +16,23 @@ from typer.testing import CliRunner
 from jeff.application.execution import (
     DockerBackendFault,
     DockerExecutionResult,
+    DockerOutputSink,
+    DockerOwnedContainer,
     ExecutionManifest,
     ExecutionStopRecord,
+    ExecutionStopSignal,
     FreshExecutionCall,
     FreshExecutionReply,
     FreshExecutionView,
     GuardedExecutionManifest,
+    GuardV2Terminal,
 )
 from jeff.infrastructure.runtime_execution.arguments import create_arguments
 from jeff.infrastructure.runtime_execution.guard_artifacts import InstalledGuardVerifier
 from jeff.infrastructure.runtime_output import PytestOutputCollector
 from jeff.interfaces.cli.execution_commands import register
 from jeff.interfaces.cli.project_commands import register as register_project_commands
+from jeff.interfaces.cli.review_commands import register as register_review_commands
 
 from .support_composition import approved, composed, pending, show
 from .support_guarded import policy
@@ -170,6 +176,13 @@ def test_pytest_cli_uses_existing_approval_and_reads_report_by_job_id(
         archive = FreshExecutionReply.model_validate_json(logs.stdout)
         assert archive.pytest_result is None
         assert archive.output is not None and archive.output.stdout == ""
+        for kind, expected in (("pytest", 1), ("command", 0)):
+            listed = cli.invoke(
+                app, ["execution", "jobs", "list", "--state", "finished", "--kind", kind, "--json"]
+            )
+            assert listed.exit_code == 0, (listed.output, listed.exception)
+            page = FreshExecutionReply.model_validate_json(listed.stdout).page
+            assert page is not None and len(page.items) == expected
         assert docker.calls.count("remove") == 1
         summary = cli.invoke(app, ["ask", "What failed?"])
         assert summary.exit_code == 0 and f"Passed: {report.passed}" in summary.stdout
@@ -199,6 +212,73 @@ def test_pytest_cli_uses_existing_approval_and_reads_report_by_job_id(
         changed = cli.invoke(app, ["tests", "retry-failed", str(view.job_id), "--json"])
         assert changed.exit_code == 1 and "execution_conflict" in changed.stdout
         assert docker.calls.count("create") == 1
+
+
+def test_job_logs_follow_reads_live_and_final_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jeff.application.execution.log_tail import LiveLogTail
+    from jeff.application.execution.ports import DockerOutputCapture
+    from jeff.infrastructure.runtime_output import GuardedOutputCollector
+
+    from .support_guarded import GuardedDocker
+
+    with composed(tmp_path, guarded=True) as (coordinator, _, project, docker):
+
+        def attach_tail(capture: DockerOutputCapture, tail: LiveLogTail) -> None:
+            assert isinstance(capture, GuardedOutputCollector)
+            capture.follow_into(tail)
+
+        coordinator.attach_log_tail = attach_tail
+        first, release = threading.Event(), threading.Event()
+        assert isinstance(docker, GuardedDocker)
+        original = docker.attach_guarded
+
+        def attach(
+            handle: DockerOwnedContainer,
+            sink: DockerOutputSink,
+            stop: ExecutionStopSignal | None,
+            observe_running: Callable[[], None] | None,
+            *,
+            deadline: float,
+        ) -> tuple[int, GuardV2Terminal]:
+            sink.accept("stdout", b"before release\n")
+            first.set()
+            assert release.wait(5)
+            return original(handle, sink, stop, observe_running, deadline=deadline)
+
+        monkeypatch.setattr(docker, "attach_guarded", attach)
+        record = approved(coordinator, project)
+
+        class Client:
+            def fresh(self, call: FreshExecutionCall) -> FreshExecutionReply:
+                return coordinator.execute(call, deadline=time.monotonic() + 5)
+
+        monkeypatch.chdir(project.root)
+        app = typer.Typer()
+        register(app, Client, None, jobs=register_review_commands(app, None))
+        cli = CliRunner()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            running = pool.submit(
+                coordinator.start,
+                project.root,
+                record.approval_id,
+                record.manifest_digest,
+                request_id=uuid4(),
+                admission_deadline=time.monotonic() + 5,
+                on_admitted=lambda _: None,
+            )
+            try:
+                assert first.wait(5)
+                preview = cli.invoke(app, ["jobs", "logs", str(record.job_id)])
+                assert preview.exit_code == 0 and preview.stdout == "before release\n"
+                assert not running.done()
+            finally:
+                release.set()
+            assert isinstance(running.result(timeout=5), DockerExecutionResult)
+        done = cli.invoke(app, ["jobs", "logs", str(record.job_id), "--follow"])
+        assert done.exit_code == 0 and done.stdout == "before release\npublic output\n"
+        assert docker.calls.count("remove") == 1
 
 
 def test_workload124_is_not_timeout(tmp_path: Path) -> None:
@@ -256,7 +336,7 @@ def test_guarded_active_cancel_keeps_cleanup_with_original_worker(
     monkeypatch: pytest.MonkeyPatch,
     unknown_stop: bool,
 ) -> None:
-    from jeff.application.execution import ExecutionCancelCall
+    from jeff.application.execution import ExecutionCancelCall, ExecutionCancelReply
 
     with composed(tmp_path, guarded=True, cancellable=True) as (coordinator, _, project, docker):
         record = approved(coordinator, project)
@@ -279,14 +359,34 @@ def test_guarded_active_cancel_keeps_cleanup_with_original_worker(
                 on_admitted=lambda _: None,
             )
             assert docker.entered.wait(2)
-            coordinator.submit_cancel(
-                ExecutionCancelCall(
-                    request_id=uuid4(),
-                    approval_id=record.approval_id,
-                    reviewed_manifest_digest=record.manifest_digest,
-                ),
-                deadline=time.monotonic() + 2,
-            ).result(timeout=3)
+
+            class Client:
+                def fresh(self, call: FreshExecutionCall) -> FreshExecutionReply:
+                    return coordinator.execute(call, deadline=time.monotonic() + 5)
+
+                def cancel(self, call: ExecutionCancelCall) -> ExecutionCancelReply:
+                    from jeff.application.execution import ExecutionStopView
+
+                    recorded = coordinator.submit_cancel(
+                        call, deadline=time.monotonic() + 2
+                    ).result(timeout=3)
+                    return ExecutionCancelReply(
+                        request_id=call.request_id,
+                        approval_id=call.approval_id,
+                        reviewed_manifest_digest=call.reviewed_manifest_digest,
+                        ok=True,
+                        identity=coordinator.instance_id,
+                        stop=ExecutionStopView.from_record(recorded),
+                    )
+
+            monkeypatch.chdir(project.root)
+            app = typer.Typer()
+            register(app, Client, Client, jobs=register_review_commands(app, None))
+            args = ["jobs", "cancel", str(record.job_id), "--digest"]
+            bad = CliRunner().invoke(app, [*args, "0" * 64])
+            assert bad.exit_code == 1 and not work.done()
+            response = CliRunner().invoke(app, [*args, record.manifest_digest, "--json"])
+            assert response.exit_code == 0, (response.output, response.exception)
             result = work.result(timeout=5)
         assert isinstance(result, ExecutionStopRecord) and result.terminal is not None
         if unknown_stop:

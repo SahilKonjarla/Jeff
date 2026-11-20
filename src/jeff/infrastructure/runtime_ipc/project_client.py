@@ -230,8 +230,21 @@ class RuntimeProjectClient:
                         or reply.operation != call.operation
                     ):
                         raise ControlFault("runtime_ownership_unconfirmed")
-                    if reply.page is not None and not reply.page.within(
-                        after=call.after, limit=call.limit
+                    if reply.page is not None and not (
+                        reply.page.within(after=call.after, limit=call.limit)
+                        and reply.page.matches(call.claim_filter, call.kind_filter)
+                    ):
+                        raise ControlFault("runtime_ownership_unconfirmed")
+                    if (
+                        reply.log_page is not None
+                        and call.log_after is not None
+                        and (
+                            reply.log_page.offset < call.log_after
+                            or (
+                                reply.log_page.offset > call.log_after
+                                and not reply.log_page.dropped
+                            )
+                        )
                     ):
                         raise ControlFault("runtime_ownership_unconfirmed")
                     if reply.admission is not None and (
@@ -244,7 +257,8 @@ class RuntimeProjectClient:
                             call.approval_id is not None
                             and reply.view.approval_id != call.approval_id
                         ) or (
-                            call.operation == "tests.results" and reply.view.job_id != call.job_id
+                            call.operation in {"tests.results", "jobs.logs"}
+                            and reply.view.job_id != call.job_id
                         ):
                             raise ControlFault("runtime_ownership_unconfirmed")
                         if (

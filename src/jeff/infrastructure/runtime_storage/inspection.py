@@ -175,6 +175,22 @@ def _list_executions(
             raise ReviewFault("execution_conflict")
         condition = " AND (created_at_ms<? OR (created_at_ms=? AND proposal_id<?))"
         values.extend((stamp, stamp, identifier))
+    if scope.claim_filter is not None:
+        condition += " AND claim_state=?"
+        values.append(scope.claim_filter)
+    if scope.kind_filter is not None:
+        # Match the reviewed guarded runner argv, not the freely named profile.
+        predicate = (
+            "COALESCE(json_extract(manifest_json,'$.authority_kind')='guarded_execution_v1' "
+            "AND json_extract(manifest_json,'$.original.argv[0]')=? "
+            "AND json_extract(manifest_json,'$.original.argv[1]')=? "
+            "AND json_extract(manifest_json,'$.original.argv[2]')=? "
+            "AND json_extract(manifest_json,'$.original.argv[3]')=? "
+            "AND length(json_extract(manifest_json,'$.original.argv[4]'))=32 "
+            "AND json_extract(manifest_json,'$.original.argv[4]') NOT GLOB '*[^a-f0-9]*',0)"
+        )
+        condition += " AND " + predicate + "=?"
+        values.extend((*PYTEST_RUNNER_ARGV, int(scope.kind_filter == "pytest")))
     rows = connection.execute(
         "SELECT " + _AUTHORITY_COLUMNS + " FROM execution_authorities "
         "WHERE project_id=? AND canonical_root=?"
