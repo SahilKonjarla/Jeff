@@ -38,6 +38,7 @@ def test_real_sqlite_busy_initialization_keeps_control_responsive(
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner)
         storage.start()
         try:
@@ -126,6 +127,7 @@ def test_busy_start_preserves_failure_when_authenticated_reply_is_stopping(
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner)
         storage.start()
         try:
@@ -206,6 +208,7 @@ def test_busy_start_preserves_diagnostic_when_native_peer_disconnects(
     owner = RuntimeStateStore(layout).acquire(create=True)
     assert owner is not None
     with owner:
+        owner.store.credential(owner)
         storage = SQLiteStorage(owner)
         storage.start()
         try:
