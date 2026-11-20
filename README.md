@@ -1,127 +1,95 @@
 # Jeff
 
-Local, human-supervised developer assistant. **M02 is accepted on macOS:** explicit daemon lifecycle, authenticated local IPC, durable project state/history/events, read-only doctor and proven owned recovery. Desktop, voice, models, general execution, Pi/MCP/SSH and broader supervision remain future milestones—not shipped features. [Product scope](docs/jeff-design.md).
+Local, human-supervised developer assistant for **macOS**. M02 and M03 are accepted within their recorded evidence qualifications: explicit authenticated daemon lifecycle, project/Git questions, durable history, read-only diagnostics, and opt-in approved Docker jobs. Desktop, voice, reasoning providers, Pi/MCP/SSH integration, test watchers and service orchestration remain later milestones. M04 has not started.
 
-The accepted M02 baseline passed697 source/343 fresh installed cases with33 source/build/wheel/site module matches. Later test cleanup collected692 source cases/selected290 installed and ran112+9 affected cases; the comments/docstrings pass proved unchanged executable AST and passed static checks, without another runtime/package run. These are distinct records, not a new full-matrix pass. [Current status](docs/jeff-progress.md), [M02 completion/limitations](.agent-work/reports/m02-engineering-completion.md).
-
-Linux, alternate-user, hosted-CI and fresh-machine execution remain deferred/unperformed. M01 Mac automated/manual evidence exists; its formal acceptance/licensing disposition is not inferred from M02 acceptance. No project license/distribution route is established. Local docs/evidence/toolkit files are ignored and may be absent in a fresh clone.
+Docker is the backend for explicitly declared application jobs, not a replacement for the native Jeff daemon or permission to containerize development checks. Linux Jeff client/runtime compatibility is out of scope. [Source map](src/README.md), [CLI contract and uncertainty guidance](src/jeff/interfaces/README.md), [test map](tests/README.md).
 
 ## Install
 
-From the **Jeff source root**, use Python3.12+ and system Git. Recorded runtime validation is macOS/CPython3.12.11, not Linux. `/usr/bin/git` avoids an incompatible non-system Git on the reference Mac.
+From this source checkout, use Python3.12+ and system Git. Recorded runtime evidence is macOS/CPython3.12 on Apple ARM64. Installation is an explicit operator action, not permission for an agent to upgrade normal state:
 
 ```bash
-python3 --version
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
 ```
 
-For development, install this **instead** of the final command:
+For development, replace the final command with:
 
 ```bash
 python -m pip install -r requirements-dev.lock -e '.[dev]'
 ```
 
-The lock is a tested Mac/Python snapshot, not a hash-verified cross-platform/build-tool lock. `requirements.txt` alone contains only the compatibility PyYAML pin and does not install the CLI. Resolving with `python -m pip install -e '.[dev]'` is an alternative, not a cross-platform validation claim.
+Dependencies and tools are declared in `pyproject.toml`. The development lock is a tested Mac/Python snapshot, not a cross-platform hash lock. `requirements.txt` alone does not install the CLI. Reuse the existing environment when dependencies have not changed; deactivation does not stop Jeff.
 
-Reactivate the existing venv in later terminals before changing to a target project; unchanged dependencies need no reinstall. Without activation, use the absolute path to `.venv/bin/jeff`. `deactivate` restores the shell environment—it does not stop the daemon or delete registration.
+Current compatibility is **wire14 / DB10 / guarded opt-in settings4 / default settings2**. Legacy settings1/2/3 remain parseable; settings3 alone cannot enable new configured guarded launches. Match client and daemon installations. Older binaries cannot read guarded authority JSON; downgrade after guarded work is unsupported. Acceptance used isolated fixtures, not a normal-installation migration or fresh-machine distribution test.
 
 ## Start and use a project
 
 ```bash
 jeff --help
-python -m jeff --help
-jeff start --json                 # Explicit; works outside Git.
-cd /path/to/your/project          # Choose the intended repository deliberately.
+jeff start --json
+cd /path/to/your/project
 jeff init --json
 jeff config --json
 jeff status --json
 jeff ask "what branch am I on?"
 jeff ask "what changed?" --json
-jeff stop --json                  # Also works outside Git.
-```
-
-- Help/syntax performs no project/runtime selection or state creation. No arguments/unknown commands exit2.
-- Start waits for authenticated full readiness; repeat/concurrent starts converge. There is no autostart or in-process action fallback. Wire6/DB4/settings1 is incompatible with older wires; stop an older instance using its matching environment before upgrading. No automatic rekey/owner replacement.
-- Init writes mode0600 `jeff.local.yaml` with stable UUID/canonical root and appends root-anchored private-state ignore rules. Repeated init preserves identity/settings. Subdirectories bind the same root; moved-root rebind is not implemented. Unsafe/tracked/malformed/moved configuration refuses rather than regenerating identity.
-- Config exposes identity only. Status adds runtime facts after local registration validation, works stopped and never indexes/initializes. Questions record minimal allowlisted request metadata but do not write project files.
-- Stopped init/config/ask/history/debug return `daemon_not_running`, not fallback execution. Exiting the CLI/deactivating the venv does not stop the daemon. Stop drains actual work and confirms native exit; unconfirmed shutdown is an error, not permission to signal a PID.
-- Success exits0, recognized failures1, syntax2. JSON keeps `ok/data/error`; duplicate/uncertain correlation is `Request: <uuid>` on **stderr**, not transport fields added to existing result bodies. Missing replies/receipts never authorize retry.
-
-Registration belongs to a repository root, not a branch. Ignore/config publication is atomic per file, **not** a cross-file/SQL transaction; failures can leave ignore rules or published identity. Preserve and inspect partial state, never delete registration to repeat a test. `.jeff/` is reserved, not created by init.
-
-For deliberate isolated installations, use validated absolute `JEFF_DATA_DIR` and `JEFF_RUNTIME_DIR` consistently on every command. They select locations, not credentials/authority. Agents must use approved private fixtures, not default user state.
-
-## Git question boundaries
-
-Only the two shown intents are accepted, with case/whitespace normalization and optional final `?`; no model call. Unsupported input is not echoed and does not invoke Git. Answers bind project/root and UTC observation time; branch metadata distinguishes named/detached/unborn HEAD.
-
-Changes expose staged/unstaged/untracked/renamed/conflicted **metadata**, not contents/raw diffs. Protected environment-family paths (including templates), private state, credential/key names and submodules are excluded before querying and again before rendering. `complete:false`/`visible_clean` means **not full-clean proof**; `filtered_records` cannot count pre-query omissions. Naming rules are conservative, not content-based secret detection. Metadata uses reversible JSON string-body escaping, including controls/non-UTF8 filenames.
-
-Queries never stage/commit/fetch/update the index. Fixed Git controls disable hooks/fsmonitor/transports/lazy fetch; five-second/1MiB combined-output/10,000-change limits fail without partial success. Clean/process filters cause change questions to refuse rather than execute drivers or misreport conversions; branch questions disable discovered filters. This is not a general sandbox or atomic repository snapshot. [Git adapter](src/jeff/integrations/README.md).
-
-## History, debug and committed events
-
-Inside the registered project with the daemon started:
-
-```bash
-jeff debug last --json
-jeff debug last --request-id <request-uuid> --json
 jeff history --limit 50 --json
-jeff history --cursor <opaque-cursor> --json
-```
-
-Debug selects the latest **accepted init/ask**, not latest completion or another project's request. Exact IDs stay scoped; running/unknown/legacy states remain honest. Empty history succeeds; default debug without instrumented membership returns `no_history`. Coverage starts at instrumentation/migration, not repository creation.
-
-History defaults50/max100, with epoch/root/project/snapshot/generation-bound cursors. Membership is stable while outcome states remain current per read. Stale/foreign cursors require explicit resync. Reads do not index, timestamp accesses, trigger cleanup or archive raw questions/answers. Retention defaults30days, restart-loaded from validated private settings; batches≤100 at intervals≥60s retire only eligible succeeded/failed details. Unknown/nonterminal evidence remains and UUID-only tombstones permanently refuse replay. Missing details are not nonexecution proof.
-
-Subscriptions use the installed client, not a follow/watch CLI:
-
-```python
-from pathlib import Path
-from jeff.application.dispatch import SubscriptionQuery
-from jeff.bootstrap.runtime import create_activity_client
-
-with create_activity_client().subscribe(SubscriptionQuery(directory=Path.cwd())) as stream:
-    message = stream.receive(wait_seconds=10)  # None means still idle.
-    # Caller owns processing and any saved message.cursor.
-```
-
-No cursor starts live from the acknowledged committed position; a supplied cursor explicitly resumes/replays. No automatic reconnect, action replay or cursor storage. One reader per owned socket; received positions are not processing ACKs. Up to8 streams,≤64 event credits **each**, within15 ordinary/16 total native connections; internal worker/queue limits are not additive connection slots. Healthy idle differs from five-second partial-frame/write bounds. Retention invalidates stale streams; already-sent bytes cannot be recalled. Earlier null-ID init events remain exact-debug history, not retroactively routed feed events.
-
-## Doctor and recovery
-
-```bash
+jeff debug last --json
 jeff doctor --json
-jeff doctor
+jeff stop --json
 ```
 
-Doctor works outside Git, stopped or live, under one5s budget. It reads authenticated live caches or safely leased stopped settings/schema; never starts/repairs/migrates, creates a key/DB, dumps environment or opens a second live SQL reader. Active versus inactive retention is labelled; huge valid values use a finite marker. Healthy/stopped/uninitialized exit0; unhealthy/unsafe/required uncertainty1; syntax2. Atime invariance/full DB integrity/hostile-same-user isolation are not promised. [Doctor guidance](docs/runbooks/m02-doctor.md).
+Choose the project deliberately; the path above is illustrative. Start/stop/doctor work outside Git. Help and syntax perform no project/runtime selection. There is no autostart or client-local action fallback. Stopped init/config/ask/history/debug fail instead of executing locally; status remains read-only.
 
-Only explicit start may recover supported residue under existing ownership:
+Init preserves stable repository-root identity and private configuration. Registration is not branch-specific. Unsafe/tracked/moved configuration refuses; never delete state to repeat a test. YAML/ignore/SQL publication is not one atomic transaction. Private absolute `JEFF_DATA_DIR` and `JEFF_RUNTIME_DIR` overrides select locations, not credentials or authority; use them consistently. Agents need approved synthetic fixtures rather than default user state.
 
-- **Endpoint:** signed receipt1 matching exact namespace/key/stable-anchor/socket/self identities and a definitively refused peer, or validated receipt-only cleanup. Missing/copied/replaced/unsafe/unrecorded proof is preserved. Free lock/missing PID/connect failure alone grants no cleanup authority.
-- **SQLite:** permit1 binds the actual DELETE journal before business DML. An eligible genuine hot journal is authenticated/pinned before SQLite rolls it back; current schema/activity validation precedes readiness. SQLite alone manages journal removal. Recovery-only limits: DB256MiB/journal16MiB; WAL/SHM/super-journal, unsupported proof or unproved creation/migration refuse.
-- **Native Git:** a single-use helper owns actual Git plus the inherited lifetime lease; replacement stays excluded until real cleanup/helper exit. Only captured normal exits reconcile late cleanup; abnormal/unknown outcomes quarantine admission.
+Questions are deterministic and model-free. Change answers expose filtered metadata, not raw diff/file contents or complete-clean proof. Protected paths/submodules and filter-backed change reads refuse or are excluded; fixed Git argv does not permit arbitrary commands. [Git boundary](src/jeff/integrations/git/README.md).
 
-No key/anchor/DB reset, logged-PID signalling, fallback, action replay or caller-deadline extension. SQL rollback does not undo YAML/ignore publication. Arbitrary power loss, malicious-same-UID key access and hard native-I/O cancellation are outside the guarantee. [Recovery guidance](docs/runbooks/m02-recovery.md).
+History/debug reads are project-scoped, bounded and preserve unknown/retired distinctions. Debug selects accepted init/ask requests, not arbitrary latest completions. Event subscriptions are an installed-client API, not a follow/watch CLI. Doctor is read-only: no autostart, repair, migration, live SQL reader or secret dump. [Runtime contracts](src/jeff/application/runtime/README.md), [diagnostics](src/jeff/infrastructure/runtime_diagnostics/README.md).
 
-## Disposable demos
+## Approved execution — explicitly configured, default disabled
 
-From the Jeff source root after installation:
+A trusted installation owner must supply private settings4 backend declarations, verified CLI/config/HOME resources, pinned installed JFG2 guard artifacts/timing policy, and explicitly classified **development** profiles. Startup does not discover/start Docker, pull images or run jobs. Readiness is not proof an engine/image is available. No permissive host or unguarded fallback exists.
 
-```bash
-.venv/bin/python scripts/create_demo_projects.py
+These are syntax examples, not runnable acceptance handoffs. Replace IDs, profile, inputs and reviewed digest with actual inspected values:
+
+```text
+jeff execution propose --profile NAME --input source.py --request-id UUID --json -- EXECUTABLE ARG...
+jeff execution approve APPROVAL_ID --digest REVIEWED_SHA256 --request-id UUID --json
+jeff execution deny APPROVAL_ID --digest REVIEWED_SHA256 --request-id UUID --json
+jeff execution start APPROVAL_ID --digest REVIEWED_SHA256 --request-id UUID --json
+jeff execution cancel APPROVAL_ID --digest REVIEWED_SHA256 --request-id UUID --json
+jeff execution show APPROVAL_ID --json
+jeff execution logs APPROVAL_ID --json
+jeff execution approvals list --limit 16 --json
+jeff execution jobs list --limit 16 --after PREVIOUS_NEXT_AFTER --json
 ```
 
-Then explicitly start Jeff and register `examples/sandbox-project` or `examples/second-project`. Generation creates independent ignored Git roots with deterministic baselines and untracked notes; it preserves recognized existing work and refuses unrelated/unsafe targets. It never starts services/Jeff, resets work or mutates the parent index/history. Choose a new explicit output location instead of clearing user data.
+- Review the **full outer guarded manifest** and approve its exact digest. Old review-only/unguarded approvals never become guarded authority. Legacy `run`/`approvals`/`jobs` remain permanently review-only.
+- Inputs are literal project-relative files, not globs/directories. The owner/operator must review argv and file contents as public/non-secret: snapshots and metadata can persist before approval. Names, hashes, read-only mounts and redaction do not certify arbitrary contents or destructive intent. Production/unclassified targets refuse.
+- Start acknowledges a confirmed claim, not guest readiness/success. Cancel acknowledges intent, not termination. Retain request UUIDs and reconcile through scoped show/logs; missing replies never authorize retry.
+- Fresh lists are project-scoped newest-first pages (default16/max32), not snapshots. A reserved job UUID is not a launched job. Use approval IDs for show/logs/cancel. Discovery never transfers mutation authority.
+- Unavailable target verification before preparation/authority returns `execution_unavailable`, without download/fallback. The same raw fault after persistence/claim or uncertain helper cleanup remains unknown; do not infer nonexecution from an error code alone.
+- Only the original captured worker/controller can stop/remove its verified owned job. Guard terminal, namespace exit, output EOF, removal and native daemon exit are separate facts. Incomplete output stays labelled incomplete.
+- Unknown work stays quarantined/consumed across restart. No automatic retry, adoption, PID/CID/label-based control, DB reset or quarantine-clear API exists. Independent administrative removal does not rewrite Jeff's unknown outcome or refund authority. See [operator guidance](src/jeff/interfaces/README.md#m03-policy-and-uncertain-work-guidance).
 
-The sandbox has a loopback service, a **deliberate1-pass/1-fail pytest example**, and Compose structure. Local service/expected-failure/Compose-syntax evidence is not Docker runtime success. [Examples](examples/README.md), [generator safety and commands](scripts/README.md).
+`jeff stop` drains actual work. It may honestly return `runtime_stop_unconfirmed` even when the original daemon child subsequently exits: native exit alone is not confirmation of a job outcome/cleanup. Ctrl-C/disconnection/deactivating the venv is not cancellation.
+
+## Verification scope
+
+M03 includes matched installed native success, typed nonzero exit versus guard timeout, owned cancel/cleanup, natural approval expiry and restart/no replay; real missing engine/image refusal; active shutdown; and operator-performed owner/provider interruption with honest unknown/log inspection and verified stopped-orphan administrative removal. Original failed scopes remain failed, not retrospectively passed.
+
+The matched four-job proof uses wheel `cf202f…`. The availability correction's wheel `09fbcd…` has focused installed guard/availability regressions and actual native unavailable/interruption proof; no full four-job rerun on that newer wheel is claimed. Source/fake, installed, native, physical and human evidence are different tiers, not additive unique counts. Current overall accounting is36actual/53charged, not new execution capacity.
+
+Limits remain explicit: no universal clock-floor/hostile-pressure guarantee, independent VM-wide task census, universal secret/destructive classifier, AMD64 runtime proof, complete engine privacy audit, fresh-machine upgrade or current full-suite/hosted-CI pass. Both Linux guard architectures are packaged; runtime evidence is selected ARM64 Docker Desktop. The GitHub workflow is published under explicit approval; its runs/output have not been audited here. No deployment or later-milestone result follows.
+
+Detailed acceptance/history lives in local ignored `docs/specs/m03-acceptance-checklist.md`, `docs/jeff-progress.md` and `.agent-work/`; those may be absent from fresh clones. Component READMEs keep the operational contracts available without private receipts. Publication is not normal-state migration authority.
 
 ## Development and safety
 
-From the source root, after selecting a **fresh private Git-negative arena outside every checkout**:
+From the source root in the existing development environment, these are repository check commands—not a report that they were run during documentation work:
 
 ```bash
 .venv/bin/python -m pytest tests/unit tests/architecture tests/integration tests/acceptance -q
@@ -131,14 +99,18 @@ From the source root, after selecting a **fresh private Git-negative arena outsi
 .venv/bin/python -m pip check
 ```
 
-Ignored scratch inside Jeff still has Git ancestors. Pytest may clear `--basetemp`; never point it at arbitrary existing data. Native crash/compatibility acceptance needs its own finite manifest, verified fixtures and **fresh explicit fault authority**; ordinary skips are not guarded acceptance passes. The old M02 fault envelope is exhausted. [Test map and current selection](tests/README.md).
+Select an approved finite test set and a **fresh private Git-negative arena outside every checkout** before execution. Ignored scratch inside Jeff is still inside Git ancestry. Pytest may clear `--basetemp`; never target existing arbitrary data. Native process/crash tests, provider operations and Docker jobs require their own finite authority; skips and historical grants are not permission or passes. Documentation edits do not justify replaying spent handoffs.
 
-Dependencies/tool settings live in `pyproject.toml`; static architecture checks enforce selected tier rules, not dynamic isolation. Domain is stdlib-only, application owns contracts, adapters own I/O, interfaces render, bootstrap wires dependencies. [Source layout](src/README.md).
+Python files stay within400 code-bearing lines; docstrings, comment-only/blank lines and multiline literal spans are excluded by the shared AST/token counter. Ruff's100-character line limit is separate. Domain is stdlib-only; application owns contracts, infrastructure/integrations own I/O, interfaces render and bootstrap composes. [Architecture](tests/architecture/README.md).
 
-No hosted/self-hosted runner, Docker environment or deployment is enabled by keeping the local CI draft. Branches do not isolate execution/billing. Native Mac evidence does not pass Linux/GUI/audio/provider work. `.env`/secret files need approval; this application does not load them. `.env.example` is a placeholder-only exception to ignores, not a credential store. Configuration reads are bounded/strict, preserve valid settings and expose no arbitrary values.
+`.env`/secret-bearing files need explicit approval; Jeff does not load them. No project distribution/license route is inferred. [Agent guidance](AGENTS.md), where present, preserves separate approval gates for publication, dependencies, infrastructure and milestone transitions.
 
-## Documentation and planned work
+## Disposable examples
 
-[Documentation index](docs/README.md) → [design](docs/jeff-design.md), [milestones](docs/jeff-implementation-plan.md), [progress](docs/jeff-progress.md), [domain glossary](docs/context/DOMAIN_MODEL.md), [architecture](docs/architecture/README.md), [runtime contract](docs/specs/m02-runtime-and-state.md). These local ignored documents may be absent from a fresh clone. Completed checkpoint plans/reports and the old M01 manual transcript are retained in the [historical archive](.agent-work/reports/m02-history-index.md), not current instructions.
+The existing generator creates independent ignored repositories with deterministic baselines, preserving recognized existing work and refusing unrelated targets:
 
-The complete product still requires approved execution/jobs, desktop/hold-to-talk voice, local-first reasoning with opt-in cloud, actual Pi/MCP/GitHub/registered-SSH integrations and recovery/supervision. Models cannot approve actions; exact single-use human authorization and production-destructive denial remain design requirements, not delivered execution controls. IDE/unsaved-buffer plugins, wake-word listening, semantic/vector history and remote notification delivery are out of scope. See design for authoritative detail; M03 has not started.
+```bash
+.venv/bin/python scripts/create_demo_projects.py
+```
+
+It never starts Jeff/services or resets work. Its deliberate1-pass/1-fail pytest and Compose fixtures do not imply M04/M05 runtime delivery. [Examples](examples/README.md), [generator contract](scripts/README.md).

@@ -8,10 +8,17 @@ import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from jeff.application.runtime import ControlFault
-from jeff.application.storage import SETTINGS_LIMIT, RuntimeSettings, StorageFault
+from jeff.application.storage import (
+    SETTINGS_LIMIT,
+    ConfiguredRuntimeSettings,
+    GuardedRuntimeSettings,
+    LoadedRuntimeSettings,
+    RuntimeSettings,
+    StorageFault,
+)
 from jeff.infrastructure.runtime_state import DiagnosticLease, Ownership
 
-_DEFAULT_BYTES = b"schema_version: 1\nhistory:\n  retention_days: 30\n"
+_DEFAULT_BYTES = b"schema_version: 2\nhistory:\n  retention_days: 30\nexecution:\n  profiles: []\n"
 _FLAGS = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -26,7 +33,7 @@ class _UniqueLoader(yaml.SafeLoader):  # type: ignore[misc]
         return mapping
 
 
-def parse_settings(payload: bytes) -> RuntimeSettings:
+def parse_settings(payload: bytes) -> LoadedRuntimeSettings:
     """Bound YAML structure before validation and suppress raw configuration errors."""
     try:
         if len(payload) > SETTINGS_LIMIT:
@@ -47,12 +54,24 @@ def parse_settings(payload: bytes) -> RuntimeSettings:
                     raise ValueError("Depth")
             elif isinstance(event, yaml.events.CollectionEndEvent):
                 depth -= 1
-        return RuntimeSettings.model_validate(yaml.load(text, Loader=_UniqueLoader))
+        value = yaml.load(text, Loader=_UniqueLoader)
+        if (
+            isinstance(value, dict)
+            and type(value.get("schema_version")) is int
+            and value["schema_version"] in (3, 4)
+        ):
+            model = (
+                GuardedRuntimeSettings
+                if value["schema_version"] == 4
+                else ConfiguredRuntimeSettings
+            )
+            return model.model_validate(value)
+        return RuntimeSettings.model_validate(value)
     except (ValueError, TypeError, RecursionError, yaml.YAMLError, ValidationError):
         raise StorageFault("settings_invalid") from None
 
 
-def read_existing_settings(lease: DiagnosticLease) -> RuntimeSettings:
+def read_existing_settings(lease: DiagnosticLease) -> LoadedRuntimeSettings:
     """Bounded strict read under a diagnostic lease; never default or rewrite."""
     try:
         with lease.open_file("settings") as fd:
@@ -74,7 +93,7 @@ def read_existing_settings(lease: DiagnosticLease) -> RuntimeSettings:
 
 def load_or_create_settings(
     owner: Ownership,
-) -> tuple[RuntimeSettings, Literal["default_file", "existing_file"]]:
+) -> tuple[LoadedRuntimeSettings, Literal["default_file", "existing_file"]]:
     """Create defaults exclusively or preserve an existing checked file byte-for-byte.
 
     This is startup-only loading, not hot reload or repair. A failed initial write

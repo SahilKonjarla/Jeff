@@ -12,8 +12,17 @@ from jeff.application.storage import (
 
 
 def test_settings_defaults_are_strict_frozen_and_reject_unknown_fields() -> None:
-    assert DEFAULT_SETTINGS.schema_version == 1
+    assert DEFAULT_SETTINGS.schema_version == 2
+    assert DEFAULT_SETTINGS.execution.profiles == ()
     assert DEFAULT_SETTINGS.history.retention_days == 30
+    assert DEFAULT_SETTINGS.model_dump(mode="json") == {
+        "schema_version": 2,
+        "history": {"retention_days": 30},
+        "execution": {"profiles": []},
+    }
+    # Raising supported settings to3 must not widen the frozen legacy model.
+    with pytest.raises(ValidationError):
+        RuntimeSettings.model_validate({"schema_version": 3, "history": {"retention_days": 30}})
     with pytest.raises(ValidationError):
         DEFAULT_SETTINGS.history.retention_days = 7
     for value in (True, "30", 0, -1):
@@ -33,9 +42,9 @@ def test_ready_requires_real_schema_and_settings_and_failed_requires_safe_code()
     with pytest.raises(ValidationError):
         StorageReadiness(state="failed")
     ready = StorageReadiness(
-        state="ready", schema_version=4, retention_days=30, settings_source="default_file"
+        state="ready", schema_version=10, retention_days=30, settings_source="default_file"
     )
-    assert ready.schema_version == 4
+    assert ready.schema_version == 10
     with pytest.raises(ValidationError):
         StorageReadiness(
             state="ready", schema_version=True, retention_days=30, settings_source="default_file"

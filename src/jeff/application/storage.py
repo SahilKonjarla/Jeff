@@ -14,6 +14,11 @@ from pydantic import (
     model_validator,
 )
 
+from jeff.application.execution import (
+    DockerBackendConfiguration,
+    ExecutionSettings,
+    GuardedDockerBackendConfiguration,
+)
 from jeff.application.history import (
     ActivityCode,
     ActivityEvent,
@@ -31,8 +36,8 @@ from jeff.application.history import (
 from jeff.application.projects import ErrorData, Failure, ProjectService
 from jeff.domain.projects import Project
 
-SETTINGS_SCHEMA = 1
-DATABASE_SCHEMA = 4
+SETTINGS_SCHEMA = 3
+DATABASE_SCHEMA = 10
 RETIREMENT_BATCH_LIMIT = 100
 RETIREMENT_INTERVAL_SECONDS = 60
 DATABASE_APPLICATION_ID = int.from_bytes(b"JEFF", "big")
@@ -106,11 +111,75 @@ class HistorySettings(_StorageModel):
 
 
 class RuntimeSettings(_StorageModel):
-    schema_version: StrictInt = Field(ge=SETTINGS_SCHEMA, le=SETTINGS_SCHEMA)
+    """Legacy settings1/2 representation; never gains opt-in backend defaults."""
+
+    schema_version: StrictInt = Field(ge=1, le=2)
     history: HistorySettings
+    execution: ExecutionSettings = ExecutionSettings()
+
+    @model_validator(mode="after")
+    def versioned_execution(self) -> Self:
+        if self.schema_version == 1 and "execution" in self.model_fields_set:
+            raise ValueError("Execution profiles require settings schema2.")
+        return self
 
 
-DEFAULT_SETTINGS = RuntimeSettings(schema_version=1, history=HistorySettings(retention_days=30))
+class ConfiguredRuntimeSettings(_StorageModel):
+    """Explicit settings3, cold and disabled when backend is absent or null."""
+
+    schema_version: StrictInt = Field(ge=3, le=3)
+    history: HistorySettings
+    execution: ExecutionSettings = ExecutionSettings()
+    backend: DockerBackendConfiguration | None = None
+
+    @model_validator(mode="after")
+    def bound_backend(self) -> Self:
+        if self.backend is not None:
+            profiles = {(p.project_id, p.name): p for p in self.execution.profiles}
+            if any(
+                profiles.get((d.profile.project_id, d.profile.name)) != d.profile
+                for d in self.backend.declarations
+            ):
+                raise ValueError("Backend declarations require exact configured profile bindings.")
+        return self
+
+
+class GuardedRuntimeSettings(ConfiguredRuntimeSettings):
+    """Settings4 requires explicit guarded backend policy; schema1/2/3 stay unchanged."""
+
+    schema_version: StrictInt = Field(ge=4, le=4)
+    backend: GuardedDockerBackendConfiguration | None = None
+
+    @model_validator(mode="after")
+    def guarded_profiles(self) -> Self:
+        if self.backend is not None:
+            profiles = {(p.project_id, p.name): p for p in self.execution.profiles}
+            for declaration in self.backend.declarations:
+                configured = profiles[(declaration.profile.project_id, declaration.profile.name)]
+                if any(
+                    "environment" not in p.model_fields_set or p.environment != "development"
+                    for p in (configured, declaration.profile)
+                ):
+                    raise ValueError(
+                        "Execution targets require explicit development classification."
+                    )
+                # Validate timing/platform against each original profile before any I/O.
+                from jeff.application.execution import ExecutionManifest, PreparedInputs
+
+                self.backend.guard.wrap(
+                    ExecutionManifest(
+                        profile=declaration.profile,
+                        argv=(declaration.profile.executable,),
+                        inputs=PreparedInputs(),
+                    )
+                )
+        return self
+
+
+LoadedRuntimeSettings = RuntimeSettings | ConfiguredRuntimeSettings | GuardedRuntimeSettings
+
+# Absent installations remain opt-out and keep the exact settings2 defaults.
+DEFAULT_SETTINGS = RuntimeSettings(schema_version=2, history=HistorySettings(retention_days=30))
 
 
 class StorageReadiness(_StorageModel):

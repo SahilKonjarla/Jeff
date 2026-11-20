@@ -87,7 +87,7 @@ class DoctorRuntimeData(_DoctorModel):
     identity: RuntimeIdentityData
     control_ready: StrictBool
     application_ready: StrictBool
-    available_operations: tuple[ProjectCapability, ...] = Field(max_length=10)
+    available_operations: tuple[ProjectCapability, ...] = Field(max_length=13)
     storage_state: Literal["not_checked", "initializing", "ready", "failed", "closing"]
     storage_error: StorageIssueCode | None = None
     active_retention_days: ConfiguredRetentionDays | None = None
@@ -109,10 +109,15 @@ class DoctorRuntimeData(_DoctorModel):
             raise ValueError("Only failed storage carries an error.")
         if self.available_operations and not (self.control_ready and self.storage_state == "ready"):
             raise ValueError("Capabilities require ready control and storage.")
+        if (
+            "execution.cancel.v1" in self.available_operations
+            and "execution.v1" not in self.available_operations
+        ):
+            raise ValueError("Cancellation capability requires fresh execution.")
         if self.application_ready and not (
             self.control_ready
             and self.storage_state == "ready"
-            and set(self.available_operations)
+            and set(self.available_operations) - {"execution.v1", "execution.cancel.v1"}
             == {
                 "ask.branch",
                 "ask.changes",
@@ -124,6 +129,7 @@ class DoctorRuntimeData(_DoctorModel):
                 "debug.last",
                 "history.list",
                 "activity.subscribe",
+                "execution.review",
             }
         ):
             raise ValueError("Full doctor readiness requires all supported operations.")
@@ -137,9 +143,9 @@ class DoctorReport(_DoctorModel):
     checks: tuple[DoctorCheck, ...] = Field(min_length=7, max_length=7)
     runtime: DoctorRuntimeData | None = None
     paths: RuntimePathInspection | None = None
-    settings_schema_version: StrictInt | None = Field(default=None, ge=1, le=1)
+    settings_schema_version: StrictInt | None = Field(default=None, ge=1, le=4)
     configured_retention_days: ConfiguredRetentionDays | None = None
-    database_schema_version: StrictInt | None = Field(default=None, ge=0, le=4)
+    database_schema_version: StrictInt | None = Field(default=None, ge=0, le=10)
     python_version: str | None = Field(
         default=None, min_length=1, max_length=32, pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$"
     )
@@ -160,9 +166,9 @@ class DoctorReport(_DoctorModel):
             raise ValueError("Only validated settings expose configuration facts.")
         if self.summary == "stopped" and (
             self.runtime is not None
-            or self.settings_schema_version != 1
+            or self.settings_schema_version not in (1, 2, 3, 4)
             or self.configured_retention_days is None
-            or self.database_schema_version != 4
+            or self.database_schema_version != 10
         ):
             raise ValueError(
                 "Stopped health requires current validated facts without live identity."
@@ -174,7 +180,7 @@ class DoctorReport(_DoctorModel):
         if self.summary == "healthy" and (
             self.runtime is None
             or not self.runtime.application_ready
-            or self.database_schema_version != 4
+            or self.database_schema_version != 10
         ):
             raise ValueError("Healthy requires authenticated full cached readiness.")
         return self

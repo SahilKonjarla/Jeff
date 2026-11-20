@@ -337,6 +337,8 @@ class RuntimeController:
         if isinstance(current, Failure) or current.data.state == RuntimeState.STOPPED:
             return current
         identity = current.data.identity
+        job_confirmation_required = current.data.execution_control_ready
+        job_confirmation_received = False
         if identity is None:
             return control_failure("runtime_stop_unconfirmed")
         try:
@@ -362,6 +364,7 @@ class RuntimeController:
                     )
                     try:
                         connection.request("stop", identity.instance_id)
+                        job_confirmation_received = True
                     except ControlFault:
                         pass  # do not resend; reconcile only through native exit + ownership
                     remaining = deadline - time.monotonic()
@@ -375,6 +378,8 @@ class RuntimeController:
                 raise ControlFault("runtime_stop_unconfirmed")
             with owner:
                 owner.require_no_endpoint()
+            if job_confirmation_required and not job_confirmation_received:
+                return control_failure("runtime_stop_unconfirmed")
             return _stopped()
         except (ControlFault, OSError, subprocess.TimeoutExpired):
             return control_failure("runtime_stop_unconfirmed")

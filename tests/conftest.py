@@ -1,13 +1,77 @@
 """Safe disposable repositories; no mutations to the Jeff repository."""
 
+import ast
+import io
 import os
 import shutil
 import subprocess
+import tokenize
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+
+def _count_code_lines(source: str) -> int:
+    """Count code-bearing rows, excluding docstrings and multiline literal spans."""
+    nodes = list(ast.walk(ast.parse(source)))
+    docstrings: set[ast.AST] = set()
+    for node in nodes:
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            first = node.body[0] if node.body else None
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                docstrings.add(first)
+
+    lines = source.split("\n")
+    masked = [list(line) for line in lines]
+    for node in nodes:
+        if not isinstance(node, (ast.Constant, ast.JoinedStr, ast.Expr)):
+            continue
+        if isinstance(node, ast.Expr) and node not in docstrings:
+            continue
+        if isinstance(node, ast.Constant) and not isinstance(node.value, (str, bytes)):
+            continue
+        end, end_column = node.end_lineno, node.end_col_offset
+        assert end is not None and end_column is not None
+        if node not in docstrings and node.lineno == end:
+            continue
+        for row in range(node.lineno, end + 1):
+            line = lines[row - 1]
+            # AST columns are UTF-8 byte offsets; tokenize columns are characters.
+            start = len(line.encode()[: node.col_offset].decode()) if row == node.lineno else 0
+            stop = len(line.encode()[:end_column].decode()) if row == end else len(line)
+            masked[row - 1][start:stop] = [" "] * (stop - start)
+
+    ignored = {
+        tokenize.COMMENT,
+        tokenize.NL,
+        tokenize.NEWLINE,
+        tokenize.INDENT,
+        tokenize.DEDENT,
+        tokenize.ENDMARKER,
+        tokenize.ENCODING,
+    }
+    code_rows: set[int] = set()
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type in ignored:
+            continue
+        for row in range(token.start[0], token.end[0] + 1):
+            start = token.start[1] if row == token.start[0] else 0
+            stop = token.end[1] if row == token.end[0] else len(masked[row - 1])
+            if "".join(masked[row - 1][start:stop]).strip():
+                code_rows.add(row)
+    return len(code_rows)
+
+
+@pytest.fixture
+def code_line_count() -> Callable[[str], int]:
+    """Shared size policy; source inspection only, never import or execute the file."""
+    return _count_code_lines
 
 
 @pytest.fixture

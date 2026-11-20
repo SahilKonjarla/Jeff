@@ -1,0 +1,60 @@
+"""Runtime value, location and metadata contracts; no lifecycle or IPC implementation."""
+
+from dataclasses import dataclass as dataclass
+from pathlib import Path as Path
+from typing import Literal as Literal
+from typing import Protocol as Protocol
+from typing import Self as Self
+from typing import cast as cast
+from uuid import UUID as UUID
+
+from pydantic import BaseModel as BaseModel
+from pydantic import ConfigDict as ConfigDict
+from pydantic import Field as Field
+from pydantic import SecretStr as SecretStr
+from pydantic import StrictBool as StrictBool
+from pydantic import StrictInt as StrictInt
+from pydantic import field_validator as field_validator
+from pydantic import model_validator as model_validator
+
+from jeff.application.projects import ErrorData as ErrorData
+from jeff.application.projects import Failure as Failure
+from jeff.application.storage import StorageIssueCode as StorageIssueCode
+from jeff.application.storage import StorageReadiness as StorageReadiness
+from jeff.application.storage import storage_failure as storage_failure
+from jeff.domain.runtime import RuntimeIdentity as RuntimeIdentity
+from jeff.domain.runtime import RuntimeSnapshot as RuntimeSnapshot
+from jeff.domain.runtime import RuntimeState as RuntimeState
+
+from .base import _RuntimeModel as _RuntimeModel
+from .failures import _CONTROL_MESSAGES as _CONTROL_MESSAGES
+from .failures import _MESSAGES as _MESSAGES
+from .failures import ControlFault as ControlFault
+from .failures import ControlIssueCode as ControlIssueCode
+from .failures import RuntimeIssueCode as RuntimeIssueCode
+from .failures import control_failure as control_failure
+from .failures import runtime_failure as runtime_failure
+from .limits import DEFAULT_RUNTIME_LIMITS as DEFAULT_RUNTIME_LIMITS
+from .limits import MAC_NAME_BYTES as MAC_NAME_BYTES
+from .limits import MAC_PATH_BYTES as MAC_PATH_BYTES
+from .limits import MAC_SOCKET_PATH_BYTES as MAC_SOCKET_PATH_BYTES
+from .limits import PROTOCOL_REVISION as PROTOCOL_REVISION
+from .limits import RuntimeLimits as RuntimeLimits
+from .observations import ControlObservation as ControlObservation
+from .observations import ControlSuccess as ControlSuccess
+from .observations import ProjectCapability as ProjectCapability
+from .observations import RuntimeControl as RuntimeControl
+from .observations import RuntimeIdentityData as RuntimeIdentityData
+from .observations import RuntimeStatusData as RuntimeStatusData
+from .paths import RUNTIME_PATH_ROLES as RUNTIME_PATH_ROLES
+from .paths import PathObservation as PathObservation
+from .paths import RuntimeLayout as RuntimeLayout
+from .paths import RuntimePathInputs as RuntimePathInputs
+from .paths import RuntimePathInspection as RuntimePathInspection
+from .paths import RuntimePathRole as RuntimePathRole
+from .protocol import AuthAccepted as AuthAccepted
+from .protocol import AuthRequest as AuthRequest
+from .protocol import ControlOperation as ControlOperation
+from .protocol import ControlRequest as ControlRequest
+from .protocol import ControlResponse as ControlResponse
+from .protocol import StartupResult as StartupResult

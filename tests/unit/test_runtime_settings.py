@@ -1,21 +1,132 @@
 """Strict private settings parser and owned exclusive default creation."""
 
+import json
 import os
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
+from jeff.application.execution import (
+    DockerBackendConfiguration,
+    DockerCLIIdentity,
+    DockerTargetDeclaration,
+    ExecutionProfile,
+)
 from jeff.application.runtime import RuntimeLayout
 from jeff.application.storage import StorageFault
 from jeff.infrastructure.runtime_settings import load_or_create_settings, parse_settings
 from jeff.infrastructure.runtime_state import RuntimeStateStore
 
 
+def test_settings3_backend_is_opt_in_bound_and_legacy_bytes_are_preserved(tmp_path: Path) -> None:
+    profile = ExecutionProfile(
+        project_id=uuid4(),
+        canonical_root=Path("/synthetic/project"),
+        name="python",
+        engine_id="synthetic",
+        endpoint="unix:///synthetic/docker.sock",
+        image_id="sha256:" + "1" * 64,
+        platform="linux/arm64",
+        toolchain="synthetic",
+        executable="/usr/local/bin/python",
+    )
+    backend = DockerBackendConfiguration(
+        binary=DockerCLIIdentity(path=Path("/synthetic/bin/docker"), sha256="a" * 64, size=10),
+        config=Path("/synthetic/config"),
+        declarations=(DockerTargetDeclaration(profile=profile),),
+    )
+    value = {
+        "schema_version": 3,
+        "history": {"retention_days": 30},
+        "execution": {"profiles": [profile.model_dump(mode="json")]},
+        "backend": backend.model_dump(mode="json"),
+    }
+    payload = json.dumps(value).encode()
+    settings = parse_settings(payload)
+    from jeff.application.storage import ConfiguredRuntimeSettings
+
+    assert isinstance(settings, ConfiguredRuntimeSettings)
+    assert settings.schema_version == 3 and settings.backend == backend
+    disabled = parse_settings(b"schema_version: 3\nhistory: {retention_days: 30}\n")
+    assert isinstance(disabled, ConfiguredRuntimeSettings) and disabled.backend is None
+    null_backend = parse_settings(json.dumps({**value, "backend": None}).encode())
+    assert isinstance(null_backend, ConfiguredRuntimeSettings) and null_backend.backend is None
+    # Other configured profiles may remain review-only, but every backend target
+    # must match a whole configured profile, not just its ID/name.
+    extra = {**profile.model_dump(mode="json"), "name": "review-only"}
+    subset = parse_settings(
+        json.dumps(
+            {**value, "execution": {"profiles": [profile.model_dump(mode="json"), extra]}}
+        ).encode()
+    )
+    assert isinstance(subset, ConfiguredRuntimeSettings) and subset.backend == backend
+    invalid: list[dict[str, object]] = [
+        {**value, "schema_version": v} for v in (1, 2, True, 3.0, "3", 4)
+    ]
+    invalid.extend(
+        (
+            {**value, "execution": {"profiles": []}},
+            {**value, "backend": "SYNTHETIC_PRIVATE"},
+            {**value, "unknown": "SYNTHETIC_PRIVATE"},
+        )
+    )
+    for change in (
+        {"canonical_root": "/synthetic/elsewhere"},
+        {"image_id": "sha256:" + "2" * 64},
+        {"memory_bytes": 16777216},
+    ):
+        invalid.append(
+            {**value, "execution": {"profiles": [{**profile.model_dump(mode="json"), **change}]}}
+        )
+    for bad in invalid:
+        with pytest.raises(StorageFault) as caught:
+            parse_settings(json.dumps(bad).encode())
+        assert caught.value.code == "settings_invalid" and "SYNTHETIC_PRIVATE" not in str(
+            caught.value
+        )
+    for version in (1, 2):
+        with pytest.raises(StorageFault):
+            parse_settings(
+                json.dumps(
+                    {"schema_version": version, "history": {"retention_days": 30}, "backend": None}
+                ).encode()
+            )
+
+    old_files = []
+    for version in (1, 2):
+        old = f"# keep me\nschema_version: {version}\nhistory: {{retention_days: 7}}\n".encode()
+        old_files.append(old)
+        legacy = parse_settings(old)
+        assert legacy.model_dump(mode="json") == {
+            "schema_version": version,
+            "history": {"retention_days": 7},
+            "execution": {"profiles": []},
+        }
+        assert "backend" not in legacy.model_dump(mode="json")
+
+    layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
+    owner = RuntimeStateStore(layout).acquire(create=True)
+    assert owner is not None
+    with owner:
+        _, source = load_or_create_settings(owner)
+        assert source == "default_file"
+        assert (
+            layout.settings.read_bytes()
+            == b"schema_version: 2\nhistory:\n  retention_days: 30\nexecution:\n  profiles: []\n"
+        )
+        for existing in (*old_files, payload):
+            layout.settings.write_bytes(existing)
+            observed, source = load_or_create_settings(owner)
+            assert source == "existing_file" and layout.settings.read_bytes() == existing
+            assert observed == parse_settings(existing)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
         b"{}",
-        b"schema_version: 2\nhistory: {retention_days: 30}",
+        b"schema_version: 5\nhistory: {retention_days: 30}",
         b"schema_version: 1\nhistory: {retention_days: true}",
         b"schema_version: 1\nhistory: {retention_days: '30'}",
         b"schema_version: 1\nhistory: {retention_days: 0}",

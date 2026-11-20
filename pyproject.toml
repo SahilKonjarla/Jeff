@@ -29,6 +29,9 @@ where = ["src"]
 include = ["jeff*"]
 namespaces = false
 
+[tool.setuptools.package-data]
+"jeff.infrastructure.runtime_execution" = ["jeff-job-guard-linux-arm64", "jeff-job-guard-linux-amd64"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-config --strict-markers"
