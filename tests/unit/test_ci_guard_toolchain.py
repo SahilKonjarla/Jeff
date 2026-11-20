@@ -146,6 +146,9 @@ def test_provision_pours_checked_bottles_before_declaring_tools(
         if args[-1] == "--version":
             return "clang LLD " + tools.RELEASE
         assert args[1] in {"fetch", "install", "reinstall"}
+        if args[1] == "fetch":
+            assert "--bottle-tag=" + tools.BOTTLE_TAG in args
+            assert "--force-bottle" not in args  # Homebrew declares these mutually exclusive.
         return ""
 
     monkeypatch.setattr(tools, "run", run)

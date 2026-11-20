@@ -155,7 +155,7 @@ def provision(output: Path) -> None:
     )
     info = [BREW, "info", "--json=v2", "llvm", "lld"]
     validate_formulae(json.loads(run(info, refresh_metadata=True)))
-    run([BREW, "fetch", "--force-bottle", "--bottle-tag=" + BOTTLE_TAG, "llvm", "lld"])
+    run([BREW, "fetch", "--bottle-tag=" + BOTTLE_TAG, "llvm", "lld"])
     for name, sha in BOTTLES.items():
         cache = Path(run([BREW, "--cache", "--bottle-tag=" + BOTTLE_TAG, name]))
         verify_bottle(cache, sha)
