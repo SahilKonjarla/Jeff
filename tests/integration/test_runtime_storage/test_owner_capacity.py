@@ -12,7 +12,7 @@ from uuid import uuid4
 import pytest
 
 from jeff.application.runtime import RuntimeLayout
-from jeff.application.storage import StorageFault
+from jeff.application.storage import STORAGE_PENDING_LIMIT, StorageFault
 from jeff.domain.projects import Project
 from jeff.infrastructure.runtime_state import RuntimeStateStore
 from jeff.infrastructure.runtime_storage import SQLiteStorage
@@ -73,9 +73,11 @@ def test_running_timeout_retains_slot_queue_is_bounded_and_close_waits_for_real_
                         active.result(timeout=32)
                     assert uncertain.value.code == "storage_outcome_unconfirmed"
                     assert time.monotonic() - began >= 29
+                    # One pending slot is reserved for stop-control work: fill the normal
+                    # positions plus one overflow before testing close/drain behavior.
                     pending = [
                         workers.submit(storage.index, Project(uuid4(), tmp_path / str(i)))
-                        for i in range(17)
+                        for i in range(STORAGE_PENDING_LIMIT)
                     ]
                     done, _ = wait(pending, timeout=3, return_when=FIRST_COMPLETED)
                     assert len(done) == 1
