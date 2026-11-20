@@ -24,7 +24,7 @@ from jeff.application.runtime import (
 from jeff.application.storage import RuntimeSettings
 from jeff.infrastructure import runtime_diagnostics as native
 
-INTERFACE_DIGEST = "fa9315127f7cfff0ca7a3b8a259130198ec549b1b836d7ff70f9dc2cd6de0aa4"
+INTERFACE_DIGEST = "b8fa4eefd7925a55da16e45e9f1aed08c272999bcf0c42df3f0a01e190c143ff"
 VECTOR_DIGEST = "f12477c900698954641a21c1f6bf74c54d83af0e2b6006f53f2dde4d478eea9b"
 SCHEMA_DIGEST = "bf378561c52c8394efdb470adfda206235c3b4a09a518874a65274a6744f3ca3"
 
