@@ -70,7 +70,7 @@ jobs:
           PY
 
       - name: Run unit, architecture, integration and acceptance tests
-        run: .venv/bin/python -m pytest tests/unit tests/architecture tests/integration tests/acceptance -q --basetemp "$JEFF_PYTEST_BASE" -p no:cacheprovider
+        run: .venv/bin/python -m pytest tests/unit tests/architecture tests/integration tests/acceptance -x -vv --tb=short --basetemp "$JEFF_PYTEST_BASE" -p no:cacheprovider
 
       - name: Lint
         run: .venv/bin/python -m ruff check src tests scripts
