@@ -23,7 +23,8 @@ def declaration(tmp_path: Path) -> tuple[Path, dict[str, object]]:
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
     data: dict[str, object] = {
-        "schema": 1,
+        "schema": 2,
+        "core_commit": tools.CORE_COMMIT,
         "release": tools.RELEASE,
         "bottles": tools.BOTTLES,
         "tools": binaries,
@@ -53,7 +54,7 @@ def test_verified_linker_keeps_driver_alias_for_argv0(tmp_path: Path) -> None:
     assert tools.verify_tool(declared, "lld") == alias
 
 
-@pytest.mark.parametrize("field", ["release", "bottles", "tools", "extra"])
+@pytest.mark.parametrize("field", ["schema", "core_commit", "release", "bottles", "tools", "extra"])
 def test_invalid_declared_provenance_fails_without_fallback(tmp_path: Path, field: str) -> None:
     manifest, data = declaration(tmp_path)
     data[field] = "unapproved"
@@ -131,13 +132,33 @@ def test_provision_pours_checked_bottles_before_declaring_tools(
     }
     if tampered:
         archives["llvm"].write_bytes(b"corrupted archive")
-    calls = []
-    refreshes = []
+    repository = tmp_path / "brew"
+    repository.mkdir()
+    contents = {name: (name + " immutable formula").encode() for name in pins}
+    monkeypatch.setattr(
+        tools,
+        "CORE_FORMULAE",
+        {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()},
+    )
 
-    def run(args: list[str], *, seconds: int = 180, refresh_metadata: bool = False) -> str:
+    def prepare(source: Path) -> None:
+        (source / "Formula/l").mkdir(parents=True)
+        for name, data in contents.items():
+            (source / "Formula/l" / (name + ".rb")).write_bytes(data)
+
+    monkeypatch.setattr(tools, "prepare_core", prepare)
+    calls = []
+
+    def run(args: list[str], *, seconds: int = 180) -> str:
         calls.append(args)
-        refreshes.append(refresh_metadata)
+        if args[0] == "/usr/bin/git":
+            assert args[-2:] == ["rev-parse", "HEAD"]
+            return tools.CORE_COMMIT
+        if args[1] == "--repository":
+            return str(repository)
         if args[1] == "info":
+            # The stale runner API must never be the selected formula source.
+            assert (repository / "Library/Taps/homebrew/homebrew-core/Formula/l/llvm.rb").exists()
             return json.dumps(formulae)
         if args[1] == "--cache":
             return str(archives[args[-1]])
@@ -162,7 +183,7 @@ def test_provision_pours_checked_bottles_before_declaring_tools(
         tools.provision(output)
         assert tools.verify_tool(tools.load_toolchain(output), "clang").name == "clang"
         assert output.stat().st_mode & 0o777 == 0o600
-        assert refreshes[0] is True and sum(refreshes) == 1
+        assert not (repository / "Library/Taps/homebrew/homebrew-core").exists()
         assert [c[1:] for c in calls if c[1] in {"install", "reinstall"}] == [
             ["reinstall", "--force-bottle", "llvm"],
             ["install", "--force-bottle", "lld"],
@@ -184,7 +205,8 @@ def test_command_environment_is_child_only(monkeypatch: pytest.MonkeyPatch) -> N
     assert isinstance(observed["env"], dict) and observed["env"][key] == "1"
 
 
-def test_metadata_refresh_is_explicit_and_child_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pinned_catalog_disables_api_and_refresh_in_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HOMEBREW_NO_INSTALL_FROM_API", raising=False)
     monkeypatch.setenv("HOMEBREW_API_UPDATED", "1")
     monkeypatch.delenv("HOMEBREW_FORCE_API_AUTO_UPDATE", raising=False)
     children: list[dict[str, str]] = []
@@ -196,14 +218,90 @@ def test_metadata_refresh_is_explicit_and_child_scoped(monkeypatch: pytest.Monke
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(subprocess, "run", command)
-    assert tools.run([tools.BREW, "info"], refresh_metadata=True) == "ok"
-    assert children[0]["HOMEBREW_FORCE_API_AUTO_UPDATE"] == "1"
-    assert children[0]["HOMEBREW_API_AUTO_UPDATE_SECS"] == "0"
+    assert tools.run([tools.BREW, "info"]) == "ok"
+    assert "HOMEBREW_FORCE_API_AUTO_UPDATE" not in children[0]
+    assert children[0]["HOMEBREW_NO_INSTALL_FROM_API"] == "1"
     assert children[0]["HOMEBREW_NO_AUTO_UPDATE"] == "1"
-    assert "HOMEBREW_API_UPDATED" not in children[0]
+    assert "HOMEBREW_NO_INSTALL_FROM_API" not in os.environ
     assert os.environ["HOMEBREW_API_UPDATED"] == "1"
     tools.run([tools.BREW, "fetch"])
     assert "HOMEBREW_FORCE_API_AUTO_UPDATE" not in children[1]
+
+
+def test_core_commit_and_formula_bytes_are_both_verified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "core"
+    (source / "Formula/l").mkdir(parents=True)
+    hashes = {}
+    for name in ("llvm", "lld"):
+        path = source / "Formula/l" / (name + ".rb")
+        path.write_bytes(name.encode())
+        hashes[name] = tools.digest(path)
+    monkeypatch.setattr(tools, "CORE_FORMULAE", hashes)
+    monkeypatch.setattr(tools, "run", lambda *a, **k: "wrong commit")
+    with pytest.raises(ValueError, match="commit"):
+        tools.verify_core(source)
+    monkeypatch.setattr(tools, "run", lambda *a, **k: tools.CORE_COMMIT)
+    tools.verify_core(source)
+    (source / "Formula/l/llvm.rb").write_bytes(b"changed")
+    with pytest.raises(ValueError, match="formula digest"):
+        tools.verify_core(source)
+
+
+@pytest.mark.parametrize("fail_body", [False, True])
+def test_core_activation_restores_existing_tap_even_on_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_body: bool,
+) -> None:
+    repository, source = tmp_path / "brew", tmp_path / "pinned"
+    tap = repository / "Library/Taps/homebrew/homebrew-core"
+    tap.mkdir(parents=True)
+    (tap / "original").write_text("old core must survive")
+    source.mkdir()
+    (source / "pinned").write_text("immutable core")
+    monkeypatch.setattr(tools, "verify_core", lambda _: None)
+    try:
+        with tools.using_core(repository, source) as active:
+            assert active == tap and (active / "pinned").exists()
+            assert not (active / "original").exists()
+            if fail_body:
+                raise RuntimeError("controlled body failure")
+    except RuntimeError:
+        assert fail_body
+    assert (tap / "original").read_text() == "old core must survive"
+    assert (source / "pinned").read_text() == "immutable core"
+    assert not source.with_name(source.name + ".original").exists()
+
+
+def test_checkout_fetches_only_the_immutable_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def record(args: list[str], **kwargs: object) -> str:
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(tools, "run", record)
+    checked = []
+    monkeypatch.setattr(tools, "verify_core", lambda p: checked.append(p))
+    source = tmp_path / "source"
+    tools.prepare_core(source)
+    assert [
+        *tools.GIT,
+        "-C",
+        str(source),
+        "fetch",
+        "--depth=1",
+        "origin",
+        tools.CORE_COMMIT,
+    ] in calls
+    assert [*tools.GIT, "-C", str(source), "checkout", "--detach", "FETCH_HEAD"] in calls
+    assert checked == [source]
 
 
 def test_bottle_checksum_mismatch_is_rejected(tmp_path: Path) -> None:
