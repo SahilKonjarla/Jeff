@@ -16,11 +16,11 @@ REQUEST = "00000000-0000-4000-8000-000000000001"
 
 
 def test_control_frame_roundtrip_has_big_endian_length_and_typed_request() -> None:
-    framed = encode_message({"revision": 13, "request_id": REQUEST, "operation": "hello"}, 65536)
+    framed = encode_message({"revision": 14, "request_id": REQUEST, "operation": "hello"}, 65536)
     assert struct.unpack("!I", framed[:4])[0] == len(framed) - 4
     request = decode_message(framed[4:], ControlRequest)
     assert request.request_id == UUID(REQUEST)
-    assert request.operation == "hello"
+    assert request.operation == "hello" and request.revision == 14
 
 
 @pytest.mark.parametrize(
@@ -31,8 +31,9 @@ def test_control_frame_roundtrip_has_big_endian_length_and_typed_request() -> No
         b"\xff",
         b"[]",
         b'{"revision":true}',
-        b'{"revision":12}',  # Previous revision must refuse; no legacy fallback.
-        b'{"revision":14}',  # Representative future revision.
+        b'{"revision":12}',  # Older revisions must refuse; no legacy fallback.
+        b'{"revision":13}',  # Immediately previous revision.
+        b'{"revision":15}',  # Representative future revision.
         b'{"revision":1.0}',
         b'{"revision":1,"operation":"ask"}',
         b"{" + b'"x":[' * 1100 + b"0" + b"]" * 1100 + b"}",
@@ -67,17 +68,18 @@ def test_truncated_frame_is_rejected_without_partial_success() -> None:
             receive_message(receiver, 4096, time.monotonic() + 1, ControlRequest)
 
 
-def test_v13_can_refuse_old_revision_explicitly_without_accepting_old_commands() -> None:
+@pytest.mark.parametrize("revision", [12, 13, 15])
+def test_v14_refuses_old_and_future_commands_with_current_revision_response(revision: int) -> None:
     refused = decode_message(
-        b'{"revision":13,"authenticated":false,"error":"runtime_protocol_incompatible"}',
+        b'{"revision":14,"authenticated":false,"error":"runtime_protocol_incompatible"}',
         AuthAccepted,
     )
     assert refused.error == "runtime_protocol_incompatible" and not refused.authenticated
+    framed = encode_message(
+        {"revision": revision, "request_id": REQUEST, "operation": "hello"}, 65536
+    )
     with pytest.raises(ControlFault) as caught:
-        decode_message(
-            b'{"revision":12,"request_id":"00000000-0000-4000-8000-000000000001","operation":"hello"}',
-            ControlRequest,
-        )
+        decode_message(framed[4:], ControlRequest)
     assert caught.value.code == "runtime_protocol_incompatible"
 
 

@@ -14,10 +14,11 @@ from pydantic import SecretStr, ValidationError
 from jeff.application import runtime
 from jeff.application.projects import ErrorData, Failure
 
-# Wire 13 intentionally replaces 12; value caps and interface fingerprints are unchanged.
-SCHEMA_DIGEST = "fdab12db88fb300d409077bf168539103d1b8ddce87312f69010b801413fecb8"
+# Wire 14 intentionally replaces 13; only revision fields/constants change.
+# Revision-normalized schemas/values still match their wire13 fingerprints.
+SCHEMA_DIGEST = "37d309f5677246d303d45eb823ceef85ecbb1821ab33e4e4855a9a5bcf29d251"
 INTERFACE_DIGEST = "57685a7755c889d4195084e4caf4597ba1e2d161e5c606ab92da710a369f2592"
-VALUE_DIGEST = "46794fa126fe7884b7b0569fbea79a193e7eeba1920a2923012e9cde63be0037"
+VALUE_DIGEST = "ad9325e9ed7673cae654be1775a71534bc0e447ddb811e947df2e3bd0cae5f57"
 
 
 def _digest(value: object) -> str:
@@ -98,23 +99,23 @@ def _values() -> dict[str, object]:
         "observation": observation,
         "success": runtime.ControlSuccess(data=observation),
         # Fixed synthetic input only: default serialization must remain masked.
-        "auth_request": runtime.AuthRequest.model_validate({"revision": 13, "token": "0" * 64}),
-        "auth_success": runtime.AuthAccepted(revision=13, authenticated=True, identity=identity),
+        "auth_request": runtime.AuthRequest.model_validate({"revision": 14, "token": "0" * 64}),
+        "auth_success": runtime.AuthAccepted(revision=14, authenticated=True, identity=identity),
         "auth_refused": runtime.AuthAccepted(
-            revision=13, authenticated=False, error="runtime_authentication_failed"
+            revision=14, authenticated=False, error="runtime_authentication_failed"
         ),
-        "hello": runtime.ControlRequest(revision=13, request_id=UUID(int=2), operation="hello"),
+        "hello": runtime.ControlRequest(revision=14, request_id=UUID(int=2), operation="hello"),
         "stop": runtime.ControlRequest(
-            revision=13,
+            revision=14,
             request_id=UUID(int=3),
             operation="stop",
             expected_instance_id=identity.instance_id,
         ),
         "response": runtime.ControlResponse(
-            revision=13, request_id=UUID(int=2), observation=observation
+            revision=14, request_id=UUID(int=2), observation=observation
         ),
-        "error": runtime.ControlResponse(revision=13, request_id=UUID(int=2), error="runtime_busy"),
-        "startup": runtime.StartupResult(revision=13, instance_id=identity.instance_id),
+        "error": runtime.ControlResponse(revision=14, request_id=UUID(int=2), error="runtime_busy"),
+        "startup": runtime.StartupResult(revision=14, instance_id=identity.instance_id),
     }
     return {
         "wire": {name: item.model_dump_json() for name, item in values.items()},
@@ -161,8 +162,8 @@ def test_wire_defaults_caps_and_failure_message_order_are_identical() -> None:
 @pytest.mark.parametrize("token", [SecretStr("0" * 64), "A" * 64, "short", 0, True])
 def test_authentication_still_accepts_only_raw_lowercase_hex_input(token: object) -> None:
     with pytest.raises(ValidationError):
-        runtime.AuthRequest.model_validate({"revision": 13, "token": token})
-    auth = runtime.AuthRequest.model_validate({"revision": 13, "token": "0" * 64})
+        runtime.AuthRequest.model_validate({"revision": 14, "token": token})
+    auth = runtime.AuthRequest.model_validate({"revision": 14, "token": "0" * 64})
     assert "0" * 64 not in repr(auth) and "0" * 64 not in auth.model_dump_json()
     assert len(auth.token.get_secret_value()) == 64
 
@@ -170,13 +171,14 @@ def test_authentication_still_accepts_only_raw_lowercase_hex_input(token: object
 def test_revision_field_bounds_are_captured_not_redefined_by_root_reassignment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime, "PROTOCOL_REVISION", 14)
+    monkeypatch.setattr(runtime, "PROTOCOL_REVISION", 15)
     assert (
-        runtime.ControlRequest(revision=13, request_id=UUID(int=1), operation="hello").revision
-        == 13
+        runtime.ControlRequest(revision=14, request_id=UUID(int=1), operation="hello").revision
+        == 14
     )
-    with pytest.raises(ValidationError):
-        runtime.ControlRequest(revision=14, request_id=UUID(int=1), operation="hello")
+    for revision in (12, 13, 15):
+        with pytest.raises(ValidationError):
+            runtime.ControlRequest(revision=revision, request_id=UUID(int=1), operation="hello")
 
 
 def test_validator_keeps_runtime_root_role_hook(monkeypatch: pytest.MonkeyPatch) -> None:

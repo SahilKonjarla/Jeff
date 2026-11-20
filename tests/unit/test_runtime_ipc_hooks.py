@@ -32,7 +32,7 @@ def test_receive_message_still_uses_namespace_decode_hook(monkeypatch: pytest.Mo
         seen.append(payload)
         return original(payload, model)
 
-    request = ControlRequest(revision=13, request_id=UUID(int=1), operation="hello")
+    request = ControlRequest(revision=14, request_id=UUID(int=1), operation="hello")
     frame = ipc.encode_message(request.model_dump(mode="json"), 4096)
     monkeypatch.setattr(ipc, "decode_message", decode)
     sender, receiver = socket.socketpair()
@@ -46,7 +46,7 @@ def test_unary_exchange_still_uses_namespace_codec_hooks(monkeypatch: pytest.Mon
     original = ipc.encode_message
     sent: list[dict[str, object]] = []
     received: list[socket.socket] = []
-    request = ControlRequest(revision=13, request_id=UUID(int=1), operation="hello")
+    request = ControlRequest(revision=14, request_id=UUID(int=1), operation="hello")
 
     def encode(message: dict[str, object], maximum: int) -> bytes:
         sent.append(message)
@@ -146,7 +146,7 @@ def test_server_subscription_refusal_still_uses_namespace_stream_sender_hook(
     server, writer = _server(), Writer()
     query = SubscriptionQuery(query_id=UUID(int=2), directory=Path("/synthetic/project"))
     messages = [
-        AuthRequest.model_validate({"revision": 13, "token": "00" * 32}),
+        AuthRequest.model_validate({"revision": 14, "token": "00" * 32}),
         ipc.RpcRequest(SubscriptionRequest(expected_instance_id=UUID(int=3), query=query)),
     ]
     authenticated: list[BaseModel] = []
