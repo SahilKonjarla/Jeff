@@ -30,6 +30,8 @@ FreshExecutionOperation = Literal[
     "approvals.list",
     "jobs.list",
     "tests.results",
+    "tests.latest",
+    "tests.retry-failed",
 ]
 
 
@@ -73,9 +75,9 @@ class FreshExecutionCall(_Model):
 
     @model_validator(mode="after")
     def shape(self) -> Self:
-        if self.operation == "tests.results":
+        if self.operation in {"tests.results", "tests.latest", "tests.retry-failed"}:
             if (
-                self.job_id is None
+                (self.job_id is None) != (self.operation == "tests.latest")
                 or self.approval_id is not None
                 or self.profile_name is not None
                 or self.argv
@@ -84,7 +86,9 @@ class FreshExecutionCall(_Model):
                 or self.limit != 16
                 or self.reviewed_manifest_digest is not None
             ):
-                raise ValueError("Test results accept only a job ID and project scope.")
+                raise ValueError(
+                    "Test inspection or retry accepts only the expected project and job scope."
+                )
             return self
         if self.job_id is not None:
             raise ValueError("Only test results accept a job ID.")
@@ -163,10 +167,11 @@ class ExecutionInspectionScope(_Model):
     owner_instance_id: UUID
     approval_id: UUID | None = None
     job_id: UUID | None = None
+    latest_pytest: bool = False
 
     @model_validator(mode="after")
     def exactly_one_identity(self) -> Self:
-        if (self.approval_id is None) == (self.job_id is None):
+        if sum((self.approval_id is not None, self.job_id is not None, self.latest_pytest)) != 1:
             raise ValueError("Inspection must target one approval or one job.")
         return self
 

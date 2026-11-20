@@ -28,7 +28,7 @@ def register(
     app: typer.Typer,
     fresh_execution: Callable[[], FreshExecutionClient] | None,
     cancellation: Callable[[], ExecutionCancelClient] | None,
-) -> None:
+) -> Callable[[bool], None]:
     """Register fresh actions without invoking factories or discovering cwd."""
     fresh_app = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
     app.add_typer(
@@ -78,14 +78,14 @@ def register(
             call = FreshExecutionCall.model_validate(
                 {"directory": Path.cwd(), "request_id": uuid4(), "operation": operation, **values}
             )
-            if operation == "propose":
+            if operation in {"propose", "tests.retry-failed"}:
                 typer.echo(
                     "Development-only: declare only arguments and files you reviewed as "
                     "non-secret public data; argv and copied inputs may persist. "
                     "Filename filtering, hashing and output guards are not secret certification.",
                     err=True,
                 )
-            if operation in {"propose", "approve", "deny", "start"}:
+            if operation in {"propose", "approve", "deny", "start", "tests.retry-failed"}:
                 typer.echo(f"Request: {call.request_id}", err=True)
             reply = (
                 fresh_execution().fresh(call)
@@ -129,6 +129,11 @@ def register(
     def test_results(job_id: UUID, json_output: bool = typer.Option(False, "--json")) -> None:
         """Read the saved test report for a job in this project."""
         fresh_action("tests.results", json_output, job_id=job_id)
+
+    @test_app.command("retry-failed")
+    def retry_failed(job_id: UUID, json_output: bool = typer.Option(False, "--json")) -> None:
+        """Propose a new approval for only the recorded failed tests."""
+        fresh_action("tests.retry-failed", json_output, job_id=job_id)
 
     @fresh_app.command("propose", context_settings={"ignore_unknown_options": True})
     def fresh_propose(
@@ -208,3 +213,8 @@ def register(
 
     fresh_list_command("approvals", "approvals.list")
     fresh_list_command("jobs", "jobs.list")
+
+    def latest_pytest(json_output: bool) -> None:
+        fresh_action("tests.latest", json_output)
+
+    return latest_pytest

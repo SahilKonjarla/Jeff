@@ -5,7 +5,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import cast
+from typing import Never, cast
 from uuid import uuid4
 
 import pytest
@@ -26,6 +26,7 @@ from jeff.infrastructure.runtime_execution.arguments import create_arguments
 from jeff.infrastructure.runtime_execution.guard_artifacts import InstalledGuardVerifier
 from jeff.infrastructure.runtime_output import PytestOutputCollector
 from jeff.interfaces.cli.execution_commands import register
+from jeff.interfaces.cli.project_commands import register as register_project_commands
 
 from .support_composition import approved, composed, pending, show
 from .support_guarded import policy
@@ -86,9 +87,9 @@ def test_guarded_approval_runs_once_and_preserves_original_workload(tmp_path: Pa
         assert docker.calls.count("create") == 1
 
 
-@pytest.mark.parametrize("failing", [False, True])
+@pytest.mark.parametrize(("failing", "version"), [(False, 2), (True, 1), (True, 2)])
 def test_pytest_cli_uses_existing_approval_and_reads_report_by_job_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: bool, version: int
 ) -> None:
     with composed(tmp_path, guarded=True) as (coordinator, _, project, docker):
         coordinator.pytest_capture = lambda limit, token, paths: PytestOutputCollector(
@@ -101,7 +102,12 @@ def test_pytest_cli_uses_existing_approval_and_reads_report_by_job_id(
 
         monkeypatch.chdir(project.root)
         app = typer.Typer()
-        register(app, Client, None)
+        ask = register(app, Client, None)
+
+        def no_git_client() -> Never:
+            raise AssertionError("Test summaries must not dispatch to Git.")
+
+        register_project_commands(app, no_git_client, ask)
         cli = CliRunner()
         proposal = cli.invoke(
             app, ["tests", "run", "--profile", "python", "--input", "source.py", "--json"]
@@ -111,6 +117,8 @@ def test_pytest_cli_uses_existing_approval_and_reads_report_by_job_id(
         assert reply.view is not None
         view = reply.view
         assert "create" not in docker.calls
+        not_run = cli.invoke(app, ["tests", "retry-failed", str(view.job_id), "--json"])
+        assert not_run.exit_code == 1 and "execution_retry_unavailable" in not_run.stdout
         coordinator.decide(
             project.root,
             view.approval_id,
@@ -121,7 +129,7 @@ def test_pytest_cli_uses_existing_approval_and_reads_report_by_job_id(
         docker.exit_code = int(failing)
         docker.output = json.dumps(
             {
-                "version": 1,
+                "version": version,
                 "run_token": view.manifest.argv[-1],
                 "passed": 2 - int(failing),
                 "failed": int(failing),
@@ -163,6 +171,34 @@ def test_pytest_cli_uses_existing_approval_and_reads_report_by_job_id(
         assert archive.pytest_result is None
         assert archive.output is not None and archive.output.stdout == ""
         assert docker.calls.count("remove") == 1
+        summary = cli.invoke(app, ["ask", "What failed?"])
+        assert summary.exit_code == 0 and f"Passed: {report.passed}" in summary.stdout
+        retry = cli.invoke(app, ["tests", "retry-failed", str(view.job_id), "--json"])
+        if not failing or version == 1:
+            assert retry.exit_code == 1 and "execution_retry_unavailable" in retry.stdout
+            return
+        assert retry.exit_code == 0, (retry.stdout, retry.exception)
+        proposed = FreshExecutionReply.model_validate_json(retry.stdout).view
+        assert proposed is not None and proposed.state.value == "pending"
+        assert (proposed.approval_id, proposed.job_id) != (view.approval_id, view.job_id)
+        assert proposed.manifest.argv[5:] == ("source.py::test_case",)
+        assert proposed.manifest.profile == view.manifest.profile
+        assert proposed.manifest.inputs.files == view.manifest.inputs.files
+        latest = cli.invoke(app, ["ask", "what failed?"])
+        assert latest.exit_code == 0 and str(proposed.job_id) in latest.stdout
+        assert "Pytest report unavailable (not_claimed)." in latest.stdout
+        with pytest.raises(DockerBackendFault):
+            coordinator.run(
+                project.root,
+                proposed.approval_id,
+                proposed.manifest_digest,
+                deadline=time.monotonic() + 5,
+            )
+        assert docker.calls.count("create") == 1
+        (project.root / "source.py").write_text("source changed\n")
+        changed = cli.invoke(app, ["tests", "retry-failed", str(view.job_id), "--json"])
+        assert changed.exit_code == 1 and "execution_conflict" in changed.stdout
+        assert docker.calls.count("create") == 1
 
 
 def test_workload124_is_not_timeout(tmp_path: Path) -> None:

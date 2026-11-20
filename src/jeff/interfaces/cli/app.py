@@ -51,8 +51,8 @@ def create_app(
 
     # Preserve registration order, including group order in public help.
     review_commands.register(app, execution)
-    execution_commands.register(app, fresh_execution, cancellation)
+    latest_pytest = execution_commands.register(app, fresh_execution, cancellation)
     runtime_commands.register(app, control, diagnostics)
-    project_commands.register(app, client)
+    project_commands.register(app, client, latest_pytest)
     history_commands.register(app, debug_app, client)
     return app

@@ -10,13 +10,20 @@ from jeff.application.execution import (
     FreshExecutionCompletion,
     FreshExecutionReply,
     FreshExecutionView,
+    GuardedExecutionManifest,
     PreparedInputFault,
     ReviewFault,
     fresh_execution_failure,
 )
-from jeff.application.execution.pytest_report import pytest_run_token
+from jeff.application.execution.pytest_report import (
+    PYTEST_RUNNER_ARGV,
+    pytest_retry_token,
+    pytest_run_token,
+)
 from jeff.application.storage import StorageFault
+from jeff.domain.execution import ARGV_BYTES, ARGV_COUNT
 
+from . import proposal
 from .binding import _deadline, _project
 
 if TYPE_CHECKING:
@@ -75,7 +82,13 @@ def execute(
                 request_id=call.request_id,
                 deadline=deadline,
             )
-        elif call.operation in {"show", "logs", "tests.results"}:
+        elif call.operation in {
+            "show",
+            "logs",
+            "tests.results",
+            "tests.latest",
+            "tests.retry-failed",
+        }:
             if self.inspection is None:
                 raise DockerBackendFault("docker_authority_required")
             project = _project(self, call.directory, deadline)
@@ -86,15 +99,16 @@ def execute(
                     owner_instance_id=self.instance_id,
                     approval_id=call.approval_id,
                     job_id=call.job_id,
+                    latest_pytest=call.operation == "tests.latest",
                 ),
                 deadline=deadline,
             )
             record = observed.record
             result = observed.result
             pytest_result = None
-            if call.operation == "tests.results":
+            if call.operation.startswith("tests."):
                 token = pytest_run_token(record.manifest.argv)
-                if token is None or record.job_id != call.job_id:
+                if token is None or (call.job_id is not None and record.job_id != call.job_id):
                     raise ReviewFault("execution_target_mismatch")
                 if result is not None:
                     pytest_result = result.pytest_result
@@ -104,6 +118,42 @@ def execute(
                         and pytest_result.report.run_token != token
                     ):
                         raise DockerBackendFault("docker_output_failed")
+            if call.operation == "tests.retry-failed":
+                report = pytest_result.report if pytest_result is not None else None
+                manifest = record.manifest
+                if (
+                    result is None
+                    or result.disposition != "completed"
+                    or not isinstance(manifest, GuardedExecutionManifest)
+                    or report is None
+                    or report.version != 2
+                    or not report.failures
+                ):
+                    raise ReviewFault("execution_retry_unavailable")
+                argv = (
+                    *PYTEST_RUNNER_ARGV,
+                    pytest_retry_token(call.request_id, record.job_id),
+                    *(failure.node_id for failure in report.failures),
+                )
+                if len(argv) > ARGV_COUNT or sum(len(arg.encode()) for arg in argv) > ARGV_BYTES:
+                    raise ReviewFault("execution_retry_unavailable")
+                retry = proposal.propose(
+                    self,
+                    call.directory,
+                    manifest.profile.name,
+                    argv,
+                    tuple(item.path for item in manifest.inputs.files),
+                    deadline=deadline,
+                    request_id=call.request_id,
+                    retry_of=manifest,
+                )
+                return FreshExecutionReply(
+                    ok=True,
+                    request_id=call.request_id,
+                    operation=call.operation,
+                    identity=self.instance_id,
+                    view=FreshExecutionView.from_record(retry),
+                )
             completion = (
                 None
                 if result is None

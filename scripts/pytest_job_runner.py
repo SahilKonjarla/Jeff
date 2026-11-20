@@ -18,10 +18,20 @@ _FAILURE_LIMIT = 128
 
 
 class _Reports:
-    def __init__(self) -> None:
+    def __init__(self, selections: tuple[str, ...]) -> None:
+        self.selections = selections
         self.passed = 0
         self.failures: list[dict[str, str | int]] = []
         self.unsupported = False
+
+    def pytest_collection_finish(self, session: object) -> None:
+        from pytest import Session, exit
+
+        if self.selections and (
+            not isinstance(session, Session)
+            or sorted(item.nodeid for item in session.items) != sorted(self.selections)
+        ):
+            exit("Jeff pytest runner: collection does not match exact selection.", returncode=4)
 
     def pytest_runtest_logreport(self, report: object) -> None:
         # Kept local so a missing pytest can produce a useful runner diagnostic.
@@ -58,7 +68,7 @@ class _Reports:
             return
         payload = json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "run_token": token,
                 "passed": self.passed,
                 "failed": len(self.failures),
@@ -75,8 +85,16 @@ class _Reports:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 1 or re.fullmatch(r"[0-9a-f]{32}", argv[0]) is None:
+    if not argv or re.fullmatch(r"[0-9a-f]{32}", argv[0]) is None:
         print("Jeff pytest runner: invalid run token.", file=sys.stderr)
+        return 4
+    selections = tuple(argv[1:])
+    if (
+        len(selections) > _FAILURE_LIMIT
+        or len(set(selections)) != len(selections)
+        or any(not node or node.startswith("-") or "::" not in node for node in selections)
+    ):
+        print("Jeff pytest runner: invalid test selection.", file=sys.stderr)
         return 4
     sys.stdout.flush()
     with os.fdopen(os.dup(sys.stdout.fileno()), "wb") as report_output:
@@ -92,7 +110,7 @@ def main(argv: list[str]) -> int:
         for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
             os.environ.pop(key, None)
         root = Path.cwd()
-        plugin = _Reports()
+        plugin = _Reports(selections)
         code = int(
             pytest.main(
                 [
@@ -103,7 +121,8 @@ def main(argv: list[str]) -> int:
                     "--color=no",
                     "--tb=short",
                     "-q",
-                    ".",
+                    "--",
+                    *(selections or (".",)),
                 ],
                 plugins=[plugin],
             )

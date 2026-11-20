@@ -190,7 +190,7 @@ def render_execution(
             f"replayed={reply.admission.replayed}"
         )
         typer.echo("Claim acknowledgement only; not guest-start or completion confirmation.")
-    elif operation == "tests.results" and reply.view is not None:
+    elif operation in {"tests.results", "tests.latest"} and reply.view is not None:
         typer.echo(f"Job: {reply.view.job_id}")
         if reply.completion is not None:
             typer.echo(f"Exit status: {reply.completion.outcome.exit_code}")

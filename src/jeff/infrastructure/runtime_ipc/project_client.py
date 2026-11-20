@@ -38,6 +38,7 @@ from jeff.application.execution import (
     execution_failure,
     fresh_execution_failure,
 )
+from jeff.application.execution.pytest_report import pytest_retry_token, pytest_run_token
 from jeff.application.projects import Failure
 from jeff.application.runtime import (
     DEFAULT_RUNTIME_LIMITS,
@@ -242,11 +243,20 @@ class RuntimeProjectClient:
                         if (
                             call.approval_id is not None
                             and reply.view.approval_id != call.approval_id
-                        ) or (call.job_id is not None and reply.view.job_id != call.job_id):
+                        ) or (
+                            call.operation == "tests.results" and reply.view.job_id != call.job_id
+                        ):
                             raise ControlFault("runtime_ownership_unconfirmed")
                         if (
                             call.reviewed_manifest_digest is not None
                             and reply.view.manifest_digest != call.reviewed_manifest_digest
+                        ):
+                            raise ControlFault("runtime_ownership_unconfirmed")
+                        if call.operation == "tests.retry-failed" and (
+                            call.job_id is None
+                            or reply.view.job_id == call.job_id
+                            or pytest_run_token(reply.view.manifest.argv)
+                            != pytest_retry_token(call.request_id, call.job_id)
                         ):
                             raise ControlFault("runtime_ownership_unconfirmed")
                         if call.operation == "propose" and (

@@ -18,6 +18,7 @@ from jeff.application.execution import (
     ReviewFault,
     parse_execution_cursor,
 )
+from jeff.application.execution.pytest_report import PYTEST_RUNNER_ARGV
 from jeff.application.storage import StorageFault
 from jeff.domain.execution import AuthorityState
 
@@ -41,13 +42,24 @@ def _inspect_execution(
     if approval_id is None:
         if self.instance_id is None or scope.owner_instance_id != self.instance_id:
             raise ReviewFault("execution_target_mismatch")
-        row = connection.execute(
-            "SELECT approval_id FROM execution_authorities WHERE job_id=? "
-            "AND project_id=? AND canonical_root=?",
-            (str(scope.job_id), str(scope.project_id), str(scope.canonical_root)),
-        ).fetchone()
+        project_scope = (str(scope.project_id), str(scope.canonical_root))
+        if scope.latest_pytest:
+            row = connection.execute(
+                "SELECT approval_id FROM execution_authorities WHERE project_id=? "
+                "AND canonical_root=? AND json_extract(manifest_json,'$.authority_kind')"
+                "='guarded_execution_v1' "
+                "AND json_extract(manifest_json,'$.original.argv[3]')=? "
+                "ORDER BY created_at_ms DESC, proposal_id DESC LIMIT 1",
+                (*project_scope, PYTEST_RUNNER_ARGV[-1]),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                "SELECT approval_id FROM execution_authorities WHERE job_id=? "
+                "AND project_id=? AND canonical_root=?",
+                (str(scope.job_id), *project_scope),
+            ).fetchone()
         if row is None:
-            raise ReviewFault("execution_target_mismatch")
+            raise ReviewFault("execution_not_found")
         approval_id = UUID(row[0])
     record = self._authority_work(
         connection,

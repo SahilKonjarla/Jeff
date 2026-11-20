@@ -41,6 +41,13 @@ copy the whole checkout or prepare the image. The result uses the job ID, not
 the approval ID. A missing or rejected report is not a substitute for the job’s
 exit status. The report is separate from ordinary logs and expires with them.
 
+`jeff ask "what failed?"` reads the latest pytest job in the current project,
+including a job that has not finished yet. `jeff tests retry-failed <job-id>`
+proposes a new job for the exact failed test IDs from a retained version 2 report.
+Approve and start it separately. Retry requires the same pinned image, execution
+profile and input bytes; to test changed source, propose a fresh `jeff tests run`.
+Version 1 reports are still readable but cannot be used to propose retries.
+
 ## Start and use a project
 
 ```bash

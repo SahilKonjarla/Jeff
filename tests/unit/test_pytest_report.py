@@ -124,9 +124,11 @@ def test_buffer_accepts_fragmented_report_at_byte_limit() -> None:
 _RUNNER = Path(__file__).resolve().parents[2] / "scripts" / "pytest_job_runner.py"
 
 
-def _run_fixture(root: Path, *flags: str) -> subprocess.CompletedProcess[bytes]:
+def _run_fixture(
+    root: Path, *flags: str, selections: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
-        [sys.executable, "-I", *flags, str(_RUNNER), _TOKEN],
+        [sys.executable, "-I", *flags, str(_RUNNER), _TOKEN, *selections],
         cwd=root,
         env={},
         capture_output=True,
@@ -166,6 +168,27 @@ def test_runner_reports_missing_pytest_without_emitting_a_report(tmp_path: Path)
     assert run.returncode == 4
     assert run.stdout == b""
     assert b"pytest is unavailable" in run.stderr
+
+
+def test_runner_executes_only_exact_failed_node(tmp_path: Path) -> None:
+    (tmp_path / _PATH).write_text(
+        "import pytest\n"
+        "def test_other():\n    raise AssertionError('must not run')\n"
+        "@pytest.mark.parametrize('n', [1, 2])\n"
+        "def test_case(n):\n    assert n != 2\n",
+        encoding="utf-8",
+    )
+    selected = f"{_PATH}::test_case[2]"
+    run = _run_fixture(tmp_path, selections=(selected,))
+    assert run.returncode == 1, run.stderr
+    status, result = read_pytest_report(
+        run.stdout, run_token=_TOKEN, exit_status=1, approved_paths={_PATH}
+    )
+    assert status == "available" and result is not None and result.version == 2
+    assert result.passed == 0 and [f.node_id for f in result.failures] == [selected]
+    group = _run_fixture(tmp_path, selections=(f"{_PATH}::test_case",))
+    assert group.returncode == 4 and not group.stdout
+    assert b"collection does not match exact selection" in group.stderr
 
 
 def _collector(payload: bytes, log: bytes = b"pytest summary\n") -> PytestOutputCollector:

@@ -60,7 +60,7 @@ class FreshExecutionReply(_Model):
         if self.ok != (self.error is None):
             raise ValueError("Success and failure disagree.")
         if self.pytest_result is not None and (
-            self.operation != "tests.results"
+            self.operation not in {"tests.results", "tests.latest"}
             or not self.ok
             or self.completion is None
             or self.completion.disposition != "completed"
@@ -128,9 +128,9 @@ class FreshExecutionReply(_Model):
             or self.completion_state is not None
             or self.stop is not None
             or self.execution_phase is not None
-        ) and self.operation not in {"show", "logs", "tests.results"}:
+        ) and self.operation not in {"show", "logs", "tests.results", "tests.latest"}:
             raise ValueError("Completion is inspection only.")
-        if self.ok and self.operation in {"show", "logs", "tests.results"}:
+        if self.ok and self.operation in {"show", "logs", "tests.results", "tests.latest"}:
             if self.completion_state is None or (self.completion_state == "recorded") != (
                 self.completion is not None
             ):
@@ -192,6 +192,10 @@ def fresh_execution_failure(code: str) -> Failure:
         "execution_conflict": "Request identity or reviewed action conflicts with stored facts.",
         "execution_expired": "Approval expired or was invalidated; a fresh review is required.",
         "execution_not_found": "No fresh execution record exists in this validated scope.",
+        "execution_retry_unavailable": (
+            "Failed-test retry needs a retained failure report from a selection-capable runner "
+            "and a failure set within the argument limits."
+        ),
         "request_outcome_unknown": (
             "Request outcome is unconfirmed. Preserve original request/approval IDs; use "
             "execution show APPROVAL_ID --json and execution logs APPROVAL_ID --json in the "

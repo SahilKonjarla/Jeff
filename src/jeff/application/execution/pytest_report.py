@@ -9,6 +9,7 @@ import re
 from collections.abc import Collection
 from pathlib import PurePosixPath
 from typing import Literal, Self
+from uuid import UUID, uuid5
 
 from pydantic import Field, StrictInt, ValidationError, field_validator, model_validator
 
@@ -19,9 +20,16 @@ PYTEST_RUNNER_ARGV = ("/usr/local/bin/python", "-I", "-B", "/opt/jeff/pytest_job
 
 
 def pytest_run_token(argv: tuple[str, ...]) -> str | None:
-    if argv[:-1] == PYTEST_RUNNER_ARGV and re.fullmatch(r"[a-f0-9]{32}", argv[-1]):
-        return argv[-1]
+    index = len(PYTEST_RUNNER_ARGV)
+    if argv[:index] == PYTEST_RUNNER_ARGV and len(argv) > index:
+        token = argv[index]
+        if re.fullmatch(r"[a-f0-9]{32}", token):
+            return token
     return None
+
+
+def pytest_retry_token(request_id: UUID, origin_job_id: UUID) -> str:
+    return uuid5(request_id, str(origin_job_id)).hex
 
 
 PytestReportStatus = Literal["available", "missing", "oversized", "invalid", "withheld"]
@@ -42,7 +50,7 @@ class PytestFailure(_Model):
 
 
 class PytestReport(_Model):
-    version: Literal[1]
+    version: Literal[1, 2]
     run_token: str = Field(strict=True, pattern=r"^[a-f0-9]{32}$")
     passed: StrictInt = Field(ge=0, le=1000000)
     failed: StrictInt = Field(ge=0, le=128)
