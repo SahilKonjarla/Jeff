@@ -11,7 +11,7 @@ Cause/detail codes are explicit below; container exit status is NOT a cause.
 All observations share one increasing sequence, with exactly one terminal last.
 
 Stdout remains raw workload data; stderr data payload is never nested protocol.
-The future adapter must establish an original, exclusive guard-owned channel,
+A transport adapter must establish an original, exclusive guard-owned channel,
 reject stdout/stderr endpoint aliasing, protect descriptors from the workload,
 and retain bounded nonblocking progress even when output consumers stop.
 Magic bytes, matching nonce/digest and successful parsing do not prove those.

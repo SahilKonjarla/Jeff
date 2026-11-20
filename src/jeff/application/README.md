@@ -1,6 +1,6 @@
 # Application — tier1
 
-Owns use cases, typed public results, policy and narrow ports. Depends only on domain/application contracts, stdlib and Pydantic—not concrete sockets, processes, SQL/YAML adapters or bootstrap. M02 is delivered/accepted. M03 Phase2's durable review-only workflow is accepted. Phase3 now composes fresh authority, verified owned Docker execution and opt-in public intent; Step3 is explicitly accepted after source, fresh installed-wheel and human manual proofs. Whole Phase3 and Phase4 are explicitly accepted; Phase4 retains the missing independent-human shutdown repeat as a documented validation exception. Whole M03 remains incomplete. [Tier map](../README.md).
+Owns use cases, typed public results, policy and narrow ports. Depends only on domain/application contracts, stdlib and Pydantic—not concrete sockets, processes, SQL/YAML adapters or bootstrap. M02 is delivered/accepted. M03 Phase2's durable review-only workflow is accepted. Phase3 now composes fresh authority, verified owned Docker execution and opt-in public intent; Step3 is explicitly accepted after source, fresh installed-wheel and human manual proofs. Whole Phase3 and Phase4 are explicitly accepted; Phase4 retains the missing independent-human shutdown repeat as a documented validation exception. M03 is now accepted with the completed guarded installed/native/operator closeouts and recorded qualifications. See the [current execution module map](execution/README.md) and [root verification scope](../../../README.md#verification-scope). [Tier map](../README.md).
 
 ## Current guarded execution integration — wire14, settings4, DB10
 
@@ -8,7 +8,7 @@ Fresh configured execution now requires settings4 with `GuardedDockerBackendConf
 
 `AuthorityOperation`, `AuthorityRecord` and `FreshExecutionView` admit the discriminated `guarded_execution_v1` format. The view labels it explicitly and renders the full outer manifest. Original workload/review serialization and digests remain unchanged; JFG1 drafts and review-only approvals stay nonexecuting. Old fresh facts remain readable; guarded configured execution refuses to launch an old unguarded approval. Settings1/2/3 remain parseable and default settings2 bytes remain unchanged. Settings3 backend configuration alone no longer authorizes new configured launches; it can still expose facts/denial through the existing coordinator. Wire13 clients refuse wire14. DB10 needs no DDL change, but older binaries cannot read new guarded JSON; downgrade after guarded work is unsupported, not an automatic conversion.
 
-The existing claim/worker/controller/journal/result paths remain authoritative. Workload exit124 is not timeout; a validated guard deadline uses the existing durable timeout path. Guard faults and absent/invalid/partial status remain unknown, with genuine captured pipes retained observe-only and no automatic stop/remove/retry. This is source integration, not a new installed/native acceptance or M03 completion. The standalone sections below are historical checkpoints.
+The existing claim/worker/controller/journal/result paths remain authoritative. Workload exit124 is not timeout; a validated guard deadline uses the existing durable timeout path. Guard faults and absent/invalid/partial status remain unknown, with genuine captured pipes retained observe-only and no automatic stop/remove/retry. Source integration subsequently passed scoped installed/native/operator acceptance; this does not turn fake/source cases into physical proof or imply a current full-suite/CI pass. The standalone sections below are historical checkpoints.
 
 ## M03 policy/recovery outcomes — no new recovery subsystem
 
@@ -19,6 +19,10 @@ Settings4 backend targets require explicit `environment: development` on both th
 Selected files/argv are declarations of operator-reviewed public, non-secret content, not content certification. Literal protected-name exclusion and byte hashes enforce the declared view/integrity, not universal secret discovery. CLI proposal now makes that responsibility and private persistence visible. Direct application clients share this contract.
 
 Existing unknown/restart/quarantine/no-replay state transitions remain intact. Public uncertainty errors and human inspection provide original-ID `execution show`/`execution logs` guidance, preserve missing-log uncertainty and prohibit retry/reset/adoption. Historical reads never transfer mutation authority, and restarting or expiring text does not clear unknown claims. No adoption, quarantine-release or generic admin recovery API was added; unresolved cases require separately authorized evidence review rather than fabricated completion. See [operator guidance](../interfaces/README.md#m03-policy-and-uncertain-work-guidance). Wire14/DB10/settings4/default2 remain unchanged by this slice.
+
+## Historical implementation checkpoints
+
+The sections below retain original per-phase versions, proofs and then-missing work. Current capabilities/compatibility are defined above and in the module READMEs; obsolete “current” labels below describe their historical checkpoint only.
 
 ## Standalone guard — source contract only (historical JFG1)
 

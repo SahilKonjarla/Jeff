@@ -1,6 +1,6 @@
 # Integrations — tier 2
 
-**Status:** M01 read-only Git plus M02 daemon-owned native-child lifetime implemented. Other integrations and Git-write commands remain unimplemented. Declared Docker execution is the selected M03 general-job direction, not a shipped integration. M03 owns minimal container-job lifecycle; M05 adds Compose/services through application ports. Delivered native Git helpers remain unchanged; this decision does not grant containers host Git or Docker socket authority.
+**Status:** M01 read-only Git plus M02 daemon-owned native-child lifetime implemented. Other integrations and Git-write commands remain unimplemented. M03's accepted guarded Docker job path is implemented through application/infrastructure ports, not as a Git integration or general host executor. M03 owns minimal container-job lifecycle; M05 adds Compose/services through application ports. Delivered native Git helpers remain unchanged; this decision does not grant containers host Git or Docker socket authority.
 
 **Ownership:** `git/__init__.py` implements `GitProjectDiscovery.find_root(directory) -> Path` and the application's `GitRead` port through `GitRepositoryRead.read_branch(root)` / `read_changes(root)`. Discovery canonicalizes non-bare roots and rejects tracked private config without changing the index.
 

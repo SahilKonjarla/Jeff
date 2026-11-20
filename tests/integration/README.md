@@ -1,5 +1,13 @@
 # Integration tests
 
+## Current integration scope
+
+Cross-port SQL/filesystem/worker/CLI/authenticated in-process RPC fixtures cover guarded execution, explicit development policy, original-owner control, fresh discovery, phase-proven unavailable refusal and uncertainty/no replay. [Execution composition](test_execution_composition/README.md) and the other grouped READMEs identify modeled versus native/process cases. Current wire14/DB10/settings4/default2; M03 acceptance includes separate installed/native/operator evidence, not a promotion of these source tests to physical proof.
+
+Use approved finite selections in owned outside-Git fixtures. Some lifecycle/Git/recovery cases launch processes or inject faults and require explicit scoped authority; do not infer permission from this directory name. [Suite execution policy](../README.md).
+
+## Historical selected checkpoints — “latest” labels below are historical
+
 Latest Step3 opt-in bootstrap group exercises actual in-process `_serve`/authenticated status with synthetic pinned CLI bytes and a subprocess trap: valid configuration publishes fresh capability; absent/mismatched/capacity cases do not, preserve base M02, and return distinct fixed safe refusals. Other new groups cover current-owner fresh HOME allocation/cap16/unsafe existing entries/no repair, both adapter pins and fatal authority failures, and existing worker0 initialization/readiness/drain/cancellation/later-stop publication.217 selected cases passed on108 stable hashes; no startup Docker command, real engine/image, installed package, separate native process crash or live guest proof follows. All state remains isolated fixtures; failed/private generations are preserved, not adopted/pruned.
 
 Latest wire11 Step3 adds public service projection/decision replay; grouped077/177 preparation with exact final sealed/private modes and no existing-entry repair; and actual in-process source CLI/authenticated Unix-socket + real SQL/FS/controller/collector with fake Docker. Two synthetic jobs test early claim acknowledgement, slot/worker retention, responsive scoped show, ordinary disconnect and closure without observing a start ACK, durable logs/completion and facts-only replay. Typed missing completion is distinguished from read errors/finished corruption in one SQL-owner turn. Default bootstrap backend is still absent.213 finite selected cases passed; no actual Docker, separate daemon-process crash/disconnect, installed proof, phase4/5 acceptance or publication follows.

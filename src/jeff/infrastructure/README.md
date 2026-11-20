@@ -1,14 +1,18 @@
 # Infrastructure — tier2
 
-Owns concrete project files, private runtime state, native/authenticated IPC, lifecycle, SQL, committed event delivery and diagnostics. Depends inward on application/domain plus stdlib/PyYAML; no bootstrap/client policy or sibling integration calls. M02 is delivered/accepted on Mac. M03's opt-in public Docker execution is wired through bootstrap/application ports, with selected source/installed/manual proofs and explicit Step3 acceptance; whole Phase3 is now explicitly accepted after the later gap proofs. Local Phase4 Step2 is a wire12/DB10 source-only checkpoint as described below; it is not an installed or real-cancellation proof. This is not universal isolation proof or a general native sandbox rewrite. Linux Jeff client/runtime compatibility is out of scope. [Tier map](../README.md).
+Owns concrete project files, private runtime state, native/authenticated IPC, lifecycle, SQL, committed event delivery and diagnostics. Depends inward on application/domain plus stdlib/PyYAML; no bootstrap/client policy or sibling integration calls. M02 is delivered/accepted on Mac. M03's opt-in public Docker execution is wired through bootstrap/application ports, with selected source/installed/manual proofs and explicit Step3 acceptance; whole Phase3 is now explicitly accepted after the later gap proofs. Earlier Phase4 source-only checkpoints below retain their original limits; current guarded installed/native/operator acceptance is complete, without a new full-suite/CI or universal isolation claim. This is not universal isolation proof or a general native sandbox rewrite. Linux Jeff client/runtime compatibility is out of scope. [Tier map](../README.md).
 
-## Current JFG2 integration — source and focused fake evidence
+## Current JFG2 integration — accepted scoped implementation
 
 The normal package data includes pinned `runtime_execution/jeff-job-guard-linux-arm64` and `jeff-job-guard-linux-amd64` resources. There is no compiler/download/install hook. `guard_artifacts.py` accepts only build-pinned artifact/filter identities and validates regular single-link executable bytes, ownership, ancestor permissions, size/hash and stable file identity before propose/approve/claim/create/start. The exact helper file is mounted read-only at `/jeff-runtime/jeff-job-guard`, without exposing the installation directory. Original JFG1 files/artifacts are unchanged.
 
 The existing Docker controller creates the guarded argv and checks actual entrypoint/argv, stdin/attachment flags, Init=false, exact extra guard mount and all existing isolation predicates. `docker_cli/guarded.py` owns the original Popen and separate pipes; it consumes only the initial stdout challenge, writes one authorization against the original remaining budget, then treats stdout as raw and only guard stderr as framed status. Child-stderr payload is opaque. Complete terminal evidence is distinct from logical stderr EOF, container exit and verified removal. Cancellation retains the original attachment until same-owner exit/removal; malformed/missing/foreign/trailing status, clock/guard fault or uncertain transport retains it observe-only and blocks automatic cleanup/replay. It never invokes the legacy attach cleanup that kills the captured CLI on failure.
 
-JSON authority decoding now accepts explicitly discriminated old/new formats. Existing DB10 tables, old serialized facts and result digests stay unchanged. New guarded JSON is not readable by old binaries; rollback is not an automatic downgrade path. Wire14/settings4/default2 apply. Focused fake transport/controller/SQL/bootstrap tests are not installed product, current native-RPC or physical guard-integration proof; those remain separate acceptance evidence. Older standalone sections below are historical.
+JSON authority decoding now accepts explicitly discriminated old/new formats. Existing DB10 tables, old serialized facts and result digests stay unchanged. New guarded JSON is not readable by old binaries; rollback is not an automatic downgrade path. Wire14/settings4/default2 apply. Focused fake transport/controller/SQL/bootstrap tests remain separate from the subsequently completed installed/native/operator acceptance. M03 is accepted, including actual missing-target and owner/provider interruption evidence; see the [root artifact/platform qualifications](../../../README.md#verification-scope) and the [controller module map](runtime_execution/README.md). Older standalone sections below are historical.
+
+## Historical implementation and validation checkpoints
+
+Per-phase versions and statements that behavior was not yet installed/executed below describe those earlier artifacts, not the current accepted JFG2 path above. Names/labels/receipts still grant no adoption authority.
 
 ## Standalone guard — link-only ELF candidates (historical JFG1)
 
@@ -51,7 +55,7 @@ The SQL authority adapter emits `AuthorityClaimRefused` for claim-state rejectio
 |`project_files.py`|No-follow bounded YAML/ignore reads, stable project identity and atomic per-file publication|
 |`runtime_paths.py`|Pure explicit layout resolution and fixed-role metadata snapshots; no state creation/content reads|
 |`runtime_state.py`|Operation-time namespace checks, lifetime ownership, diagnostic leases, existing key, endpoint/storage provenance|
-|`runtime_settings.py`|Strict separate settings3 opt-in declarations; unchanged schema2 empty defaults and byte-preserving legacy1/2 reuse|
+|`runtime_settings.py`|Settings4 guarded development declarations; default2 empty backend and legacy1/2/3 parsing preserved|
 |`runtime_ipc.py`|Strict framed native-peer/authenticated local IPC and owned client/stream connections|
 |`runtime_process.py`|Installed child launch, authenticated readiness/concurrent convergence and verified native stop|
 |`runtime_storage.py`|Single SQL-owner connection, checked migrations through DB10, registry/receipts/evidence/recovery/retirement, authority/journal, ordinary and stop results|

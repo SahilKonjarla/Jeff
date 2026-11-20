@@ -1,5 +1,11 @@
 # Unit tests
 
+## Current unit scope
+
+Contracts, pure guard codecs/lifetimes, policy/CLI rendering, controlled transports/controllers, package size and refusal semantics are covered at source/fake tier. Current wire14/DB10/settings4/default2 snapshots are intentionally distinct from older fixtures below. These tests do not prove installed/native/Docker behavior or authorize physical faults. See [owned lifecycle subgroup](test_docker_owned_lifecycle/README.md) and [suite execution policy](../README.md).
+
+## Historical selected validation — superseded status/version labels
+
 Current Step3 source uses wire11/DB8/settings3(default2), with opt-in bootstrap activation covered by four integration groups (217 selected passes); default remains disabled and no installed/live Docker proof follows. New fresh request/reply group rejects legacy kind/current proof/claim/control extras, malformed conditional fields and mismatched operation/admission/UUID payloads; previous10 and future12 refuse. New CLI group verifies help/syntax factory laziness, separate `execution` namespace, literal argv/repeated files, required reviewed digest and typed unavailable output. Legacy run remains review-only.213 finite selected source cases passed with scoped review/static checks; production backend and installed/live proofs remain gated.
 
 Settings3 integration adds grouped parser/owned-file cases in `test_runtime_settings.py` for exact whole-profile binding, disabled absence/null, strict version dispatch, legacy backend refusal, same old serialization/default bytes and existing file preservation. Existing doctor/storage-contract groups now cover schema3/scalar-only health, future4 refusal and unchanged legacy/default models. Real ready/disabled/legacy/failed-database cache + stopped-doctor behavior is covered by one integration group.201 selected source cases passed; no schema3 installed/Docker/public activation proof.

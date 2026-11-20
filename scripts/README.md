@@ -2,7 +2,13 @@
 
 **Status:** M01 demo-project generation implemented. These helpers are not part of the installed Jeff runtime; production imports of `scripts`/`tests` are rejected by architecture checks.
 
+## Current guard delivery boundary
+
+M03 now packages two pinned JFG2 guard binaries under `src/jeff/infrastructure/runtime_execution/`, verified by the installation-owned adapter. No package compile/download/compiler-discovery hook exists. Current executable protocol is JFG2; JFG1 drafts below are historical and never gain authority. Builds, replacement binaries and runtime probes still need separately approved provenance/finite scope. See [current controller/artifact contract](../src/jeff/infrastructure/runtime_execution/README.md).
+
 ## Standalone Linux guard — build/artifact convention only
+
+The following compile/link narrative is historical; its future-tense integration statements describe that checkpoint, not the current packaged JFG2 path.
 
 M03's approved direction uses an independently pinned standalone Linux helper rather than assuming every job image contains Python or another trusted interpreter. The initial [application source contract](../src/jeff/application/README.md#standalone-guard--source-contract-only) now has a subsequent C-source/compile-only implementation in `src/jeff/infrastructure/runtime_execution/{guard_linux.c,guard_core.h,guard_abi.h}`. Existing local Clang compiles native Linux ARM64/AMD64 objects in fresh private test arenas using `-c -std=c11 -O2 -ffreestanding -nostdinc -fno-builtin -fno-stack-protector -fno-pic -fno-pie -fno-asynchronous-unwind-tables -Wall -Wextra -Werror`. These are **ET_REL objects, not executable or deployable guard artifacts**. That compile-only slice added no Linux build script/toolchain/linker, linked helper binary, package-data artifact or automatic setup/build hook; the subsequent separately approved tool/link checkpoint is recorded below.
 

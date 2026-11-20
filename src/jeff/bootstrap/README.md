@@ -1,5 +1,11 @@
 # Bootstrap — composition root
 
+## Current composition
+
+M03 is accepted. [Runtime composition](runtime/README.md) describes lazy factories, inherited ownership, settings4 guarded development activation and current wire14/DB10/default2 behavior. No Docker queries or jobs run at startup; optional backend failure is not owner/storage readiness. The original bounded worker/SQL ownership remains authoritative, without new executor, host fallback or old-claim adoption. [Root documentation](../../../README.md) separates current installed/native proof from historical artifact and CI limits.
+
+## Historical composition checkpoints — not current schema/availability instructions
+
 **Status:** M02 slice-4 C wires public explicit lifecycle, runtime-aware status and authenticated daemon-dependent project commands. History/debug/events/retention and read-only doctor are now composed as well. Proof-based idle endpoint recovery is wired before accepting clients; owned hot-journal recovery and active-work/native Git-child lifetime are delivered and M02 is accepted. Jeff targets macOS only. Hosted execution remains deferred/unperformed, not passed.
 
 **Ownership:** `main.py` passes lazy `create_project_client`, `create_runtime_controller` and `create_runtime_diagnostics` factories to CLI presentation. No location selection, project discovery, credential read or connection happens for help/syntax. There is no client-local question adapter or fallback path. Only the daemon composes `QuestionService` with `GitRepositoryRead(process_runner=git_runner)` after actual storage initialization. The same owned runner is injected into discovery/filter/status; there is no daemon fallback to direct Git.

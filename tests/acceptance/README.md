@@ -1,5 +1,13 @@
 # Acceptance tests
 
+## Current acceptance boundary
+
+M03 is accepted after separate matched guarded jobs/expiry/restart, unavailable engine/image, active shutdown and owner/provider interruption with operator unknown/log inspection. Exact artifact tiers and retained limits are in the [root verification scope](../../README.md#verification-scope); no full current suite, CI or universal platform proof is inferred. The grouped installed scenario directories have their own README maps.
+
+The handoffs below are preserved consumed history, not reusable test instructions or capacity. New installed/native/fault execution needs explicit finite authority, correct package identity and owned outside-Git fixtures. Never target default state, reconstruct PID/CID authority, rerun spent helpers or reset markers/databases to get a green result.
+
+## Historical handoffs and validation — do not execute
+
 ## Sahil handoff — one explicit installed execution scenario (Phase3)
 
 **Completed—do not rerun.** Sahil independently ran the exact handoff below and reported passed; lead inspected the sealed manual receipt `/private/tmp/jp3-inst.EdPVczkk/execution.json` (exit0, known completion, guarded50bytes, verified cleanup/absence, duplicate refusal, SQL/owner closed). SHA256 `147de78cf814fcfc2b08ed924b4470730011b73214867e5ceb6ccc1ff0c660fe`. Total budget5/6:5created,3started,5removed with absence verified. All agreed Step2 source/agent-installed/human manual proof gates passed; Sahil explicitly accepted Step2. Whole-Phase3 acceptance remains separate, public execution disabled. The following fixed command/scope is historical, consumed and non-replayable; no further runtime authority follows.

@@ -1,5 +1,13 @@
 # Tests
 
+## Current coverage map and execution boundary
+
+M03 is accepted with distinct source/fake, installed, native, physical and operator evidence. Current wire14/DB10/settings4 guarded opt-in/default2; source checks do not independently prove Docker/kernel behavior. No current full-suite/CI pass is implied. [Root evidence scope](../README.md#verification-scope) records the prior four-job/current availability-interruption artifact split; old failed scopes remain failed.
+
+Grouped test packages now have local READMEs for purpose, fixture ownership and real-versus-synthetic boundaries. Select approved finite cases in a private arena outside every Git ancestor; native/fault/provider setup needs its own authority. Do not run or reset consumed historical commands below. Root development commands are documentation, not test permission.
+
+## Historical validation checkpoints — not current execution instructions
+
 ## Guard link-only artifact inspection
 
 A separately approved private build driver linked two static Linux ET_EXEC candidates using pinned objects and Homebrew LLD23.1.6. Its metadata inspector checks machine/entry/program and section ranges, static/no-interpreter/no-undefined conditions, NX stack/no-RWX loads, defined `_start`, JGO1 metadata and unchanged filter hashes. Two ET_REL preflight inputs and eight mutated linked-metadata cases were rejected. These are **artifact sanity checks**, not additions to the prior148-case suite, helper execution, kernel/runtime conformance or installed Jeff tests. No application tests were rerun solely for tool installation/linking; source and existing objects remained pinned. Candidates are private0600 and not shipped/activated. Independent read-only LLVM23.1.6 `llvm-readelf` inspection and SHA checks corroborated both hashes, architectures/entries, static/no-interpreter/no-undefined metadata and R/RX LOAD plus RW non-executable stack; it did not execute or modify artifacts.
