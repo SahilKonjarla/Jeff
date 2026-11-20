@@ -118,7 +118,7 @@ def test_parent_eof_reaps_owned_paused_git(git_repo: Path, tmp_path: Path) -> No
         call.close_watch()  # Controlled capability EOF, not a daemon-death claim.
         assert call.process.wait(timeout=5) == 0
         assert call.channel.recv(1) == b""
-    events = _signal_events()
+    events = _signal_events(tmp_path)
     assert [e["event"] for e in events] == ["SIGSTOP", "SIGKILL", "reaped"]
     assert events[-1]["returncode"] == -9
     assert len({e["captured_child_pid"] for e in events}) == 1
@@ -130,7 +130,7 @@ def test_original_deadline_reaps_owned_paused_git(git_repo: Path, tmp_path: Path
         assert _message(call) == {"kind": "started"}
         assert call.process.wait(timeout=5) == 1
         assert call.channel.recv(1) == b""
-    events = _signal_events()
+    events = _signal_events(tmp_path)
     assert [e["event"] for e in events] == ["SIGSTOP", "SIGKILL", "reaped"]
     assert events[-1]["returncode"] == -9
     assert len({e["captured_child_pid"] for e in events}) == 1

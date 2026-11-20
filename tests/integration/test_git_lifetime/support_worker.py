@@ -60,8 +60,8 @@ def _invocation(
         str(deadline_ns),
     ]
     if hold_git:
-        signal_log = os.environ["JEFF_TEST_D6_SIGNAL_LOG"]
-        command = [sys.executable, "-I", "-B", "-c", _HELD_GIT, signal_log, *command[5:]]
+        signal_log = root / "git-signals.jsonl"
+        command = [sys.executable, "-I", "-B", "-c", _HELD_GIT, str(signal_log), *command[5:]]
     observer_parent = observer_child = None
     descriptors: tuple[int, ...] = (read, child.fileno(), lease)
     if observe:
@@ -208,8 +208,5 @@ raise SystemExit(worker.main())
 """
 
 
-def _signal_events() -> list[dict[str, object]]:
-    return [
-        json.loads(line)
-        for line in Path(os.environ["JEFF_TEST_D6_SIGNAL_LOG"]).read_text().splitlines()
-    ]
+def _signal_events(root: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in (root / "git-signals.jsonl").read_text().splitlines()]
