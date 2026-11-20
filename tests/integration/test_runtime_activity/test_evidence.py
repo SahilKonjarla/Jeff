@@ -123,7 +123,7 @@ def test_atomic_lifecycle_evidence_scoped_replay_no_write_and_restart(tmp_path: 
         reopened = SQLiteStorage(owner, instance_id=uuid4())
         reopened.start()
         try:
-            assert reopened.wait_ready(5).schema_version == 4
+            assert reopened.wait_ready(5).schema_version == 10
             _, persisted = reopened.trace(scope, deadline=deadline())
             assert (
                 persisted is not None
