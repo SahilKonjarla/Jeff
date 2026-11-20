@@ -15,9 +15,10 @@ from jeff.application import dispatch
 from jeff.application import runtime as runtime_contracts
 from jeff.application.runtime import RuntimeIdentityData
 
-# Wire 13 adds fresh read-only enumeration; service interfaces remain unchanged.
-SCHEMA_DIGEST = "8490c51cf9731937d21900cbe10f231c7987e074a39d2dde1ce497c9451932e5"
-WIRE_DIGEST = "7b01dce05c238a4db5d0511169cf6b3b7c358a4612954cf1ab8f5a2866d76f86"
+# Wire 14 enables guarded execution; only revision fields change in these snapshots.
+# Normalizing revision 14 to 13 reproduces the prior schema/wire digests exactly.
+SCHEMA_DIGEST = "adba84fec1ab7bf72a1a852d18de4e9f3c7698627902ab57dece645c54aed6a9"
+WIRE_DIGEST = "5125e7d99d993df0322d91827eba3f7ba60061f4d7f73d9b7976e202ccdd3f06"
 SIGNATURE_DIGEST = "566af34c1f88990b1b1d48fb08b07dc388c89b588ebfa51e6faee3420ad12328"
 
 
