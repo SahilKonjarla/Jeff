@@ -18,7 +18,7 @@ jobs:
   checks:
     name: Python 3.12 / macOS arm64
     runs-on: macos-15
-    timeout-minutes: 10
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
@@ -78,7 +78,7 @@ jobs:
         run: .venv/bin/python scripts/ci_compatibility_fixtures.py
 
       - name: Run unit, architecture, integration and acceptance tests
-        run: .venv/bin/python -m pytest tests/unit tests/architecture tests/integration tests/acceptance -x -vv --tb=short --basetemp "$JEFF_PYTEST_BASE" -p no:cacheprovider
+        run: .venv/bin/python -m pytest tests/unit tests/architecture tests/integration tests/acceptance -x -vv --tb=short --durations=20 --basetemp "$JEFF_PYTEST_BASE" -p no:cacheprovider
 
       - name: Lint
         run: .venv/bin/python -m ruff check src tests scripts
