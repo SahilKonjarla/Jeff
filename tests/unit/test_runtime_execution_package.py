@@ -26,7 +26,7 @@ from jeff.infrastructure import runtime_execution as native
 
 ARGUMENT_DIGEST = "2ed26476550eec81b4b0937da8e9c75c2b25d2fb672e70ff33e6bab94f8d230d"
 SESSION_DIGEST = "770e77a6fa52249da0ded6593ce0321bac5749347bdea41facfebdf135e4db5b"
-SIGNATURE_DIGEST = "73a9993a5f47d8cf8e93135a478a313fd250a6b2cbe652deebc0a2ef2d319df9"
+SIGNATURE_DIGEST = "5dd5b76acc5973a6cdb710961dd9af1af06d9fc923a069fd0b9a04be2845c550"
 
 
 def _digest(value: object) -> str:
