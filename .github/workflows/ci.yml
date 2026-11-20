@@ -69,6 +69,11 @@ jobs:
               output.write(f"JEFF_PYTEST_BASE={arena}\n")
           PY
 
+      - name: Provision pinned guard build toolchain
+        run: |
+          .venv/bin/python scripts/ci_guard_toolchain.py --output "$RUNNER_TEMP/jeff-guard-toolchain.json"
+          echo "JEFF_GUARD_TEST_TOOLCHAIN=$RUNNER_TEMP/jeff-guard-toolchain.json" >> "$GITHUB_ENV"
+
       - name: Run unit, architecture, integration and acceptance tests
         run: .venv/bin/python -m pytest tests/unit tests/architecture tests/integration tests/acceptance -x -vv --tb=short --basetemp "$JEFF_PYTEST_BASE" -p no:cacheprovider
 

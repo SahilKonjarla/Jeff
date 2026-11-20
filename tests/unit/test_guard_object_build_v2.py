@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import re
 import struct
 import subprocess
@@ -12,11 +13,19 @@ import pytest
 from test_guard_object_build import compile_object, evaluate, sections
 
 from jeff.application.execution import GuardV2Terminal, encode_guard_v2_frame
+from scripts.ci_guard_toolchain import Tool, load_toolchain, verify_tool
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src/jeff/infrastructure/runtime_execution/guard_v2_linux.c"
-LINKER = Path("/opt/homebrew/opt/lld/bin/ld.lld")
-LINKER_SHA = "030cb3e4e93f36334617651e5ce97ef7ff6417986228786069b4fd63e69aa771"
+
+
+@pytest.fixture(scope="module")
+def guard_toolchain() -> dict[str, Tool]:
+    manifest = os.environ.get("JEFF_GUARD_TEST_TOOLCHAIN")
+    tools = load_toolchain(Path(manifest) if manifest is not None else None)
+    for role in ("clang", "lld"):
+        verify_tool(tools, role)
+    return tools
 
 
 @pytest.fixture(scope="module", params=[("aarch64", 183, 1), ("x86_64", 62, 2)])
@@ -170,14 +179,15 @@ def inspect_linked_v2(data: bytes, machine: int, abi: int, policy: bytes) -> dic
 
 def test_link_only_native_v2_candidate_and_negative_metadata_checks(
     compiled_v2: tuple[str, Path, dict[str, bytes]],
+    guard_toolchain: dict[str, Tool],
 ) -> None:
     arch, obj, blobs = compiled_v2
-    assert hashlib.sha256(LINKER.resolve().read_bytes()).hexdigest() == LINKER_SHA
+    linker = verify_tool(guard_toolchain, "lld")
     machine, abi, emulation = (183, 1, "aarch64elf") if arch == "aarch64" else (62, 2, "elf_x86_64")
     output = obj.with_suffix(".elf")
     assert not output.exists()
     command = [
-        str(LINKER),
+        str(linker),
         "-m",
         emulation,
         "--static",
@@ -225,7 +235,7 @@ def test_link_only_native_v2_candidate_and_negative_metadata_checks(
     for mutated in mutations:
         with pytest.raises(AssertionError):
             inspect_linked_v2(mutated, machine, abi, policy)
-    assert hashlib.sha256(LINKER.resolve().read_bytes()).hexdigest() == LINKER_SHA
+    verify_tool(guard_toolchain, "lld")
     obj.with_suffix(".json").write_text(
         json.dumps(
             dict(
@@ -235,7 +245,7 @@ def test_link_only_native_v2_candidate_and_negative_metadata_checks(
                 elf_sha256=hashlib.sha256(data).hexdigest(),
                 mode="0600",
                 helper_executed=False,
-                linker_sha256=LINKER_SHA,
+                linker_sha256=guard_toolchain["lld"].sha256,
                 negative_metadata_checks=4,
             ),
             indent=2,
@@ -260,6 +270,7 @@ def test_control_gate_is_wired_immediately_before_clone() -> None:
 def test_optimizer_folds_actual_c_wire_functions_to_python_golden_vectors(
     compiled_v2: tuple[str, Path, dict[str, bytes]],
     tmp_path: Path,
+    guard_toolchain: dict[str, Tool],
 ) -> None:
     """Compile-time constant folding only, NOT running C or kernel behavior."""
     arch, _, _ = compiled_v2
@@ -292,10 +303,11 @@ g2_terminal(&g,out,1,1100,{cause},{detail},{flags});
 return {checks};
 }}""")
     source.write_text(f'#include "{SOURCE.with_name("guard_v2_core.h")}"\n' + "\n".join(functions))
-    # Existing approved LLVM toolchain; Apple Clang 12 does not fully fold these
-    # array stores. Helper objects still use the original compile_object flags.
+    # Declared LLVM toolchain; Apple Clang 12 does not fully fold these stores.
+    # Helper objects still use the original compile_object flags.
+    compiler = verify_tool(guard_toolchain, "clang")
     command = [
-        "/opt/homebrew/opt/llvm/bin/clang",
+        str(compiler),
         "--target=" + arch + "-linux-gnu",
         "-std=c11",
         "-O2",
@@ -319,6 +331,7 @@ return {checks};
         env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path)},
     )
     assert result.returncode == 0, result.stderr
+    verify_tool(guard_toolchain, "clang")
     ir = output.read_text()
     for name in ("exit124", "timeout", "clock_fault"):
         body = re.search(

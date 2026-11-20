@@ -2,6 +2,14 @@
 
 **Status:** M01 demo-project generation implemented. These helpers are not part of the installed Jeff runtime; production imports of `scripts`/`tests` are rejected by architecture checks.
 
+## Hosted CI guard build prerequisites
+
+`scripts/ci_guard_toolchain.py` provisions build tools only on the declared hosted macOS ARM64 runner. It validates Homebrew LLVM/LLD23.1.6 revision0 metadata and pinned `arm64_sequoia` bottle checksums before fetch/install; downloaded bottle bytes are checked too. Existing runner installations are repoured rather than trusted by path/version alone. Normal Homebrew dependency setup is confined to that temporary runner; no local install or package-runtime build hook is introduced.
+
+The setup step writes a fresh mode0600 manifest and explicitly supplies `JEFF_GUARD_TEST_TOOLCHAIN` to the build tests. The manifest declares post-pour tool identities (Homebrew relocation can change bytes); tests hash those binaries before/after use. Provenance relies on the pinned bottle/manager setup, not independent signed attestation. Without an explicit manifest, only the original reference-Mac linker/compiler byte pins are accepted; missing/invalid explicit configuration fails, never silently falls back or skips.
+
+LLD is a multicall driver: retain the `ld.lld` invocation alias even while hashing its resolved target. The tests compile Linux objects, link private non-executable candidates and inspect metadata/negative mutations; they never execute Linux helper code. Production guard resources/filter pins remain unchanged. Upstream version/bottle drift deliberately fails closed until a separately approved pin update. The script's hosted gate is an operational safeguard, not a security boundary against a caller forging environment values.
+
 ## Current guard delivery boundary
 
 M03 now packages two pinned JFG2 guard binaries under `src/jeff/infrastructure/runtime_execution/`, verified by the installation-owned adapter. No package compile/download/compiler-discovery hook exists. Current executable protocol is JFG2; JFG1 drafts below are historical and never gain authority. Builds, replacement binaries and runtime probes still need separately approved provenance/finite scope. See [current controller/artifact contract](../src/jeff/infrastructure/runtime_execution/README.md).
