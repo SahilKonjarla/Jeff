@@ -9,6 +9,7 @@ SERVICE = dedent('''\
     import json
     import sys
     from http.server import BaseHTTPRequestHandler, HTTPServer
+    from socketserver import TCPServer
 
 
     def payload() -> dict[str, str]:
@@ -30,6 +31,13 @@ SERVICE = dedent('''\
             pass
 
 
+    class NumericHTTPServer(HTTPServer):
+        def server_bind(self) -> None:
+            # Both allowed hosts are numeric; readiness must not depend on reverse DNS.
+            TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
+
     def port_number(value: str) -> int:
         port = int(value)
         if not 0 <= port <= 65535:
@@ -44,7 +52,7 @@ SERVICE = dedent('''\
                             help="0 lets the OS allocate a free port at bind time.")
         args = parser.parse_args()
         try:
-            with HTTPServer((args.host, args.port), Handler) as server:
+            with NumericHTTPServer((args.host, args.port), Handler) as server:
                 actual_port = server.server_address[1]
                 print(json.dumps({"host": args.host, "port": actual_port,
                                   "url": f"http://{args.host}:{actual_port}/health"}), flush=True)

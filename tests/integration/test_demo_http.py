@@ -2,12 +2,14 @@
 
 import json
 import os
+import runpy
 import selectors
 import socket
 import subprocess
 import sys
 import urllib.error
 import urllib.request
+from http.server import HTTPServer
 from pathlib import Path
 
 import pytest
@@ -73,6 +75,23 @@ def test_real_health_endpoint_and_no_file_serving(tmp_path: Path) -> None:
         if process.stderr is not None:
             process.stderr.close()
     assert process.poll() is not None
+
+
+def test_numeric_binding_does_not_require_reverse_dns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = generate(tmp_path)[0].path
+    service = runpy.run_path(str(root / "service.py"))
+
+    def refuse_dns(host: str = "") -> str:
+        raise AssertionError("Numeric demo binding must not perform reverse DNS")
+
+    monkeypatch.setattr(socket, "getfqdn", refuse_dns)
+    monkeypatch.setattr(HTTPServer, "serve_forever", lambda self: None)
+    monkeypatch.setattr(sys, "argv", ["service.py", "--port", "0"])
+    assert service["main"]() == 0
+    ready = json.loads(capsys.readouterr().out)
+    assert ready["host"] == "127.0.0.1" and 0 < ready["port"] <= 65535
 
 
 def test_port_collision_is_actionable_and_invalid_port_is_rejected(tmp_path: Path) -> None:
