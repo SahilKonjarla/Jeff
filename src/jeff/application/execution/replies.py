@@ -165,7 +165,9 @@ class FreshExecutionReply(_Model):
 
 def fresh_execution_failure(code: str) -> Failure:
     messages = {
-        "execution_unavailable": "Fresh execution is not enabled for this runtime or scope.",
+        "execution_unavailable": (
+            "Fresh execution is unavailable for this runtime, declared engine/image or scope."
+        ),
         "execution_busy": "An owned execution or serialized action is still active.",
         "execution_backend_unavailable": (
             "Configured fresh backend failed identity/private-resource checks; it is disabled."

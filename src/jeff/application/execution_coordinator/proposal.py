@@ -82,7 +82,14 @@ def propose(
         if self.require_guard and self.guards is None:
             raise DockerBackendFault("docker_unsafe_configuration")
         declaration = _declaration(self, profile)
-        _target(self, declaration, deadline)
+        try:
+            _target(self, declaration, deadline)
+        except DockerBackendFault as error:
+            if error.code in {"docker_unavailable", "docker_command_failed"}:
+                # Read-only target checks precede preparation and authority creation.
+                # Never translate the same code from later storage/claim operations.
+                raise ReviewFault("execution_unavailable") from None
+            raise
         prepared = self.preparer.prepare(project, paths, deadline=deadline)
         manifest = ExecutionManifest(profile=profile, argv=argv, inputs=prepared)
         binding = self.inputs.verify(manifest, deadline=deadline)

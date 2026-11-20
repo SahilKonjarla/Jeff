@@ -12,6 +12,8 @@ The existing claim/worker/controller/journal/result paths remain authoritative. 
 
 ## M03 policy/recovery outcomes — no new recovery subsystem
 
+Unavailable engine/image failures from the read-only proposal target check return `execution_unavailable` before input preparation or authority creation. This is a phase-local refusal, not a global error-code alias: uncertain helper cleanup and faults after proposal persistence/claim still remain unconfirmed. No pull, host fallback, retry permission or authority upgrade follows.
+
 Settings4 backend targets require explicit `environment: development` on both the configured profile and matching declaration, including preconstructed model values. Missing classification cannot silently inherit the legacy profile default into executable configuration; production/unclassified values refuse. Settings1/2/3, disabled backend behavior, old manifests and facts remain unchanged. Trusted installation owners classify targets; the product does not claim arbitrary destructive-intent recognition.
 
 Selected files/argv are declarations of operator-reviewed public, non-secret content, not content certification. Literal protected-name exclusion and byte hashes enforce the declared view/integrity, not universal secret discovery. CLI proposal now makes that responsibility and private persistence visible. Direct application clients share this contract.
