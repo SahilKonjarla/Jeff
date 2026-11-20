@@ -313,7 +313,7 @@ def test_live_observation_keeps_cached_facts_and_never_reads_settings_or_sql(
         if fault == "capability"
         else (*operations, "activity.subscribe"),
         storage=StorageReadiness(
-            state="ready", schema_version=10, retention_days=30, settings_source="existing_file"
+            state="ready", schema_version=11, retention_days=30, settings_source="existing_file"
         ),
     )
 

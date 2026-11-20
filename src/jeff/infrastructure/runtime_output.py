@@ -6,9 +6,21 @@ bytes are counted and discarded while the transport continues its finite drainin
 
 import codecs
 import json
+from collections.abc import Collection
 from typing import Literal
 
-from jeff.application.execution import DockerBackendFault, DockerOutputSnapshot, OutputGuardReason
+from jeff.application.execution import (
+    DockerBackendFault,
+    DockerJobOutcome,
+    DockerOutputSnapshot,
+    OutputGuardReason,
+)
+from jeff.application.execution.pytest_report import (
+    PYTEST_REPORT_BYTES,
+    PytestReport,
+    PytestReportBuffer,
+    PytestReportStatus,
+)
 
 _LINE_BYTES = 8192  # Raw bytes, including LF; exactly8192 is allowed.
 _DEFERRED_BYTES = 32768
@@ -255,3 +267,86 @@ class GuardedOutputCollector:
         self._text[1].clear()
         self._drop_pending()
         return result
+
+
+class PytestOutputCollector(GuardedOutputCollector):
+    """For an explicitly selected pytest job, reserve stdout for the report."""
+
+    def __init__(
+        self, retention_limit: int, *, run_token: str, approved_paths: Collection[str]
+    ) -> None:
+        super().__init__(retention_limit)
+        self._report_buffer = PytestReportBuffer()
+        self._run_token = run_token
+        self._approved_paths = frozenset(approved_paths)
+        self._report_taken = False
+
+    def accept(self, stream: Literal["stdout", "stderr"], data: bytes) -> None:
+        if stream != "stdout":
+            super().accept(stream, data)
+            return
+        if (
+            self._snapshot is not None
+            or self._eof[0]
+            or not isinstance(data, bytes)
+            or len(data) > _CHUNK_BYTES
+        ):
+            raise DockerBackendFault("docker_output_failed")
+        self._source[0] = min(_INT64_MAX, self._source[0] + len(data))
+        self._report_buffer.accept(data)
+
+    def seal(self, *, abort: bool = False) -> DockerOutputSnapshot:
+        if abort:
+            self._report_buffer.discard()
+            self._report_taken = True
+        return super().seal(abort=abort)
+
+    def take_report(
+        self, outcome: DockerJobOutcome
+    ) -> tuple[PytestReportStatus, PytestReport | None]:
+        """Release validated, filtered report data once after successful sealing."""
+        if self._report_taken:
+            return "invalid", None
+        if self._snapshot is None:
+            raise DockerBackendFault("docker_output_failed")
+        self._report_taken = True
+        if (
+            not self._snapshot.complete
+            or outcome.outcome_unknown
+            or outcome.timed_out
+            or not outcome.cleanup_verified
+            or outcome.exit_code is None
+        ):
+            self._report_buffer.discard()
+            return "invalid", None
+        status, report = self._report_buffer.finish(
+            complete=True,
+            run_token=self._run_token,
+            exit_status=outcome.exit_code,
+            approved_paths=self._approved_paths,
+        )
+        if report is None:
+            return status, None
+        # Filter decoded fields, not their JSON spellings: escapes must not hide
+        # a sensitive marker. Reject rather than rewrite node IDs or paths.
+        if self._snapshot.guard_reason != "none" or not _public_report(report):
+            return "withheld", None
+        return "available", report
+
+
+def _public_report(report: PytestReport) -> bool:
+    text = "\n".join(
+        text
+        for failure in report.failures
+        for text in (failure.node_id, failure.path, failure.excerpt)
+    )
+    raw = text.encode("utf-8")
+    if len(raw) > PYTEST_REPORT_BYTES:
+        return False
+    guard = GuardedOutputCollector(PYTEST_REPORT_BYTES)
+    for offset in range(0, len(raw), _CHUNK_BYTES):
+        guard.accept("stdout", raw[offset : offset + _CHUNK_BYTES])
+    guard.finish("stdout")
+    guard.finish("stderr")
+    snapshot = guard.seal()
+    return snapshot.guard_reason == "none" and not snapshot.truncated and snapshot.stdout == text

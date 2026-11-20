@@ -50,7 +50,7 @@ class _RecoveryBindings(_ProofModel):
 
 class _RecoveryPermit(_ProofModel):
     version: StrictInt = Field(ge=1, le=1)
-    schema_version: StrictInt = Field(ge=4, le=10)
+    schema_version: StrictInt = Field(ge=4, le=11)
     nonce: str = Field(pattern=r"^[0-9a-f]{32}$")
     page_size: StrictInt = Field(ge=512, le=65536)
     original_pages: StrictInt = Field(gt=0, le=(1 << 32) - 1)

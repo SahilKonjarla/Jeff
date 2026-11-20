@@ -19,6 +19,7 @@ from .launch import DockerLaunchEvent, DockerLaunchIntent, DockerOwnedContainer
 from .manifests import ExecutionManifest
 from .output import DockerJobOutcome, DockerOutputSnapshot
 from .prepared_inputs import PreparedInputBinding, PreparedInputs
+from .pytest_report import PytestReport, PytestReportStatus
 from .replies import ExecutionCancelReply, FreshExecutionReply
 from .requests import (
     ExecutionCancelCall,
@@ -94,6 +95,13 @@ class DockerOutputSink(Protocol):
 
 class DockerOutputCapture(DockerOutputSink, Protocol):
     def seal(self, *, abort: bool = False) -> DockerOutputSnapshot: ...
+
+
+@runtime_checkable
+class PytestOutputCapture(DockerOutputCapture, Protocol):
+    def take_report(
+        self, outcome: DockerJobOutcome
+    ) -> tuple[PytestReportStatus, PytestReport | None]: ...
 
 
 class DockerCompletionStore(Protocol):

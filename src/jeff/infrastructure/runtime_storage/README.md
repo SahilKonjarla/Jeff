@@ -1,6 +1,6 @@
 # Serialized durable runtime state
 
-One SQL owner (`runner.py`, `submission.py`, `work.py`, `transactions.py`) manages checked opening/catalog, registry/history/events/retention and execution authority/journal/results/stop evidence. Other modules provide narrow operations rather than independent live readers. Current schema is DB10.
+One SQL owner (`runner.py`, `submission.py`, `work.py`, `transactions.py`) manages checked opening/catalog, registry/history/events/retention and execution authority/journal/results/stop evidence. Other modules provide narrow operations rather than independent live readers. Current schema is DB11. The signed DB10 → DB11 migration adds the table for bounded pytest reports without rewriting existing execution results. SQLite remains on the native host.
 
 Authority consumption, launch intent, completion and caller delivery are not one process/SQL transaction. Unknown/quarantined work and UUID exclusion survive restart/retirement; missing payloads do not prove nonexecution. Current-reader historical inspection validates original ownership without transferring mutation authority or clearing quarantine.
 

@@ -16,7 +16,9 @@ from jeff.application.execution import (
     ExecutionStartRefused,
     ExecutionStopRecord,
     ExecutionStopSignal,
+    GuardedExecutionManifest,
 )
+from jeff.application.execution.pytest_report import pytest_run_token
 from jeff.domain.execution import AuthorityState
 
 from .binding import _active, _checked, _deadline, _load, _operation, _project
@@ -25,6 +27,17 @@ from .lifecycle import _execute_claim
 
 if TYPE_CHECKING:
     from .coordinator import ExecutionCoordinator
+
+
+def _capture(self: "ExecutionCoordinator", record: AuthorityRecord) -> DockerOutputCapture:
+    manifest = record.manifest
+    limit = manifest.profile.output_bytes
+    token = pytest_run_token(manifest.argv)
+    if token is None:
+        return self.capture(limit)
+    if not isinstance(manifest, GuardedExecutionManifest) or self.pytest_capture is None:
+        raise ExecutionStartRefused("docker_authority_required")
+    return self.pytest_capture(limit, token, tuple(item.path for item in manifest.inputs.files))
 
 
 def start(
@@ -75,7 +88,7 @@ def start(
             declaration: DockerTargetDeclaration | None = None
             if record.state == AuthorityState.APPROVED:
                 declaration = _checked(self, project, record, claim_deadline, stop)
-                capture = self.capture(record.manifest.profile.output_bytes)
+                capture = _capture(self, record)
                 if (
                     type(capture.retention_limit) is not int
                     or capture.retention_limit != record.manifest.profile.output_bytes
@@ -186,7 +199,7 @@ def run(
         declaration = _checked(self, project, record, deadline)
         job_deadline = min(deadline, time.monotonic() + record.manifest.profile.timeout_seconds)
         cleanup_deadline = job_deadline + 10
-        capture = self.capture(record.manifest.profile.output_bytes)
+        capture = _capture(self, record)
         try:
             if (
                 type(capture.retention_limit) is not int

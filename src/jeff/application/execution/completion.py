@@ -10,6 +10,7 @@ from jeff.domain.execution import fingerprint
 from ._model import _Model
 from .launch import DockerOwnedContainer
 from .output import DockerJobOutcome, DockerOutputFacts, DockerOutputSnapshot
+from .pytest_report import PytestResult
 
 
 class DockerCompletion(_Model):
@@ -18,6 +19,19 @@ class DockerCompletion(_Model):
     owned: DockerOwnedContainer
     outcome: DockerJobOutcome
     output: DockerOutputSnapshot
+    pytest_result: PytestResult | None = None
+
+    @model_validator(mode="after")
+    def report_matches_outcome(self) -> Self:
+        if self.pytest_result is not None and not self.confirmed:
+            raise ValueError("An unconfirmed job cannot record a pytest result.")
+        if (
+            self.pytest_result is not None
+            and self.pytest_result.report is not None
+            and self.pytest_result.report.exit_status != self.outcome.exit_code
+        ):
+            raise ValueError("Pytest report does not match the job exit status.")
+        return self
 
     @property
     def confirmed(self) -> bool:
@@ -77,6 +91,7 @@ class DockerExecutionResult(_Model):
     payload_state: Literal["retained", "retired", "expired", "clock_unconfirmed"]
     retirement_reason: Literal["age", "capacity"] | None = None
     output: DockerOutputSnapshot | None
+    pytest_result: PytestResult | None = None
 
     @model_validator(mode="after")
     def consistent(self) -> Self:

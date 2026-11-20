@@ -5,7 +5,7 @@ from typing import Annotated, Literal, Protocol, Self
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
 from jeff.application.runtime import ProjectCapability, RuntimeIdentityData, RuntimePathInspection
-from jeff.application.storage import StorageIssueCode
+from jeff.application.storage import DATABASE_SCHEMA, StorageIssueCode
 from jeff.domain.runtime import RuntimeState
 
 DoctorName = Literal["platform", "python", "git", "paths", "runtime", "settings", "storage"]
@@ -145,7 +145,7 @@ class DoctorReport(_DoctorModel):
     paths: RuntimePathInspection | None = None
     settings_schema_version: StrictInt | None = Field(default=None, ge=1, le=4)
     configured_retention_days: ConfiguredRetentionDays | None = None
-    database_schema_version: StrictInt | None = Field(default=None, ge=0, le=10)
+    database_schema_version: StrictInt | None = Field(default=None, ge=0, le=DATABASE_SCHEMA)
     python_version: str | None = Field(
         default=None, min_length=1, max_length=32, pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$"
     )
@@ -168,7 +168,7 @@ class DoctorReport(_DoctorModel):
             self.runtime is not None
             or self.settings_schema_version not in (1, 2, 3, 4)
             or self.configured_retention_days is None
-            or self.database_schema_version != 10
+            or self.database_schema_version != DATABASE_SCHEMA
         ):
             raise ValueError(
                 "Stopped health requires current validated facts without live identity."
@@ -180,7 +180,7 @@ class DoctorReport(_DoctorModel):
         if self.summary == "healthy" and (
             self.runtime is None
             or not self.runtime.application_ready
-            or self.database_schema_version != 10
+            or self.database_schema_version != DATABASE_SCHEMA
         ):
             raise ValueError("Healthy requires authenticated full cached readiness.")
         return self

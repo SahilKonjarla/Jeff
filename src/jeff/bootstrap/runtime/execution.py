@@ -11,6 +11,7 @@ from jeff.application.execution import (
 )
 from jeff.application.execution_coordinator import ExecutionCoordinator
 from jeff.application.projects import Failure, ProjectService
+from jeff.infrastructure.runtime_output import PytestOutputCollector
 from jeff.infrastructure.runtime_state import Ownership
 from jeff.infrastructure.runtime_storage import SQLiteStorage
 
@@ -84,6 +85,9 @@ def create_internal_execution(
         stop_store=storage,
         guards=guards,
         require_guard=require_guard,
+        pytest_capture=lambda limit, token, paths: PytestOutputCollector(
+            limit, run_token=token, approved_paths=paths
+        ),
     )
 
 

@@ -70,10 +70,12 @@ class ExecutionCoordinator:
         stop_store: ExecutionStopStore | None = None,
         guards: GuardExecutionVerifier | None = None,
         require_guard: bool = False,
+        pytest_capture: Callable[[int, str, tuple[str, ...]], DockerOutputCapture] | None = None,
     ) -> None:
         self.projects, self.registry, self.authority = (projects, registry, authority)
         self.preparer, self.inputs, self.verifier = (preparer, inputs, verifier)
         self.controller, self.results, self.capture = (controller, results, capture)
+        self.pytest_capture = pytest_capture
         self.profiles, self.declarations, self.instance_id = (profiles, declarations, instance_id)
         self.proposal_lookup = proposal_lookup
         self.inspection = inspection

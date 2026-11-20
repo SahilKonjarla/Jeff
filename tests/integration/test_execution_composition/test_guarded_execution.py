@@ -1,5 +1,6 @@
 """Required guarded proposal→claim→existing controller→durable result seam, synthetic Docker."""
 
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -8,17 +9,23 @@ from typing import cast
 from uuid import uuid4
 
 import pytest
+import typer
+from typer.testing import CliRunner
 
 from jeff.application.execution import (
     DockerBackendFault,
     DockerExecutionResult,
     ExecutionManifest,
     ExecutionStopRecord,
+    FreshExecutionCall,
+    FreshExecutionReply,
     FreshExecutionView,
     GuardedExecutionManifest,
 )
 from jeff.infrastructure.runtime_execution.arguments import create_arguments
 from jeff.infrastructure.runtime_execution.guard_artifacts import InstalledGuardVerifier
+from jeff.infrastructure.runtime_output import PytestOutputCollector
+from jeff.interfaces.cli.execution_commands import register
 
 from .support_composition import approved, composed, pending, show
 from .support_guarded import policy
@@ -77,6 +84,85 @@ def test_guarded_approval_runs_once_and_preserves_original_workload(tmp_path: Pa
                 deadline=time.monotonic() + 5,
             )
         assert docker.calls.count("create") == 1
+
+
+@pytest.mark.parametrize("failing", [False, True])
+def test_pytest_cli_uses_existing_approval_and_reads_report_by_job_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: bool
+) -> None:
+    with composed(tmp_path, guarded=True) as (coordinator, _, project, docker):
+        coordinator.pytest_capture = lambda limit, token, paths: PytestOutputCollector(
+            limit, run_token=token, approved_paths=paths
+        )
+
+        class Client:
+            def fresh(self, call: FreshExecutionCall) -> FreshExecutionReply:
+                return coordinator.execute(call, deadline=time.monotonic() + 5)
+
+        monkeypatch.chdir(project.root)
+        app = typer.Typer()
+        register(app, Client, None)
+        cli = CliRunner()
+        proposal = cli.invoke(
+            app, ["tests", "run", "--profile", "python", "--input", "source.py", "--json"]
+        )
+        assert proposal.exit_code == 0, (proposal.output, proposal.exception)
+        reply = FreshExecutionReply.model_validate_json(proposal.stdout)
+        assert reply.view is not None
+        view = reply.view
+        assert "create" not in docker.calls
+        coordinator.decide(
+            project.root,
+            view.approval_id,
+            view.manifest_digest,
+            approve=True,
+            deadline=time.monotonic() + 5,
+        )
+        docker.exit_code = int(failing)
+        docker.output = json.dumps(
+            {
+                "version": 1,
+                "run_token": view.manifest.argv[-1],
+                "passed": 2 - int(failing),
+                "failed": int(failing),
+                "exit_status": docker.exit_code,
+                "failures": [
+                    {
+                        "node_id": "source.py::test_case",
+                        "path": "source.py",
+                        "line": 3,
+                        "excerpt": "assert False",
+                    }
+                ]
+                if failing
+                else [],
+            }
+        ).encode()
+        coordinator.run(
+            project.root, view.approval_id, view.manifest_digest, deadline=time.monotonic() + 5
+        )
+        results = cli.invoke(app, ["tests", "results", str(view.job_id), "--json"])
+        assert results.exit_code == 0, (results.output, results.exception)
+        outcome = FreshExecutionReply.model_validate_json(results.stdout)
+        assert outcome.pytest_result is not None and outcome.pytest_result.report is not None
+        report = outcome.pytest_result.report
+        assert (report.passed, report.failed, report.exit_status) == (
+            2 - int(failing),
+            int(failing),
+            int(failing),
+        )
+        if failing:
+            assert report.failures[0].node_id == "source.py::test_case"
+            assert (report.failures[0].line, report.failures[0].excerpt) == (3, "assert False")
+        assert outcome.output is None
+        wrong_id = cli.invoke(app, ["tests", "results", str(view.approval_id), "--json"])
+        assert wrong_id.exit_code == 1
+        logs = cli.invoke(app, ["execution", "logs", str(view.approval_id), "--json"])
+        assert logs.exit_code == 0
+        archive = FreshExecutionReply.model_validate_json(logs.stdout)
+        assert archive.pytest_result is None
+        assert archive.output is not None and archive.output.stdout == ""
+        assert docker.calls.count("remove") == 1
 
 
 def test_workload124_is_not_timeout(tmp_path: Path) -> None:

@@ -14,6 +14,7 @@ from jeff.application.execution import (
     ReviewFault,
     fresh_execution_failure,
 )
+from jeff.application.execution.pytest_report import pytest_run_token
 from jeff.application.storage import StorageFault
 
 from .binding import _deadline, _project
@@ -74,10 +75,9 @@ def execute(
                 request_id=call.request_id,
                 deadline=deadline,
             )
-        elif call.operation in {"show", "logs"}:
+        elif call.operation in {"show", "logs", "tests.results"}:
             if self.inspection is None:
                 raise DockerBackendFault("docker_authority_required")
-            assert call.approval_id is not None
             project = _project(self, call.directory, deadline)
             observed = self.inspection.inspect_execution(
                 ExecutionInspectionScope(
@@ -85,11 +85,25 @@ def execute(
                     canonical_root=project.root,
                     owner_instance_id=self.instance_id,
                     approval_id=call.approval_id,
+                    job_id=call.job_id,
                 ),
                 deadline=deadline,
             )
             record = observed.record
             result = observed.result
+            pytest_result = None
+            if call.operation == "tests.results":
+                token = pytest_run_token(record.manifest.argv)
+                if token is None or record.job_id != call.job_id:
+                    raise ReviewFault("execution_target_mismatch")
+                if result is not None:
+                    pytest_result = result.pytest_result
+                    if (
+                        pytest_result is not None
+                        and pytest_result.report is not None
+                        and pytest_result.report.run_token != token
+                    ):
+                        raise DockerBackendFault("docker_output_failed")
             completion = (
                 None
                 if result is None
@@ -111,6 +125,7 @@ def execute(
                 completion=completion,
                 completion_state=observed.completion_state,
                 stop=observed.stop,
+                pytest_result=pytest_result,
                 execution_phase=self.execution_phase(record.approval_id)
                 or (
                     "finished"

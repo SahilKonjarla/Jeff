@@ -80,7 +80,7 @@ else:print(r.model_dump_json())
         assert legacy("stop")["ok"]  # matching old caller, not guessed owner replacement
     try:
         started = control.start()
-        assert isinstance(started, ControlSuccess) and started.data.storage.schema_version == 10
+        assert isinstance(started, ControlSuccess) and started.data.storage.schema_version == 11
         configured = client.execute(ProjectCall(operation="config", directory=git_repo))
         assert configured.result.ok
         assert configured.result.data.project_id == initial["result"]["data"]["project_id"]

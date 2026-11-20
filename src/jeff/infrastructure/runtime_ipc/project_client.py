@@ -242,7 +242,7 @@ class RuntimeProjectClient:
                         if (
                             call.approval_id is not None
                             and reply.view.approval_id != call.approval_id
-                        ):
+                        ) or (call.job_id is not None and reply.view.job_id != call.job_id):
                             raise ControlFault("runtime_ownership_unconfirmed")
                         if (
                             call.reviewed_manifest_digest is not None

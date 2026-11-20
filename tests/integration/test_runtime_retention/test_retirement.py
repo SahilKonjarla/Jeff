@@ -98,7 +98,7 @@ def test_terminal_retirement_removes_evidence_but_permanently_refuses_uuid(tmp_p
         restarted_claim = claim.model_copy(update={"owner_instance_id": next_instance})
         reopened.start()
         try:
-            assert reopened.wait_ready(5).schema_version == 10
+            assert reopened.wait_ready(5).schema_version == 11
             with pytest.raises(StorageFault) as retired:
                 reopened.claim(restarted_claim, deadline=time.monotonic() + 5)
             assert retired.value.code == "request_retired"

@@ -25,11 +25,13 @@ def schema4_registry(root: Path) -> Iterator[tuple[Ownership, Project]]:
         initial = SQLiteStorage(owner)
         initial.start()
         try:
-            assert initial.wait_ready(5).schema_version == 10
+            assert initial.wait_ready(5).schema_version == 11
             initial.index(project)
         finally:
             initial.close(timeout=5)
         with closing(sqlite3.connect(layout.database)) as fixture, fixture:
+            fixture.execute("DROP TABLE execution_pytest_reports")
+            fixture.execute("DELETE FROM schema_migrations WHERE version=11")
             fixture.execute("DROP TABLE execution_stop_payloads")
             fixture.execute("DELETE FROM schema_migrations WHERE version=10")
             fixture.execute("DROP TABLE execution_lifecycles")

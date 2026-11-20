@@ -21,7 +21,15 @@ ExecutionLivePhase = Literal["claim_pending", "admitted", "running_observed", "s
 
 
 FreshExecutionOperation = Literal[
-    "propose", "approve", "deny", "start", "show", "logs", "approvals.list", "jobs.list"
+    "propose",
+    "approve",
+    "deny",
+    "start",
+    "show",
+    "logs",
+    "approvals.list",
+    "jobs.list",
+    "tests.results",
 ]
 
 
@@ -46,6 +54,7 @@ class FreshExecutionCall(_Model):
     argv: tuple[str, ...] = Field(default=(), max_length=ARGV_COUNT)
     paths: tuple[str, ...] = Field(default=(), max_length=PREPARED_FILE_LIMIT)
     approval_id: UUID | None = None
+    job_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
     reviewed_manifest_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     after: str | None = Field(default=None, max_length=56)
     limit: StrictInt = Field(default=16, ge=1, le=32)
@@ -64,6 +73,21 @@ class FreshExecutionCall(_Model):
 
     @model_validator(mode="after")
     def shape(self) -> Self:
+        if self.operation == "tests.results":
+            if (
+                self.job_id is None
+                or self.approval_id is not None
+                or self.profile_name is not None
+                or self.argv
+                or self.paths
+                or self.after is not None
+                or self.limit != 16
+                or self.reviewed_manifest_digest is not None
+            ):
+                raise ValueError("Test results accept only a job ID and project scope.")
+            return self
+        if self.job_id is not None:
+            raise ValueError("Only test results accept a job ID.")
         if self.operation in {"approvals.list", "jobs.list"}:
             if (
                 self.profile_name is not None
@@ -137,7 +161,14 @@ class ExecutionInspectionScope(_Model):
     project_id: UUID
     canonical_root: Path
     owner_instance_id: UUID
-    approval_id: UUID
+    approval_id: UUID | None = None
+    job_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def exactly_one_identity(self) -> Self:
+        if (self.approval_id is None) == (self.job_id is None):
+            raise ValueError("Inspection must target one approval or one job.")
+        return self
 
     @field_validator("canonical_root")
     @classmethod

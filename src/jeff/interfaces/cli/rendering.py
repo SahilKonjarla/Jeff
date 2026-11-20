@@ -190,6 +190,21 @@ def render_execution(
             f"replayed={reply.admission.replayed}"
         )
         typer.echo("Claim acknowledgement only; not guest-start or completion confirmation.")
+    elif operation == "tests.results" and reply.view is not None:
+        typer.echo(f"Job: {reply.view.job_id}")
+        if reply.completion is not None:
+            typer.echo(f"Exit status: {reply.completion.outcome.exit_code}")
+        if reply.pytest_result is None:
+            reason = reply.completion.payload_state if reply.completion else reply.completion_state
+            typer.echo(f"Pytest report unavailable ({reason}).")
+        elif (report := reply.pytest_result.report) is None:
+            typer.echo(f"Pytest report unavailable ({reply.pytest_result.status}).")
+        else:
+            typer.echo(f"Passed: {report.passed}; failed: {report.failed}")
+            for failure in report.failures:
+                typer.echo(f"{failure.node_id} at {failure.path}:{failure.line}")
+                if failure.excerpt:
+                    typer.echo(failure.excerpt)
     elif reply.view is not None:
         view = reply.view
         typer.echo(

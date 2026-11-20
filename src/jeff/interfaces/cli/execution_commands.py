@@ -18,6 +18,7 @@ from jeff.application.execution import (
     FreshExecutionReply,
     fresh_execution_failure,
 )
+from jeff.application.execution.pytest_report import PYTEST_RUNNER_ARGV
 from jeff.application.runtime import ControlFault, control_failure
 
 from .rendering import render, render_cancellation, render_execution
@@ -103,6 +104,31 @@ def register(
             render(fresh_execution_failure("execution_unconfirmed"), json_output)
             return
         render_execution(reply, operation, json_output)
+
+    test_app = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
+    app.add_typer(test_app, name="tests", help="Propose and inspect approved pytest jobs.")
+
+    @test_app.command("run")
+    def run_tests(
+        inputs: Annotated[list[str], typer.Option("--input", help="Reviewed project file.")],
+        profile: str = typer.Option("pytest", "--profile"),
+        json_output: bool = typer.Option(False, "--json"),
+    ) -> None:
+        """Propose a pytest job; approve and start separately through execution commands."""
+        request = uuid4()
+        fresh_action(
+            "propose",
+            json_output,
+            profile_name=profile,
+            argv=(*PYTEST_RUNNER_ARGV, request.hex),
+            paths=tuple(inputs),
+            request_id=request,
+        )
+
+    @test_app.command("results")
+    def test_results(job_id: UUID, json_output: bool = typer.Option(False, "--json")) -> None:
+        """Read the saved test report for a job in this project."""
+        fresh_action("tests.results", json_output, job_id=job_id)
 
     @fresh_app.command("propose", context_settings={"ignore_unknown_options": True})
     def fresh_propose(

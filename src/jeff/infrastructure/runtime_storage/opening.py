@@ -25,6 +25,7 @@ from .catalog import (
     _LEDGER,
     _LIFECYCLES,
     _PROJECTS,
+    _PYTEST_REPORTS,
     _RECEIPT_INDEX,
     _RECEIPTS,
     _RESULT_PAYLOADS,
@@ -244,6 +245,14 @@ def _open(self: "SQLiteStorage", root: int) -> tuple[sqlite3.Connection, int]:
                 "INSERT INTO schema_migrations VALUES (10,'execution_stop_payloads_v10')"
             )
             connection.execute("PRAGMA user_version=10")
+            self._commit_write(connection, fd)
+        if version < 11:
+            self._begin_write(connection, root, fd, source_schema=10)
+            connection.execute(_PYTEST_REPORTS)
+            connection.execute(
+                "INSERT INTO schema_migrations VALUES (11,'execution_pytest_reports_v11')"
+            )
+            connection.execute("PRAGMA user_version=11")
             self._commit_write(connection, fd)
         _schema(connection)
         self._activity_meta(connection)

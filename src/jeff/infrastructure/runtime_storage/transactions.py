@@ -25,7 +25,7 @@ def _begin_write(
 ) -> None:
     """Arm the actual DELETE journal before business DML, on the same SQL owner."""
     self._check(root, fd)
-    if source_schema not in (4, 5, 6, 7, 8, 9, 10) or _schema(connection) != source_schema:
+    if not 4 <= source_schema <= DATABASE_SCHEMA or _schema(connection) != source_schema:
         raise StorageFault("storage_schema_unsupported")
     try:
         self.owner.store.read_credential()  # Existing authority only, never rekey residue.

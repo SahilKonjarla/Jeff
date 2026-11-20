@@ -11,6 +11,7 @@ from jeff.domain.execution import AuthorityState
 from ._model import _Model
 from .admission import ExecutionAdmission
 from .output import DockerOutputFacts, DockerOutputSnapshot
+from .pytest_report import PytestResult
 from .requests import ExecutionLivePhase, FreshExecutionOperation
 from .stop_views import ExecutionStopView
 from .views import FreshExecutionCompletion, FreshExecutionPage, FreshExecutionView
@@ -51,12 +52,25 @@ class FreshExecutionReply(_Model):
     stop: ExecutionStopView | None = None
     execution_phase: ExecutionLivePhase | Literal["finished", "unconfirmed"] | None = None
     output: DockerOutputSnapshot | None = None
+    pytest_result: PytestResult | None = Field(default=None, exclude_if=lambda value: value is None)
     error: Failure | None = None
 
     @model_validator(mode="after")
     def consistent(self) -> Self:
         if self.ok != (self.error is None):
             raise ValueError("Success and failure disagree.")
+        if self.pytest_result is not None and (
+            self.operation != "tests.results"
+            or not self.ok
+            or self.completion is None
+            or self.completion.disposition != "completed"
+            or self.completion.payload_state != "retained"
+            or (
+                self.pytest_result.report is not None
+                and self.pytest_result.report.exit_status != self.completion.outcome.exit_code
+            )
+        ):
+            raise ValueError("A pytest result requires matching retained completion facts.")
         if not self.ok:
             if any(
                 value is not None
@@ -114,9 +128,9 @@ class FreshExecutionReply(_Model):
             or self.completion_state is not None
             or self.stop is not None
             or self.execution_phase is not None
-        ) and self.operation not in {"show", "logs"}:
+        ) and self.operation not in {"show", "logs", "tests.results"}:
             raise ValueError("Completion is inspection only.")
-        if self.ok and self.operation in {"show", "logs"}:
+        if self.ok and self.operation in {"show", "logs", "tests.results"}:
             if self.completion_state is None or (self.completion_state == "recorded") != (
                 self.completion is not None
             ):

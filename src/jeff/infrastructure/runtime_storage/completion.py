@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from jeff.application.execution import (
@@ -128,6 +129,19 @@ def _complete_execution(
             completion.output.stderr,
         ),
     )
+    if (pytest_result := completion.pytest_result) is not None:
+        report_json = (
+            pytest_result.report.model_dump_json() if pytest_result.report is not None else None
+        )
+        report_digest = (
+            sha256((completion.fingerprint + report_json).encode()).hexdigest()
+            if report_json is not None
+            else None
+        )
+        connection.execute(
+            "INSERT INTO execution_pytest_reports VALUES (?,?,?,?)",
+            (str(intent.attempt_id), pytest_result.status, report_json, report_digest),
+        )
     connection.execute(
         "UPDATE execution_authorities SET claim_state=? WHERE claim_id=?",
         ("finished" if completion.confirmed else "unknown", str(supplied.claim_id)),

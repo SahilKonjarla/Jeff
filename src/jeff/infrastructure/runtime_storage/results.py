@@ -17,6 +17,7 @@ from jeff.application.execution import (
     ExecutionStopView,
     ReviewFault,
 )
+from jeff.application.execution.pytest_report import PytestReport, PytestResult
 from jeff.application.storage import StorageFault
 
 from .binding import _method
@@ -82,6 +83,24 @@ def _execution_result(
                     "payload_state": "clock_unconfirmed" if now is None else "expired",
                 }
             )
+        if result.payload_state == "retained":
+            report_row = connection.execute(
+                "SELECT status,report_json,report_digest FROM execution_pytest_reports "
+                "WHERE attempt_id=?",
+                (str(launch.intent.attempt_id),),
+            ).fetchone()
+            if report_row is not None:
+                status, payload, digest = report_row
+                report = None
+                if payload is not None:
+                    if sha256((result.completion_digest + payload).encode()).hexdigest() != digest:
+                        raise ValueError("Pytest report digest mismatch.")
+                    report = PytestReport.model_validate_json(payload)
+                    if report.exit_status != result.outcome.exit_code:
+                        raise ValueError("Pytest report exit status mismatch.")
+                result = result.model_copy(
+                    update={"pytest_result": PytestResult(status=status, report=report)}
+                )
         return result
     except (ValueError, TypeError, KeyError):
         raise StorageFault("storage_schema_unsupported") from None

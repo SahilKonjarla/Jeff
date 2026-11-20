@@ -94,7 +94,7 @@ def arm_storage_recovery(
 ) -> _RecoveryPermit:
     """Bind the actual SQLite-created journal before any business DML; never create it."""
     self.check()
-    if type(schema_version) is not int or schema_version not in (4, 5, 6, 7, 8, 9, 10):
+    if type(schema_version) is not int or not 4 <= schema_version <= 11:
         raise ControlFault("runtime_ownership_unconfirmed")
     token = self.store.read_credential()
     with self.store.directory(self.store.layout.data_dir, create=False) as root:

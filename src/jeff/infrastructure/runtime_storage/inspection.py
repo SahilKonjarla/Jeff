@@ -2,6 +2,7 @@
 
 import sqlite3
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from jeff.application.execution import (
     AuthorityOperation,
@@ -36,6 +37,18 @@ def _inspect_execution(
     fd: int,
 ) -> ExecutionInspection:
     # One actor turn: completion cannot race an authority read on this SQL owner.
+    approval_id = scope.approval_id
+    if approval_id is None:
+        if self.instance_id is None or scope.owner_instance_id != self.instance_id:
+            raise ReviewFault("execution_target_mismatch")
+        row = connection.execute(
+            "SELECT approval_id FROM execution_authorities WHERE job_id=? "
+            "AND project_id=? AND canonical_root=?",
+            (str(scope.job_id), str(scope.project_id), str(scope.canonical_root)),
+        ).fetchone()
+        if row is None:
+            raise ReviewFault("execution_target_mismatch")
+        approval_id = UUID(row[0])
     record = self._authority_work(
         connection,
         AuthorityOperation(
@@ -43,7 +56,7 @@ def _inspect_execution(
             project_id=scope.project_id,
             canonical_root=scope.canonical_root,
             owner_instance_id=scope.owner_instance_id,
-            approval_id=scope.approval_id,
+            approval_id=approval_id,
         ),
         root,
         fd,

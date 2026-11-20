@@ -1,6 +1,6 @@
 # Jeff
 
-Local, human-supervised developer assistant for **macOS**. M02 and M03 are accepted within their recorded evidence qualifications: explicit authenticated daemon lifecycle, project/Git questions, durable history, read-only diagnostics, and opt-in approved Docker jobs. Desktop, voice, reasoning providers, Pi/MCP/SSH integration, test watchers and service orchestration remain later milestones. M04 has not started.
+Local, human-supervised developer assistant for **macOS**. M02 and M03 are accepted within their recorded evidence qualifications: explicit authenticated daemon lifecycle, project/Git questions, durable history, read-only diagnostics, and opt-in approved Docker jobs. Desktop, voice, reasoning providers, Pi/MCP/SSH integration, test watchers and service orchestration remain later milestones. M04 is in progress; the source-level pytest proposal and result flow has not yet been verified in Docker.
 
 Docker is the backend for explicitly declared application jobs, not a replacement for the native Jeff daemon or permission to containerize development checks. Linux Jeff client/runtime compatibility is out of scope. [Source map](src/README.md), [CLI contract and uncertainty guidance](src/jeff/interfaces/README.md), [test map](tests/README.md).
 
@@ -22,7 +22,24 @@ python -m pip install -r requirements-dev.lock -e '.[dev]'
 
 Dependencies and tools are declared in `pyproject.toml`. The development lock is a tested Mac/Python snapshot, not a cross-platform hash lock. `requirements.txt` alone does not install the CLI. Reuse the existing environment when dependencies have not changed; deactivation does not stop Jeff.
 
-Current compatibility is **wire14 / DB10 / guarded opt-in settings4 / default settings2**. Legacy settings1/2/3 remain parseable; settings3 alone cannot enable new configured guarded launches. Match client and daemon installations. Older binaries cannot read guarded authority JSON; downgrade after guarded work is unsupported. Acceptance used isolated fixtures, not a normal-installation migration or fresh-machine distribution test.
+M03 was accepted at **wire14 / DB10 / guarded opt-in settings4 / default settings2**. In-progress M04 source uses **DB11** for pytest result storage; the application and SQLite still run natively on macOS. Legacy settings1/2/3 remain parseable; settings3 alone cannot enable new configured guarded launches. Match client and daemon installations. Older binaries do not support DB11 or downgrade. Verification uses isolated fixtures, not a normal-installation migration or fresh-machine distribution test.
+
+## Pytest jobs (M04 in progress)
+
+With an explicitly configured guarded `pytest` profile whose pinned image contains
+`/opt/jeff/pytest_job_runner.py`, run the following from the registered project:
+
+```bash
+jeff tests run --input service.py --input test_service.py
+jeff execution approve <approval-id> --digest <manifest-sha256>
+jeff execution start <approval-id> --digest <manifest-sha256>
+jeff tests results <job-id> --json
+```
+
+`tests run` only proposes. List every reviewed input explicitly; Jeff does not
+copy the whole checkout or prepare the image. The result uses the job ID, not
+the approval ID. A missing or rejected report is not a substitute for the job’s
+exit status. The report is separate from ordinary logs and expires with them.
 
 ## Start and use a project
 

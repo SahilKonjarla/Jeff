@@ -10,6 +10,8 @@ from jeff.application.execution import (
     DockerOutputCapture,
     DockerOwnedContainer,
 )
+from jeff.application.execution.ports import PytestOutputCapture
+from jeff.application.execution.pytest_report import PytestResult
 
 if TYPE_CHECKING:
     from .controller import DockerJobController
@@ -40,6 +42,16 @@ def complete(
             except DockerBackendFault:
                 output = capture.seal(abort=True)
             request = DockerCompletion(owned=handle, outcome=session.outcome, output=output)
+            if request.confirmed and isinstance(capture, PytestOutputCapture):
+                status, report = capture.take_report(session.outcome)
+                request = DockerCompletion(
+                    owned=handle,
+                    outcome=session.outcome,
+                    output=output,
+                    pytest_result=PytestResult(status=status, report=report),
+                )
+            elif isinstance(capture, PytestOutputCapture):
+                capture.seal(abort=True)  # Drop candidate bytes on an unconfirmed job.
             result = store.complete_execution(request, deadline=deadline)
             self._deadline(deadline)
             if result.completion_digest != request.fingerprint or result.disposition != (
