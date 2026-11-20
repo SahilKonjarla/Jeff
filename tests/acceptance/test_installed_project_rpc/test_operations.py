@@ -36,7 +36,7 @@ def test_installed_branch_rpc_receipt_and_target_binding(git_repo: Path, tmp_pat
         started = controller.start()
         assert isinstance(started, ControlSuccess), started
         assert started.data.application_ready is True
-        assert started.data.storage.schema_version == 4
+        assert started.data.storage.schema_version == 10
         assert started.data.available_operations == (
             "ask.branch",
             "ask.changes",
@@ -48,6 +48,7 @@ def test_installed_branch_rpc_receipt_and_target_binding(git_repo: Path, tmp_pat
             "debug.last",
             "history.list",
             "activity.subscribe",
+            "execution.review",
         )
         client = RuntimeProjectClient(layout)
         call = ProjectCall(
