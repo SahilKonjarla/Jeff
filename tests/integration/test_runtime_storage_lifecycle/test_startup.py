@@ -86,7 +86,7 @@ def test_startup_pipe_is_bounded_diagnostic_not_readiness_authority(
 import json,os,struct,sys
 fd=int(sys.argv[1]);kind=sys.argv[3]
 error='SYNTHETIC_PRIVATE' if kind=='unknown_error' else None
-payload=json.dumps({'revision':6,'instance_id':sys.argv[2],'error':error}).encode()
+payload=json.dumps({'revision':14,'instance_id':sys.argv[2],'error':error}).encode()
 frame=struct.pack('!I',len(payload))+payload
 if kind=='oversized':frame=b'\\xff\\xff\\xff\\xff'
 if kind=='truncated':frame=b'\\x00'
@@ -147,7 +147,7 @@ def test_start_retries_when_a_real_short_lived_reader_lease_is_released(
 def test_startup_diagnostic_drain_is_bounded_and_instance_scoped(packet: str) -> None:
     expected = uuid4()
     identity = uuid4() if packet == "wrong_instance" else expected
-    payload = json.dumps({"revision": 6, "instance_id": str(identity), "error": None}).encode()
+    payload = json.dumps({"revision": 14, "instance_id": str(identity), "error": None}).encode()
     frame = struct.pack("!I", len(payload)) + payload
     if packet == "oversized":
         frame = b"\xff\xff\xff\xff"
