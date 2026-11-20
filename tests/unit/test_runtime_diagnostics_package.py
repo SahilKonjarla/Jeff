@@ -26,7 +26,7 @@ from jeff.infrastructure import runtime_diagnostics as native
 
 INTERFACE_DIGEST = "b8fa4eefd7925a55da16e45e9f1aed08c272999bcf0c42df3f0a01e190c143ff"
 VECTOR_DIGEST = "f12477c900698954641a21c1f6bf74c54d83af0e2b6006f53f2dde4d478eea9b"
-SCHEMA_DIGEST = "bf378561c52c8394efdb470adfda206235c3b4a09a518874a65274a6744f3ca3"
+SCHEMA_DIGEST = "e3d6a985eef6392f39fdf7f5e90f6c2d0bd93703271b990250cc658d453fdc2a"
 
 
 def _digest(value: object) -> str:
