@@ -90,8 +90,11 @@ def test_formula_version_revision_and_bottle_are_all_pinned() -> None:
     }
     tools.validate_formulae(formulae)
     formulae["formulae"][0]["revision"] = 1
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as error:
         tools.validate_formulae(formulae)
+    assert "llvm" in str(error.value)
+    assert "expected 23.1.6 revision 0" in str(error.value)
+    assert "observed '23.1.6' revision 1" in str(error.value)
 
 
 @pytest.mark.parametrize("tampered", [False, True])

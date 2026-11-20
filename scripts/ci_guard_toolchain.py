@@ -109,9 +109,11 @@ def validate_formulae(value: object) -> None:
     need(set(found) == set(BOTTLES), "Unexpected formulae")
     for name, expected in BOTTLES.items():
         formula = found[name]
+        stable, revision = obj(formula["versions"])["stable"], formula["revision"]
         need(
-            obj(formula["versions"])["stable"] == RELEASE and formula["revision"] == 0,
-            "Unapproved formula release/revision",
+            stable == RELEASE and revision == 0,
+            f"Unapproved {name} release/revision: expected {RELEASE} revision 0; "
+            f"observed {stable!r} revision {revision!r}",
         )
         files = obj(obj(obj(formula["bottle"])["stable"])["files"])
         need(obj(files[BOTTLE_TAG])["sha256"] == expected, "Unapproved bottle checksum")
