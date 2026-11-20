@@ -154,7 +154,9 @@ def test_snapshot_tampering_and_namespace_swaps_never_return_a_binding(
             elif kind == "hard":
                 os.link(leaf, root.parent / "other-link")
             elif kind == "directory":
-                root.rename(root.parent / "old")
+                root.chmod(0o700)  # macOS requires write access to rename this directory.
+                old = root.rename(root.parent / "old")
+                old.chmod(0o555)
                 root.mkdir(mode=0o555)
             if kind == "during":
                 original = os.read
@@ -173,7 +175,9 @@ def test_snapshot_tampering_and_namespace_swaps_never_return_a_binding(
                     info = os.fstat(fd)
                     if not swapped and (info.st_dev, info.st_ino) == identity:
                         swapped = True
-                        directory.rename(directory.parent / "old")
+                        directory.chmod(0o700)
+                        old = directory.rename(directory.parent / "old")
+                        old.chmod(0o555)
                         directory.mkdir(mode=0o700)
                         (directory / "file.txt").write_bytes(b"unreviewed bytes")
                         (directory / "file.txt").chmod(0o444)
