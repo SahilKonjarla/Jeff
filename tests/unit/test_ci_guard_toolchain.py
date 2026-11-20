@@ -132,9 +132,11 @@ def test_provision_pours_checked_bottles_before_declaring_tools(
     if tampered:
         archives["llvm"].write_bytes(b"corrupted archive")
     calls = []
+    refreshes = []
 
-    def run(args: list[str], *, seconds: int = 180) -> str:
+    def run(args: list[str], *, seconds: int = 180, refresh_metadata: bool = False) -> str:
         calls.append(args)
+        refreshes.append(refresh_metadata)
         if args[1] == "info":
             return json.dumps(formulae)
         if args[1] == "--cache":
@@ -157,6 +159,7 @@ def test_provision_pours_checked_bottles_before_declaring_tools(
         tools.provision(output)
         assert tools.verify_tool(tools.load_toolchain(output), "clang").name == "clang"
         assert output.stat().st_mode & 0o777 == 0o600
+        assert refreshes[0] is True and sum(refreshes) == 1
         assert [c[1:] for c in calls if c[1] in {"install", "reinstall"}] == [
             ["reinstall", "--force-bottle", "llvm"],
             ["install", "--force-bottle", "lld"],
@@ -176,6 +179,28 @@ def test_command_environment_is_child_only(monkeypatch: pytest.MonkeyPatch) -> N
     assert tools.run([tools.BREW, "info"]) == "ok"
     assert key not in os.environ
     assert isinstance(observed["env"], dict) and observed["env"][key] == "1"
+
+
+def test_metadata_refresh_is_explicit_and_child_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOMEBREW_API_UPDATED", "1")
+    monkeypatch.delenv("HOMEBREW_FORCE_API_AUTO_UPDATE", raising=False)
+    children: list[dict[str, str]] = []
+
+    def command(*args: object, **kwargs: object) -> SimpleNamespace:
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        children.append(environment)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", command)
+    assert tools.run([tools.BREW, "info"], refresh_metadata=True) == "ok"
+    assert children[0]["HOMEBREW_FORCE_API_AUTO_UPDATE"] == "1"
+    assert children[0]["HOMEBREW_API_AUTO_UPDATE_SECS"] == "0"
+    assert children[0]["HOMEBREW_NO_AUTO_UPDATE"] == "1"
+    assert "HOMEBREW_API_UPDATED" not in children[0]
+    assert os.environ["HOMEBREW_API_UPDATED"] == "1"
+    tools.run([tools.BREW, "fetch"])
+    assert "HOMEBREW_FORCE_API_AUTO_UPDATE" not in children[1]
 
 
 def test_bottle_checksum_mismatch_is_rejected(tmp_path: Path) -> None:

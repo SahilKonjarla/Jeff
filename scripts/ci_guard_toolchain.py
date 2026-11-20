@@ -123,13 +123,20 @@ def verify_bottle(path: Path, expected: str) -> None:
     need(path.is_file() and digest(path) == expected, "Pinned bottle checksum mismatch")
 
 
-def run(args: list[str], *, seconds: int = 180) -> str:
+def run(args: list[str], *, seconds: int = 180, refresh_metadata: bool = False) -> str:
     child_env = os.environ | {
         "HOMEBREW_NO_AUTO_UPDATE": "1",
         "HOMEBREW_NO_INSTALL_CLEANUP": "1",
         "HOMEBREW_NO_ANALYTICS": "1",
         "HOMEBREW_NO_ENV_HINTS": "1",
     }
+    child_env.pop("HOMEBREW_FORCE_API_AUTO_UPDATE", None)
+    if refresh_metadata:
+        # Runner images can carry an older API catalog. Refresh metadata once,
+        # then validate exact pins; never enable general Homebrew auto-upgrades.
+        child_env["HOMEBREW_FORCE_API_AUTO_UPDATE"] = "1"
+        child_env["HOMEBREW_API_AUTO_UPDATE_SECS"] = "0"
+        child_env.pop("HOMEBREW_API_UPDATED", None)
     result = subprocess.run(args, capture_output=True, text=True, timeout=seconds, env=child_env)
     need(result.returncode == 0, "Build tool command failed: " + result.stderr[-1000:])
     return result.stdout.strip()
@@ -147,7 +154,7 @@ def provision(output: Path) -> None:
         "Fresh output required",
     )
     info = [BREW, "info", "--json=v2", "llvm", "lld"]
-    validate_formulae(json.loads(run(info)))
+    validate_formulae(json.loads(run(info, refresh_metadata=True)))
     run([BREW, "fetch", "--force-bottle", "--bottle-tag=" + BOTTLE_TAG, "llvm", "lld"])
     for name, sha in BOTTLES.items():
         cache = Path(run([BREW, "--cache", "--bottle-tag=" + BOTTLE_TAG, name]))
