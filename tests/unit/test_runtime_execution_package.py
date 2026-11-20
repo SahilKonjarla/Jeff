@@ -25,7 +25,7 @@ from jeff.domain.execution import AuthorityState
 from jeff.infrastructure import runtime_execution as native
 
 ARGUMENT_DIGEST = "2ed26476550eec81b4b0937da8e9c75c2b25d2fb672e70ff33e6bab94f8d230d"
-SESSION_DIGEST = "c3cc9159b776c2bc5f60cbc494277e8f2ece752f2ff3ae42126d019f45d9a94c"
+SESSION_DIGEST = "770e77a6fa52249da0ded6593ce0321bac5749347bdea41facfebdf135e4db5b"
 SIGNATURE_DIGEST = "73a9993a5f47d8cf8e93135a478a313fd250a6b2cbe652deebc0a2ef2d319df9"
 
 
