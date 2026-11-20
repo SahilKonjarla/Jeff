@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -16,6 +17,7 @@ import pytest
 
 from jeff.application.dispatch import (
     DispatchReply,
+    EvidenceQuery,
     ProjectCall,
     ProjectDispatcher,
     ProjectRequest,
@@ -25,6 +27,7 @@ from jeff.application.history import GitObserver
 from jeff.application.projects import ProjectService
 from jeff.application.questions import QuestionService
 from jeff.application.runtime import (
+    DEFAULT_RUNTIME_LIMITS,
     ControlFault,
     ControlSuccess,
     RuntimeIdentityData,
@@ -37,7 +40,7 @@ from jeff.infrastructure.runtime_ipc import ControlClient, RuntimeProjectClient,
 from jeff.infrastructure.runtime_process import RuntimeController
 from jeff.infrastructure.runtime_state import RuntimeStateStore
 from jeff.infrastructure.runtime_storage import SQLiteStorage
-from jeff.integrations.git import GitProjectDiscovery, GitRepositoryRead
+from jeff.integrations.git import GIT_TIMEOUT, GitProjectDiscovery, GitRepositoryRead
 
 
 def test_four_active_sixteen_pending_and_actual_drain(git_repo: Path, tmp_path: Path) -> None:
@@ -129,24 +132,28 @@ def test_native_slow_git_delivery_failure_keeps_control_and_receipt_honest(
     layout = RuntimeLayout(data_dir=tmp_path / "d", runtime_dir=tmp_path / "r", uid=os.geteuid())
     marker = tmp_path / "git-status-count"
     original = subprocess.Popen
+    # Give admission/discovery its normal budget; induce timeout only after Git starts.
+    slow_seconds = GIT_TIMEOUT + 1 if mode == "timeout" else 3
     # System subprocess fault in the actual child, never a mocked dispatcher result.
     helper_hook = f"""
-import atexit,json,os,subprocess,sys
+import atexit,json,os,subprocess,sys,time
 from pathlib import Path
 original=subprocess.Popen
 children=[];killed=[];original_kill=original.kill
+deadline_ns=int(sys.argv[sys.argv.index('--deadline-ns')+1])
 marker=Path({str(marker)!r})
 def kill(process):
-    if process in children and process.poll() is None:killed.append(process)
+    if process in children and process.poll() is None:killed.append((process,time.monotonic_ns()))
     return original_kill(process)
 original.kill=kill
 def record():
     if not killed:return
     fd=os.open(marker.with_name('slow-probe-signals.jsonl'),os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
     try:
-        for process in killed:
+        for process,killed_ns in killed:
             row={{'role':'python_slow_fixture','signal_call':'SIGKILL',
-                  'captured_pid':process.pid,'native_exit_code':process.poll()}}
+                  'captured_pid':process.pid,'native_exit_code':process.poll(),
+                  'deadline_ns':deadline_ns,'killed_ns':killed_ns}}
             os.write(fd,(json.dumps(row)+'\\n').encode())
     finally:os.close(fd)
 atexit.register(record)
@@ -154,7 +161,7 @@ def launch(command,*args,**kwargs):
     if command[0]=='/usr/bin/git' and 'status' in command:
         with marker.open('a') as out:out.write('1\\n')
         code=(\"import sys,time;sys.stdout.buffer.write(b'# branch.oid (initial)'+bytes([0])+\"
-              \"b'# branch.head main'+bytes([0]));sys.stdout.flush();time.sleep(3);\"
+              \"b'# branch.head main'+bytes([0]));sys.stdout.flush();time.sleep({slow_seconds});\"
               \"open(sys.argv[1],'a').write('1'+chr(10))\")
         child=original([sys.executable,'-I','-B','-c',code,str(marker)+'.done'],*args,**kwargs)
         children.append(child)
@@ -188,10 +195,12 @@ subprocess.Popen=launch
                 wire = ProjectRequest(
                     call=call if number == 0 else call.model_copy(update={"request_id": uuid4()}),
                     expected_instance_id=connection.identity.instance_id,
-                    remaining_ms=1500 if mode == "timeout" else 30000,
+                    remaining_ms=30000,
                 )
                 connection.connection.sendall(encode_message(wire.model_dump(mode="json"), 65536))
-            until = time.monotonic() + 3
+            until = time.monotonic() + (
+                DEFAULT_RUNTIME_LIMITS.request_seconds if mode == "timeout" else 3
+            )
             while not marker.exists():
                 assert time.monotonic() < until
                 time.sleep(0.01)
@@ -220,6 +229,23 @@ subprocess.Popen=launch
             assert found.receipt.state == "succeeded"
         else:
             assert found.receipt.state != "succeeded"
+            evidence = client.inspect_evidence(
+                EvidenceQuery(operation="trace", directory=git_repo, request_id=call.request_id)
+            )
+            assert evidence.error is None and evidence.trace is not None
+            assert any(
+                event.git is not None
+                and event.git.process_started
+                and event.git.code in ("git_timeout", "git_failed")
+                for event in evidence.trace.events
+            )
+            signals = [
+                json.loads(line)
+                for line in (tmp_path / "slow-probe-signals.jsonl").read_text().splitlines()
+            ]
+            assert len(signals) == 1
+            assert signals[0]["signal_call"] == "SIGKILL" and signals[0]["native_exit_code"] == -9
+            assert signals[0]["killed_ns"] >= signals[0]["deadline_ns"]
         duplicate = client.execute(call)
         assert not duplicate.result.ok and duplicate.result.error.code == "duplicate_request"
         if mode != "saturated":
