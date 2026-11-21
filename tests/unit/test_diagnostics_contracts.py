@@ -150,7 +150,7 @@ def test_live_doctor_accepts_fresh_and_cancel_capabilities_without_weakening_bas
         healthy = report().model_dump()
         healthy.update(
             summary="healthy",
-            database_schema_version=11,
+            database_schema_version=12,
             runtime=cached,
             checks=[
                 dict(name=n, status="ok", required=True)
@@ -172,7 +172,7 @@ def stopped_payload() -> dict[str, Any]:
         summary="stopped",
         settings_schema_version=2,
         configured_retention_days=17,
-        database_schema_version=11,
+        database_schema_version=12,
     )
     value["checks"] = [
         {"name": name, "status": "ok", "code": None, "required": True}
@@ -214,7 +214,7 @@ def test_valid_oversized_configuration_uses_finite_marker_not_active_retention()
 def test_phase2_doctor_accepts_current_and_legacy_settings_and_current_live_readiness() -> None:
     stopped = DoctorReport.model_validate(stopped_payload())
     assert doctor_result(stopped).ok
-    assert stopped.settings_schema_version == 2 and stopped.database_schema_version == 11
+    assert stopped.settings_schema_version == 2 and stopped.database_schema_version == 12
     legacy = DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 1})
     assert doctor_result(legacy).ok and legacy.settings_schema_version == 1
     configured = DoctorReport.model_validate({**stopped_payload(), "settings_schema_version": 3})

@@ -16,6 +16,7 @@ from .pytest_report import PytestResult
 from .requests import ExecutionLivePhase, FreshExecutionOperation
 from .stop_views import ExecutionStopView
 from .views import FreshExecutionCompletion, FreshExecutionPage, FreshExecutionView
+from .watch import WatchInbox
 
 
 class ExecutionCancelReply(_Model):
@@ -55,6 +56,7 @@ class FreshExecutionReply(_Model):
     output: DockerOutputSnapshot | None = None
     log_page: LiveLogPage | None = Field(default=None, exclude_if=lambda value: value is None)
     pytest_result: PytestResult | None = Field(default=None, exclude_if=lambda value: value is None)
+    watch: WatchInbox | None = Field(default=None, exclude_if=lambda value: value is None)
     error: Failure | None = None
 
     @model_validator(mode="after")
@@ -92,6 +94,15 @@ class FreshExecutionReply(_Model):
                 raise ValueError("Refusals cannot carry success facts.")
         elif self.identity is None:
             raise ValueError("Success requires authenticated instance correlation.")
+        elif self.operation in {"watch.job", "watch.pending", "watch.ack"}:
+            if (
+                self.watch is None
+                or self.view is not None
+                or self.admission is not None
+                or (self.watch.watched_job_id is not None) != (self.operation == "watch.job")
+                or (self.watch.acknowledged_id is not None) != (self.operation == "watch.ack")
+            ):
+                raise ValueError("Unexpected watch reply shape.")
         elif self.operation in {"approvals.list", "jobs.list"}:
             if self.page is None or any(
                 value is not None
@@ -125,6 +136,10 @@ class FreshExecutionReply(_Model):
                 raise ValueError("Start acknowledges only the matching committed claim.")
         elif self.view is None or self.admission is not None:
             raise ValueError("Non-start success requires original scoped facts.")
+        if self.watch is not None and (
+            not self.ok or self.operation not in {"watch.job", "watch.pending", "watch.ack"}
+        ):
+            raise ValueError("Watch facts require a valid watch operation.")
         if self.page is not None and self.operation not in {"approvals.list", "jobs.list"}:
             raise ValueError("Only listings carry pages.")
         if (
@@ -201,6 +216,8 @@ def fresh_execution_failure(code: str) -> Failure:
         ),
         "execution_conflict": "Request identity or reviewed action conflicts with stored facts.",
         "execution_expired": "Approval expired or was invalidated; a fresh review is required.",
+        "execution_watch_capacity": "Too many unacknowledged watches in this project.",
+        "execution_watch_not_ready": "This job has no terminal notification to acknowledge yet.",
         "execution_not_found": "No fresh execution record exists in this validated scope.",
         "execution_retry_unavailable": (
             "Failed-test retry needs a retained failure report from a selection-capable runner "

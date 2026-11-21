@@ -48,7 +48,7 @@ def test_wire14_cancel_target_and_terminal_projection_are_strict_and_private() -
 
 
 def test_versions_and_strict_instance_bound_project_call() -> None:
-    assert PROTOCOL_REVISION == 14 and DATABASE_SCHEMA == 11
+    assert PROTOCOL_REVISION == 14 and DATABASE_SCHEMA == 12
     call = ProjectCall(
         request_id=uuid4(),
         operation="ask",

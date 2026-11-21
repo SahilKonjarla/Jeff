@@ -22,7 +22,7 @@ python -m pip install -r requirements-dev.lock -e '.[dev]'
 
 Dependencies and tools are declared in `pyproject.toml`. The development lock is a tested Mac/Python snapshot, not a cross-platform hash lock. `requirements.txt` alone does not install the CLI. Reuse the existing environment when dependencies have not changed; deactivation does not stop Jeff.
 
-M03 was accepted at **wire14 / DB10 / guarded opt-in settings4 / default settings2**. In-progress M04 source uses **DB11** for pytest result storage; the application and SQLite still run natively on macOS. Legacy settings1/2/3 remain parseable; settings3 alone cannot enable new configured guarded launches. Match client and daemon installations. Older binaries do not support DB11 or downgrade. Verification uses isolated fixtures, not a normal-installation migration or fresh-machine distribution test.
+M03 was accepted at **wire14 / DB10 / guarded opt-in settings4 / default settings2**. In-progress M04 source uses **DB12** for pytest results and job watches; the application and SQLite still run natively on macOS. Legacy settings1/2/3 remain parseable; settings3 alone cannot enable new configured guarded launches. Match client and daemon installations. Older binaries do not support DB12 or downgrade. Verification uses isolated fixtures, not a normal-installation migration or fresh-machine distribution test.
 
 ## Pytest jobs (M04 in progress)
 
@@ -47,6 +47,13 @@ proposes a new job for the exact failed test IDs from a retained version 2 repor
 Approve and start it separately. Retry requires the same pinned image, execution
 profile and input bytes; to test changed source, propose a fresh `jeff tests run`.
 Version 1 reports are still readable but cannot be used to propose retries.
+
+Use `jeff watch job <job-id>` to register a watch in the current project, then
+`jeff watch pending` to read terminal notifications. `jeff watch ack <notification-id>`
+acknowledges one notification. Reading does not acknowledge it: until acknowledged,
+the same notification ID can appear again, including after a daemon restart.
+A watched job whose outcome cannot be confirmed is reported as interrupted, not
+as a test pass or failure.
 
 ## Start and use a project
 

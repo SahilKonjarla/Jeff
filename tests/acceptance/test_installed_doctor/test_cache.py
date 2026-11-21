@@ -44,7 +44,7 @@ def test_live_doctor_uses_authenticated_cache_without_local_sql_or_settings_read
     assert report["runtime"]["settings_source"] == "default_file"
     assert report["configured_retention_days"] is None
     assert report["settings_schema_version"] is None
-    assert report["database_schema_version"] == 11
+    assert report["database_schema_version"] == 12
     assert all(check["status"] == "ok" for check in report["checks"])
     assert str(layout.data_dir) not in result.stdout.decode()
 

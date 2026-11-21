@@ -172,6 +172,20 @@ def render_execution(
         typer.echo(json.dumps(reply.model_dump(mode="json"), ensure_ascii=True))
     elif reply.error is not None:
         typer.echo(f"{reply.error.error.code}: {reply.error.error.message}", err=True)
+    elif reply.watch is not None:
+        inbox = reply.watch
+        if inbox.watched_job_id is not None:
+            typer.echo(
+                f"Watching job {inbox.watched_job_id}; notification: {inbox.notification_id}"
+            )
+        elif inbox.acknowledged_id is not None:
+            typer.echo(f"Acknowledged: {inbox.acknowledged_id}")
+        elif not inbox.notifications:
+            typer.echo("No pending terminal notifications.")
+        else:
+            for notice in inbox.notifications:
+                code = f"; exit: {notice.exit_code}" if notice.exit_code is not None else ""
+                typer.echo(f"{notice.notification_id}  job {notice.job_id}: {notice.outcome}{code}")
     elif reply.page is not None:
         typer.echo(f"Project: {reply.page.project_id}; root: {reply.page.canonical_root}")
         for item in reply.page.items:

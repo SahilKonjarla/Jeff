@@ -39,7 +39,7 @@ def reopened(
     current.start()
     try:
         ready = current.wait_ready(5)
-        assert ready.state == "ready" and ready.schema_version == 11
+        assert ready.state == "ready" and ready.schema_version == 12
         yield current, generation
     finally:
         current.close(timeout=5)

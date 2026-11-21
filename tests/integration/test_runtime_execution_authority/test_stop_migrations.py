@@ -34,6 +34,8 @@ def test_schema8_to9_signs_source_before_ddl_preserves_v1_and_rolls_back(
             store.close(timeout=5)
             layout = store.owner.store.layout
             with closing(original_connect(layout.database)) as fixture, fixture:
+                fixture.execute("DROP TABLE execution_job_watches")
+                fixture.execute("DELETE FROM schema_migrations WHERE version=12")
                 fixture.execute("DROP TABLE execution_pytest_reports")
                 fixture.execute("DELETE FROM schema_migrations WHERE version=11")
                 fixture.execute("DROP TABLE execution_stop_payloads")
@@ -90,7 +92,7 @@ def test_schema8_to9_signs_source_before_ddl_preserves_v1_and_rolls_back(
                     if fail_ddl:
                         assert state.state == "failed"
                     else:
-                        assert state.schema_version == 11
+                        assert state.schema_version == 12
                         assert (
                             migrated.execution_result(
                                 launch_scope(intent), deadline=time.monotonic() + 5
@@ -105,7 +107,7 @@ def test_schema8_to9_signs_source_before_ddl_preserves_v1_and_rolls_back(
                 assert layout.database.read_bytes() == before
 
 
-@pytest.mark.parametrize("source", (9, 10))
+@pytest.mark.parametrize("source", (9, 10, 11))
 @pytest.mark.parametrize("failure", ("none", "ddl", "permit"))
 def test_migration_signs_exact_source_before_ddl_and_rolls_back(
     tmp_path: Path,
@@ -114,7 +116,11 @@ def test_migration_signs_exact_source_before_ddl_and_rolls_back(
     source: int,
 ) -> None:
     original_connect = sqlite3.connect
-    target_table = "execution_stop_payloads" if source == 9 else "execution_pytest_reports"
+    target_table = {
+        9: "execution_stop_payloads",
+        10: "execution_pytest_reports",
+        11: "execution_job_watches",
+    }[source]
     with authority_store(tmp_path) as (store, project, manifest, generation):
         intent = launch_intent(store, project, manifest, generation)
         for phase in ("create_intent", "created", "start_intent", "exited", "cleaned"):
@@ -123,7 +129,9 @@ def test_migration_signs_exact_source_before_ddl_and_rolls_back(
         store.close(timeout=5)
         layout = store.owner.store.layout
         with closing(original_connect(layout.database)) as sql, sql:
-            sql.execute("DROP TABLE execution_pytest_reports")
+            sql.execute("DROP TABLE execution_job_watches")
+            if source <= 10:
+                sql.execute("DROP TABLE execution_pytest_reports")
             if source == 9:
                 sql.execute("DROP TABLE execution_stop_payloads")
             sql.execute("DELETE FROM schema_migrations WHERE version>?", (source,))
@@ -165,7 +173,7 @@ def test_migration_signs_exact_source_before_ddl_and_rolls_back(
                 if failure != "none":
                     assert state.state == "failed"
                 else:
-                    assert state.schema_version == 11
+                    assert state.schema_version == 12
                     assert (
                         migrated.execution_result(
                             launch_scope(intent), deadline=time.monotonic() + 5
@@ -216,7 +224,7 @@ def test_pytest_report_reopens_with_completion_and_expires_with_output(tmp_path:
         reopened = SQLiteStorage(store.owner, instance_id=uuid4(), retention_clock=lambda: now)
         reopened.start()
         try:
-            assert reopened.wait_ready(5).schema_version == 11
+            assert reopened.wait_ready(5).schema_version == 12
             scope = launch_scope(intent)
             assert reopened.execution_result(scope, deadline=time.monotonic() + 5) == original
             now += 31 * 86400000

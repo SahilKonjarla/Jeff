@@ -1,6 +1,6 @@
 """Public intent routing and scoped facts-only inspection projections."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from jeff.application.execution import (
     DockerBackendFault,
@@ -21,6 +21,7 @@ from jeff.application.execution.pytest_report import (
     pytest_retry_token,
     pytest_run_token,
 )
+from jeff.application.execution.watch import WatchOperation, WatchScope
 from jeff.application.storage import StorageFault
 from jeff.domain.execution import ARGV_BYTES, ARGV_COUNT
 
@@ -37,6 +38,29 @@ def execute(
     """Public intent gateway. Starts must use the existing owned-worker observer seam."""
     try:
         _deadline(deadline)
+        if call.operation in {"watch.job", "watch.pending", "watch.ack"}:
+            if self.watch_store is None:
+                raise DockerBackendFault("docker_authority_required")
+            project = _project(self, call.directory, deadline)
+            inbox = self.watch_store.watch(
+                WatchScope(
+                    project_id=project.project_id,
+                    canonical_root=project.root,
+                    owner_instance_id=self.instance_id,
+                    operation=cast(WatchOperation, call.operation),
+                    target=call.watch_target,
+                ),
+                deadline=deadline,
+            )
+            if inbox.project_id != project.project_id:
+                raise DockerBackendFault("docker_authority_required")
+            return FreshExecutionReply(
+                request_id=call.request_id,
+                identity=self.instance_id,
+                operation=call.operation,
+                ok=True,
+                watch=inbox,
+            )
         if call.operation in {"approvals.list", "jobs.list"}:
             if self.listing is None:
                 raise DockerBackendFault("docker_authority_required")

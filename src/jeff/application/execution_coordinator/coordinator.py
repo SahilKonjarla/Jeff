@@ -36,6 +36,7 @@ from jeff.application.execution import (
     ProposalLookupStore,
 )
 from jeff.application.execution.log_tail import LiveLogTail
+from jeff.application.execution.watch import WatchStore
 from jeff.application.projects import ProjectService
 from jeff.application.storage import ProjectRegistry
 
@@ -73,12 +74,14 @@ class ExecutionCoordinator:
         require_guard: bool = False,
         pytest_capture: Callable[[int, str, tuple[str, ...]], DockerOutputCapture] | None = None,
         attach_log_tail: Callable[[DockerOutputCapture, LiveLogTail], None] | None = None,
+        watch_store: WatchStore | None = None,
     ) -> None:
         self.projects, self.registry, self.authority = (projects, registry, authority)
         self.preparer, self.inputs, self.verifier = (preparer, inputs, verifier)
         self.controller, self.results, self.capture = (controller, results, capture)
         self.pytest_capture = pytest_capture
         self.attach_log_tail = attach_log_tail
+        self.watch_store = watch_store
         self._log_tail: tuple[UUID, LiveLogTail] | None = None
         self.profiles, self.declarations, self.instance_id = (profiles, declarations, instance_id)
         self.proposal_lookup = proposal_lookup

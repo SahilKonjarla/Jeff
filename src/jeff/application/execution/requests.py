@@ -35,6 +35,9 @@ FreshExecutionOperation = Literal[
     "tests.latest",
     "tests.retry-failed",
     "jobs.logs",
+    "watch.job",
+    "watch.pending",
+    "watch.ack",
 ]
 
 
@@ -60,6 +63,7 @@ class FreshExecutionCall(_Model):
     paths: tuple[str, ...] = Field(default=(), max_length=PREPARED_FILE_LIMIT)
     approval_id: UUID | None = None
     job_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    watch_target: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
     claim_filter: JobClaimFilter | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -89,6 +93,23 @@ class FreshExecutionCall(_Model):
             self.claim_filter is not None or self.kind_filter is not None
         ):
             raise ValueError("Only fresh job listings accept job filters.")
+        if self.operation in {"watch.job", "watch.pending", "watch.ack"}:
+            if (
+                (self.watch_target is None) != (self.operation == "watch.pending")
+                or self.approval_id is not None
+                or self.job_id is not None
+                or self.profile_name is not None
+                or self.argv
+                or self.paths
+                or self.after is not None
+                or self.limit != 16
+                or self.reviewed_manifest_digest is not None
+                or self.log_after is not None
+            ):
+                raise ValueError("Invalid watch request shape.")
+            return self
+        if self.watch_target is not None:
+            raise ValueError("Only watch requests accept a watch target.")
         if self.log_after is not None and self.operation != "jobs.logs":
             raise ValueError("Only job logs accept a log cursor.")
         if self.operation in {"tests.results", "tests.latest", "tests.retry-failed", "jobs.logs"}:

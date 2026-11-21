@@ -195,6 +195,14 @@ _RESULTS = (
 )
 
 
+_JOB_WATCHES = (
+    "CREATE TABLE execution_job_watches ("
+    "job_id TEXT PRIMARY KEY NOT NULL REFERENCES execution_authorities(job_id), "
+    "notification_id TEXT NOT NULL UNIQUE, acknowledged INTEGER NOT NULL DEFAULT 0 "
+    "CHECK(acknowledged IN (0,1)))"
+)
+
+
 _PYTEST_REPORTS = (
     "CREATE TABLE execution_pytest_reports ("
     "attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES execution_results(attempt_id), "

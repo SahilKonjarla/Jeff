@@ -97,7 +97,8 @@ def test_guarded_approval_runs_once_and_preserves_original_workload(tmp_path: Pa
 def test_pytest_cli_uses_existing_approval_and_reads_report_by_job_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: bool, version: int
 ) -> None:
-    with composed(tmp_path, guarded=True) as (coordinator, _, project, docker):
+    with composed(tmp_path, guarded=True) as (coordinator, store, project, docker):
+        coordinator.watch_store = store
         coordinator.pytest_capture = lambda limit, token, paths: PytestOutputCollector(
             limit, run_token=token, approved_paths=paths
         )
@@ -122,6 +123,11 @@ def test_pytest_cli_uses_existing_approval_and_reads_report_by_job_id(
         reply = FreshExecutionReply.model_validate_json(proposal.stdout)
         assert reply.view is not None
         view = reply.view
+        watched = cli.invoke(app, ["watch", "job", str(view.job_id), "--json"])
+        assert watched.exit_code == 0, (watched.output, watched.exception)
+        inbox = FreshExecutionReply.model_validate_json(watched.stdout).watch
+        assert inbox is not None and inbox.notification_id is not None
+        notification_id = inbox.notification_id
         assert "create" not in docker.calls
         not_run = cli.invoke(app, ["tests", "retry-failed", str(view.job_id), "--json"])
         assert not_run.exit_code == 1 and "execution_retry_unavailable" in not_run.stdout
@@ -169,6 +175,16 @@ def test_pytest_cli_uses_existing_approval_and_reads_report_by_job_id(
             assert report.failures[0].node_id == "source.py::test_case"
             assert (report.failures[0].line, report.failures[0].excerpt) == (3, "assert False")
         assert outcome.output is None
+        pending = cli.invoke(app, ["watch", "pending", "--json"])
+        assert pending.exit_code == 0, (pending.output, pending.exception)
+        inbox = FreshExecutionReply.model_validate_json(pending.stdout).watch
+        assert inbox is not None
+        [notice] = inbox.notifications
+        assert notice.notification_id == notification_id and notice.job_id == view.job_id
+        assert notice.outcome == ("failed" if failing else "passed")
+        ack = cli.invoke(app, ["watch", "ack", str(notification_id)])
+        assert ack.exit_code == 0 and str(notification_id) in ack.stdout
+        assert "No pending" in cli.invoke(app, ["watch", "pending"]).stdout
         wrong_id = cli.invoke(app, ["tests", "results", str(view.approval_id), "--json"])
         assert wrong_id.exit_code == 1
         logs = cli.invoke(app, ["execution", "logs", str(view.approval_id), "--json"])

@@ -247,6 +247,17 @@ class RuntimeProjectClient:
                         )
                     ):
                         raise ControlFault("runtime_ownership_unconfirmed")
+                    if reply.watch is not None and (
+                        (
+                            call.operation == "watch.job"
+                            and reply.watch.watched_job_id != call.watch_target
+                        )
+                        or (
+                            call.operation == "watch.ack"
+                            and reply.watch.acknowledged_id != call.watch_target
+                        )
+                    ):
+                        raise ControlFault("runtime_ownership_unconfirmed")
                     if reply.admission is not None and (
                         reply.admission.approval_id != call.approval_id
                         or reply.admission.manifest_digest != call.reviewed_manifest_digest

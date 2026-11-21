@@ -19,6 +19,7 @@ from .catalog import (
     _AUTHORITIES,
     _AUTHORITY_OPS,
     _EXPIRABLE_INDEX,
+    _JOB_WATCHES,
     _LAUNCH_EVENTS,
     _LAUNCHES,
     _LEDGER,
@@ -118,6 +119,8 @@ def _schema(connection: sqlite3.Connection) -> int:
         expected["execution_stop_payloads"] = ("table", _STOP_PAYLOADS)
     if version >= 11:
         expected["execution_pytest_reports"] = ("table", _PYTEST_REPORTS)
+    if version >= 12:
+        expected["execution_job_watches"] = ("table", _JOB_WATCHES)
     found = connection.execute(
         "SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT ?",
         (len(expected) + 1,),
@@ -150,6 +153,7 @@ def _schema(connection: sqlite3.Connection) -> int:
             (9, "execution_lifecycle_v9"),
             (10, "execution_stop_payloads_v10"),
             (11, "execution_pytest_reports_v11"),
+            (12, "execution_job_watches_v12"),
         )
         if number <= version
     ]:

@@ -94,6 +94,7 @@ def create_internal_execution(
         guards=guards,
         require_guard=require_guard,
         attach_log_tail=_attach_log_tail,
+        watch_store=storage,
         pytest_capture=lambda limit, token, paths: PytestOutputCollector(
             limit, run_token=token, approved_paths=paths
         ),

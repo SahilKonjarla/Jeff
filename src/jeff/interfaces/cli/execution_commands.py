@@ -195,6 +195,24 @@ def register(
             typer.echo("Log follow timed out; no stop was requested.", err=True)
             raise typer.Exit(code=1)
 
+    watch_app = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
+    app.add_typer(watch_app, name="watch", help="Watch jobs and read or acknowledge notifications.")
+
+    @watch_app.command("job")
+    def watch_job(job_id: UUID, json_output: bool = typer.Option(False, "--json")) -> None:
+        """Register one durable watch for a job in this project."""
+        fresh_action("watch.job", json_output, watch_target=job_id)
+
+    @watch_app.command("pending")
+    def watch_pending(json_output: bool = typer.Option(False, "--json")) -> None:
+        """Show unacknowledged terminal notifications without acknowledging them."""
+        fresh_action("watch.pending", json_output)
+
+    @watch_app.command("ack")
+    def watch_ack(notification_id: UUID, json_output: bool = typer.Option(False, "--json")) -> None:
+        """Acknowledge a terminal notification by its stable ID."""
+        fresh_action("watch.ack", json_output, watch_target=notification_id)
+
     test_app = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
     app.add_typer(test_app, name="tests", help="Propose and inspect approved pytest jobs.")
 
