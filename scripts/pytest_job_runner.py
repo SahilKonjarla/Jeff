@@ -25,6 +25,7 @@ class _Reports:
         self.unsupported = False
 
     def pytest_collection_finish(self, session: object) -> None:
+        """Refuse expanded or altered collection before any selected test runs."""
         from pytest import Session, exit
 
         if self.selections and (

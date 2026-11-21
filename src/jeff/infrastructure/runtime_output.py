@@ -287,6 +287,8 @@ class GuardedOutputCollector:
 
 
 class _LiveOutputFilter(GuardedOutputCollector):
+    """Run the privacy filter past the archive cap without retaining a second archive."""
+
     def __init__(self, tail: LiveLogTail) -> None:
         super().__init__(1)
         self._tail = tail

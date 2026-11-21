@@ -2,6 +2,22 @@
 
 **Status:** M01 demo-project generation implemented. These helpers are not part of the installed Jeff runtime; production imports of `scripts`/`tests` are rejected by architecture checks.
 
+## M04 pytest runner image
+
+`pytest_job_runner.py` is copied into the declared Linux image at
+`/opt/jeff/pytest_job_runner.py`, not installed into the native Jeff wheel.
+The accepted ARM64 image used `python:3.12.10-slim` resolved to
+`sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db`,
+with pytest 9.1.1, iniconfig 2.3.1, packaging 26.3, pluggy 1.7.0 and Pygments
+2.21.0 installed during image preparation. The image sets `TMPDIR=/scratch` so
+pytest capture can use M03’s writable scratch mount. The fixture itself needs
+no additional packages.
+
+Declare the built image by its actual immutable image ID in the guarded profile;
+rebuilding can produce a different ID. Image preparation is separate from job
+approval: Jeff won’t pull, install dependencies or fall back to the host at run
+time. See the [pytest CLI workflow](../README.md#pytest-jobs-m04).
+
 ## Hosted CI guard build prerequisites
 
 `scripts/ci_guard_toolchain.py` provisions build tools only on the declared hosted macOS ARM64 runner. It checks out immutable Homebrew/core commit `2c03794c90e4b4506ac0381072064840e5b2ccf6`, validates that commit and both tool formula SHA256s, and temporarily activates that core snapshot for tool/dependency resolution. Any original core tap is preserved and restored even on ordinary setup failure; no arbitrary formula-path allowance is enabled. Homebrew API lookup and automatic updates are disabled in child commands, so a moving or cached catalog cannot select a different LLVM release. LLVM/LLD23.1.6 revision0 and pinned `arm64_sequoia` bottle metadata/downloaded bytes are still checked before pour; existing installations are repoured. This source checkout and normal dependency setup occur only on the temporary hosted runner, not in the Jeff checkout or local Homebrew installation.

@@ -31,6 +31,7 @@ def _retire_execution_payloads(
             else ("execution_stop_payloads", "proposal_id")
         )
         if table == "execution_results":
+            # Report excerpts share the archive’s retention, not the terminal facts’ lifetime.
             connection.execute(
                 "DELETE FROM execution_pytest_reports WHERE attempt_id="
                 "(SELECT attempt_id FROM execution_results WHERE sequence=?)",

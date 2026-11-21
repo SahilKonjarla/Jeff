@@ -2,7 +2,11 @@
 
 Owns use cases, typed public results, policy and narrow ports. Depends only on domain/application contracts, stdlib and Pydantic—not concrete sockets, processes, SQL/YAML adapters or bootstrap. M02 is delivered/accepted. M03 Phase2's durable review-only workflow is accepted. Phase3 now composes fresh authority, verified owned Docker execution and opt-in public intent; Step3 is explicitly accepted after source, fresh installed-wheel and human manual proofs. Whole Phase3 and Phase4 are explicitly accepted; Phase4 retains the missing independent-human shutdown repeat as a documented validation exception. M03 is now accepted with the completed guarded installed/native/operator closeouts and recorded qualifications. See the [current execution module map](execution/README.md) and [root verification scope](../../../README.md#verification-scope). [Tier map](../README.md).
 
-## Current guarded execution integration — wire14, settings4, DB10
+## Current M04 execution contracts — wire14, settings4, DB12
+
+M04 adds pytest result, log-tail and watcher contracts to the guarded job path. See the [execution module map](execution/README.md). The following DB10 section describes the accepted M03 baseline.
+
+## Accepted M03 guarded execution integration — wire14, settings4, DB10
 
 Fresh configured execution now requires settings4 with `GuardedDockerBackendConfiguration.guard`: explicit artifact SHA/size/platform/filter pins, `startup_wait_ns`, `clock_rate_floor_ppm`, and `deadline_margin_ns`; no timing or artifact discovery defaults are invented. Bootstrap supplies the installation-owned verifier. Propose prepares the original workload once and wraps it before persistence; approve/claim revalidate the same policy/artifact and outer digest. Replay returns original facts, never a new wrapper or launch permission.
 

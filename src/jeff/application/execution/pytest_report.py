@@ -29,6 +29,7 @@ def pytest_run_token(argv: tuple[str, ...]) -> str | None:
 
 
 def pytest_retry_token(request_id: UUID, origin_job_id: UUID) -> str:
+    """Bind the new proposal’s correlation token to both request and original job."""
     return uuid5(request_id, str(origin_job_id)).hex
 
 

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 
 def _capture(self: "ExecutionCoordinator", record: AuthorityRecord) -> DockerOutputCapture:
+    """Select report capture from the reviewed argv, not from workload output."""
     manifest = record.manifest
     limit = manifest.profile.output_bytes
     token = pytest_run_token(manifest.argv)

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 
 def _notice(project: UUID, inspection: ExecutionInspection) -> JobNotification | None:
+    """Project existing terminal facts; a missing report is not a new job outcome."""
     record = inspection.record
     identity = dict(
         notification_id=notification_id_for(project, record.job_id), job_id=record.job_id
@@ -74,6 +75,7 @@ def _watch(
         "WHERE a.project_id=? AND a.canonical_root=?"
     )
     if scope.operation == "watch.pending":
+        # No delivery mutation here: only an explicit ACK suppresses the stable ID.
         rows = connection.execute(
             "SELECT w.job_id,w.notification_id"
             + relation

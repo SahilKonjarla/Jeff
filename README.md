@@ -1,6 +1,6 @@
 # Jeff
 
-Local, human-supervised developer assistant for **macOS**. M02 and M03 are accepted within their recorded evidence qualifications: explicit authenticated daemon lifecycle, project/Git questions, durable history, read-only diagnostics, and opt-in approved Docker jobs. Desktop, voice, reasoning providers, Pi/MCP/SSH integration, test watchers and service orchestration remain later milestones. M04 is in progress; the source-level pytest proposal and result flow has not yet been verified in Docker.
+Local, human-supervised developer assistant for **macOS**. M02–M04 are accepted within their recorded evidence limits: authenticated daemon lifecycle, project/Git questions, durable history, diagnostics, approved Docker jobs, and a pytest workflow with failure details, failed-only retry, live logs and a durable notification inbox. Desktop, voice, reasoning providers, Pi/MCP/SSH integration and service orchestration remain later milestones.
 
 Docker is the backend for explicitly declared application jobs, not a replacement for the native Jeff daemon or permission to containerize development checks. Linux Jeff client/runtime compatibility is out of scope. [Source map](src/README.md), [CLI contract and uncertainty guidance](src/jeff/interfaces/README.md), [test map](tests/README.md).
 
@@ -22,12 +22,14 @@ python -m pip install -r requirements-dev.lock -e '.[dev]'
 
 Dependencies and tools are declared in `pyproject.toml`. The development lock is a tested Mac/Python snapshot, not a cross-platform hash lock. `requirements.txt` alone does not install the CLI. Reuse the existing environment when dependencies have not changed; deactivation does not stop Jeff.
 
-M03 was accepted at **wire14 / DB10 / guarded opt-in settings4 / default settings2**. In-progress M04 source uses **DB12** for pytest results and job watches; the application and SQLite still run natively on macOS. Legacy settings1/2/3 remain parseable; settings3 alone cannot enable new configured guarded launches. Match client and daemon installations. Older binaries do not support DB12 or downgrade. Verification uses isolated fixtures, not a normal-installation migration or fresh-machine distribution test.
+M03 was accepted at **wire14 / DB10 / guarded opt-in settings4 / default settings2**. Accepted M04 uses **wire14 / DB12** for pytest results and job watches; the application and SQLite still run natively on macOS. Legacy settings1/2/3 remain parseable; settings3 alone cannot enable new configured guarded launches. Match client and daemon installations. Older binaries do not support DB12 or downgrade. Verification uses isolated fixtures, not a normal-installation migration or fresh-machine distribution test.
 
-## Pytest jobs (M04 in progress)
+## Pytest jobs (M04)
 
 With an explicitly configured guarded `pytest` profile whose pinned image contains
-`/opt/jeff/pytest_job_runner.py`, run the following from the registered project:
+`/opt/jeff/pytest_job_runner.py`, run the following from the registered project.
+The image must already contain compatible pytest dependencies and set `TMPDIR=/scratch`
+for pytest’s file capture under the read-only filesystem policy.
 
 ```bash
 jeff tests run --input service.py --input test_service.py
@@ -112,6 +114,14 @@ jeff execution jobs list --limit 16 --after PREVIOUS_NEXT_AFTER --json
 
 ## Verification scope
 
+M04 was accepted at `d7a9afc` after 83 focused source tests, a fresh noneditable
+wheel, three real Docker jobs (failed, failed-only retry, repaired pass), and a
+manual installed-CLI run covering logs, failure details and notification ACK.
+Cancellation and active graceful restart were covered in separate real CLI checks;
+unconfirmed restart was covered at the SQLite-owner test tier, not by a forced
+native crash. This is Apple ARM64/macOS Docker Desktop evidence, not full-suite,
+hosted CI, native macOS pytest compatibility, or live-database upgrade evidence.
+
 M03 includes matched installed native success, typed nonzero exit versus guard timeout, owned cancel/cleanup, natural approval expiry and restart/no replay; real missing engine/image refusal; active shutdown; and operator-performed owner/provider interruption with honest unknown/log inspection and verified stopped-orphan administrative removal. Original failed scopes remain failed, not retrospectively passed.
 
 The matched four-job proof uses wheel `cf202f…`. The availability correction's wheel `09fbcd…` has focused installed guard/availability regressions and actual native unavailable/interruption proof; no full four-job rerun on that newer wheel is claimed. Source/fake, installed, native, physical and human evidence are different tiers, not additive unique counts. Current overall accounting is36actual/53charged, not new execution capacity.
@@ -146,4 +156,4 @@ The existing generator creates independent ignored repositories with determinist
 .venv/bin/python scripts/create_demo_projects.py
 ```
 
-It never starts Jeff/services or resets work. Its deliberate1-pass/1-fail pytest and Compose fixtures do not imply M04/M05 runtime delivery. [Examples](examples/README.md), [generator contract](scripts/README.md).
+It never starts Jeff/services or resets work. Its deliberate 1-pass/1-fail pytest fixture can be used with M04’s declared Docker profile; the Compose fixture does not imply M05 runtime delivery. [Examples](examples/README.md), [generator contract](scripts/README.md).
