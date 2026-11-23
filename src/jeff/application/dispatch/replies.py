@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
+from jeff.application.compose_status import ComposeStatusSuccess
 from jeff.application.history import ActivityPage, ActivityTrace, HistoryPage
 from jeff.application.projects import Failure, Success
 from jeff.application.questions import QuestionSuccess
@@ -70,7 +71,7 @@ class DispatchReply(_DispatchModel):
     request_id: UUID
     identity: RuntimeIdentityData
     accepted: StrictBool | None = False
-    result: Success | QuestionSuccess | Failure
+    result: Success | QuestionSuccess | ComposeStatusSuccess | Failure
     receipt: Receipt | None = None
 
 

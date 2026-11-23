@@ -5,6 +5,7 @@ from uuid import UUID
 
 import typer
 
+from jeff.application.compose_status import ComposeStatusSuccess
 from jeff.application.diagnostics import DoctorResult
 from jeff.application.dispatch import DiagnosticSuccess, ProjectStatusSuccess
 from jeff.application.execution import (
@@ -26,6 +27,7 @@ def render(
     | ProjectStatusSuccess
     | ControlSuccess
     | DiagnosticSuccess
+    | ComposeStatusSuccess
     | DoctorResult
     | ExecutionSuccess
     | Failure,
@@ -97,6 +99,13 @@ def render(
             )
         if result.data.next_after is not None:
             typer.echo(f"Next after: {result.data.next_after}")
+    elif isinstance(result, ComposeStatusSuccess):
+        states = ", ".join(result.data.states)
+        if not states:
+            states = "no confirmed match" if result.data.ambiguous else "no matching containers"
+        typer.echo(f"{result.data.compose_project}/{result.data.service}: {states}")
+        if result.data.ambiguous:
+            typer.echo("Some Compose candidates could not be attributed to this fixture.")
     elif result.ok:
         data = result.data
         typer.echo(f"Project: {data.project_id}\nRoot: {escape_metadata(data.root)}")

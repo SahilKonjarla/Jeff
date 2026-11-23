@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from jeff.application.compose_status import ComposeStatusSuccess
 from jeff.application.dispatch import DiagnosticSuccess, ProjectStatusSuccess
 from jeff.application.execution import ExecutionSuccess
 from jeff.application.projects import ErrorData, Failure, Success
@@ -21,6 +22,7 @@ def invoke(
         | QuestionSuccess
         | ProjectStatusSuccess
         | DiagnosticSuccess
+        | ComposeStatusSuccess
         | ExecutionSuccess
         | Failure,
     ],

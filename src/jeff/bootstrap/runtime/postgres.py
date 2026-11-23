@@ -10,6 +10,7 @@ import time
 from contextlib import suppress
 from importlib import import_module
 
+from jeff.application.compose_status import ComposeStatusReader
 from jeff.application.execution.ports import FreshExecutionService
 from jeff.application.runtime import (
     DEFAULT_RUNTIME_LIMITS,
@@ -25,6 +26,7 @@ from jeff.infrastructure.runtime_settings import load_or_create_settings
 from jeff.infrastructure.runtime_state import Ownership
 
 from .. import runtime as _runtime
+from .compose_status import compose_status_reader
 from .postgres_readback import PostgresReadback
 
 
@@ -104,7 +106,10 @@ async def serve_postgres(
 ) -> None:
     """Use native authenticated IPC and Git, with no SQLite fallback."""
 
+    compose_reader: ComposeStatusReader | None = None
+
     def actor_for_password() -> PostgresProjectActor:
+        nonlocal compose_reader
         try:
             raw = sys.stdin.buffer.read(513)
             sys.stdin.close()
@@ -128,6 +133,8 @@ async def serve_postgres(
             identity.instance_id,
         )
         settings, settings_source = load_or_create_settings(owner)
+        if isinstance(settings, GuardedRuntimeSettings) and settings.compose_status is not None:
+            compose_reader = compose_status_reader(settings.compose_status)
         if isinstance(settings, GuardedRuntimeSettings) and settings.backend is not None:
             return PostgresExecutionActor(
                 owner,
@@ -181,6 +188,7 @@ async def serve_postgres(
             _runtime.QuestionService(projects, _runtime.GitRepositoryRead(process_runner=runner)),
             actor,
             identity,
+            compose_status=compose_reader,
         ),
         fresh=fresh,
         inspection_only=inspection_only,

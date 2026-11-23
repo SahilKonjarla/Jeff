@@ -6,6 +6,7 @@ from typing import Literal
 
 import typer
 
+from jeff.application.compose_status import ComposeStatusSuccess
 from jeff.application.dispatch import ProjectCall, ProjectClient
 from jeff.application.projects import Failure, Success
 from jeff.application.questions import QuestionSuccess
@@ -21,9 +22,11 @@ def register(
     """Register callbacks without constructing the project client."""
 
     def execute(
-        operation: Literal["init", "config", "ask"], json_output: bool, question: str | None = None
+        operation: Literal["init", "config", "ask", "docker.status"],
+        json_output: bool,
+        question: str | None = None,
     ) -> None:
-        def dispatch(directory: Path) -> Success | QuestionSuccess | Failure:
+        def dispatch(directory: Path) -> Success | QuestionSuccess | ComposeStatusSuccess | Failure:
             call = ProjectCall(operation=operation, directory=directory, question=question)
             reply = client().execute(call)
             # Correlation belongs on stderr, preserving the established JSON body.
@@ -41,6 +44,18 @@ def register(
             return reply.result
 
         invoke(dispatch, json_output)
+
+    docker_app = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
+    app.add_typer(docker_app, name="docker", help="Inspect the project's declared Docker target.")
+
+    @docker_app.command("status")
+    def docker_status(
+        json_output: bool = typer.Option(
+            False, "--json", help="Print a typed JSON result or error."
+        ),
+    ) -> None:
+        """Read Compose service state without granting ownership or changing Docker."""
+        execute("docker.status", json_output)
 
     @app.command("init")
     def initialize(

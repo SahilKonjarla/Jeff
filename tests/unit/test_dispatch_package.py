@@ -15,10 +15,10 @@ from jeff.application import dispatch
 from jeff.application import runtime as runtime_contracts
 from jeff.application.runtime import RuntimeIdentityData
 
-# Project status embeds the PostgreSQL-aware ControlObservation schema.
-SCHEMA_DIGEST = "6113f45f48775afc7c6496d2441144e2939414b4026173b1b27a854d30949882"
+# M05 adds one read-only project operation, reply variant and optional reader port.
+SCHEMA_DIGEST = "06b75cd32abeb3ffd583990fdebe75078e989cdf3d57432cea9ed39cba8fc6a9"
 WIRE_DIGEST = "5125e7d99d993df0322d91827eba3f7ba60061f4d7f73d9b7976e202ccdd3f06"
-SIGNATURE_DIGEST = "566af34c1f88990b1b1d48fb08b07dc388c89b588ebfa51e6faee3420ad12328"
+SIGNATURE_DIGEST = "d41fdfa76930eaffa068fcd531d68c1191598d4556cc5cc54fa5feac32e70a19"
 
 
 def _digest(value: object) -> str:

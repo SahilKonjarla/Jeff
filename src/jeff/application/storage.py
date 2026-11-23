@@ -14,6 +14,7 @@ from pydantic import (
     model_validator,
 )
 
+from jeff.application.compose_status import ComposeStatusTarget
 from jeff.application.execution import (
     DockerBackendConfiguration,
     ExecutionSettings,
@@ -149,6 +150,7 @@ class GuardedRuntimeSettings(ConfiguredRuntimeSettings):
 
     schema_version: StrictInt = Field(ge=4, le=4)
     backend: GuardedDockerBackendConfiguration | None = None
+    compose_status: ComposeStatusTarget | None = Field(default=None, exclude_if=lambda v: v is None)
 
     @model_validator(mode="after")
     def guarded_profiles(self) -> Self:

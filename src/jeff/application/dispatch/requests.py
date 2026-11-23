@@ -25,7 +25,7 @@ PROJECT_OPERATIONS: tuple[ProjectCapability, ...] = (
 
 class ProjectCall(ProjectScope):
     request_id: UUID = Field(default_factory=uuid4)
-    operation: Literal["init", "config", "ask"]
+    operation: Literal["init", "config", "ask", "docker.status"]
     question: str | None = Field(default=None, max_length=65536)
 
     @model_validator(mode="after")

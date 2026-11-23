@@ -5,6 +5,11 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
+from jeff.application.compose_status import (
+    ComposeStatusReader,
+    ComposeStatusSuccess,
+    compose_status_failure,
+)
 from jeff.application.history import ActivityRecord, activity_code
 from jeff.application.projects import Failure, ProjectService, Success
 from jeff.application.questions import QuestionService, QuestionSuccess, question_intent
@@ -38,7 +43,10 @@ class ProjectDispatcher:
         questions: QuestionService,
         store: DispatchStore,
         identity: RuntimeIdentityData,
+        *,
+        compose_status: ComposeStatusReader | None = None,
     ) -> None:
+        self.compose_status = compose_status
         self.projects, self.questions, self.store, self.identity = (
             projects,
             questions,
@@ -101,7 +109,7 @@ class ProjectDispatcher:
         """
 
         def reply(
-            result: Success | QuestionSuccess | Failure,
+            result: Success | QuestionSuccess | ComposeStatusSuccess | Failure,
             accepted: bool | None = False,
             receipt: Receipt | None = None,
         ) -> DispatchReply:
@@ -115,6 +123,18 @@ class ProjectDispatcher:
 
         if call.operation == "config":
             return reply(self._config(call, absolute_deadline))
+        if call.operation == "docker.status":
+            if self.compose_status is None:
+                return reply(compose_status_failure("compose_status_not_configured"))
+            target = self._bind(call, absolute_deadline)
+            if isinstance(target, Failure):
+                return reply(target)
+            try:
+                if self.store.lookup(target, deadline=absolute_deadline) is None:
+                    return reply(compose_status_failure("compose_status_not_configured"))
+            except StorageFault as error:
+                return reply(storage_failure(error.code))
+            return reply(self.compose_status(target, absolute_deadline))
         intent: Literal["init", "ask.branch", "ask.changes"] | None = (
             "init" if call.operation == "init" else question_intent(call.question or "")
         )
