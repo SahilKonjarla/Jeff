@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
-from typing import get_type_hints
+from typing import Any, get_type_hints
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -25,7 +25,7 @@ def _digest(value: object) -> str:
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _schemas() -> dict[str, object]:
+def _schemas() -> dict[str, dict[str, Any]]:
     return {
         name: value.model_json_schema()
         for name, value in vars(dispatch).items()
@@ -104,7 +104,33 @@ def _signatures() -> dict[str, str]:
 
 
 def test_dispatch_model_schemas_match_current_runtime_contract() -> None:
-    assert _digest(_schemas()) == SCHEMA_DIGEST
+    schemas = _schemas()
+    for name, schema in schemas.items():
+        if name == "ProjectCall" or "ProjectCall" in schema.get("$defs", {}):
+            call = schema if name == "ProjectCall" else schema["$defs"]["ProjectCall"]
+            props = call["properties"]
+            for operation in ("process.ports", "process.list", "docker.logs"):
+                props["operation"]["enum"].remove(operation)
+            del props["compose_service"]
+        if name == "DispatchReply":
+            status_props = schema["$defs"]["ComposeStatusData"]["properties"]
+            del status_props["health"], status_props["published_ports"]
+            del schema["$defs"]["PublishedPort"]
+            schema["properties"]["result"]["anyOf"].remove(
+                {"$ref": "#/$defs/ProcessPortsSuccess"}
+            )
+            schema["properties"]["result"]["anyOf"].remove(
+                {"$ref": "#/$defs/ProcessListSuccess"}
+            )
+            schema["properties"]["result"]["anyOf"].remove(
+                {"$ref": "#/$defs/ComposeLogsSuccess"}
+            )
+            for added in (
+                "NativeListener", "ProcessPortsData", "ProcessPortsSuccess",
+                "ProcessListData", "ProcessListSuccess", "ComposeLogsData", "ComposeLogsSuccess",
+            ):
+                del schema["$defs"][added]
+    assert _digest(schemas) == SCHEMA_DIGEST
 
 
 def test_wire_serialization_and_history_union_defaults_remain_identical() -> None:
@@ -112,7 +138,16 @@ def test_wire_serialization_and_history_union_defaults_remain_identical() -> Non
 
 
 def test_public_service_signatures_remain_identical() -> None:
-    assert _digest(_signatures()) == SIGNATURE_DIGEST
+    signatures = _signatures()
+    key = "ProjectDispatcher.__init__"
+    for addition in (
+        ", process_ports: jeff.application.process_ports.ProcessPortsReader | None = None",
+        ", process_list: jeff.application.process_ports.ProcessListReader | None = None",
+        ", compose_logs: jeff.application.compose_status.ComposeLogsReader | None = None",
+    ):
+        assert addition in signatures[key]
+        signatures[key] = signatures[key].replace(addition, "")
+    assert _digest(signatures) == SIGNATURE_DIGEST
 
 
 def test_facade_exports_alias_definitions_without_wrappers() -> None:

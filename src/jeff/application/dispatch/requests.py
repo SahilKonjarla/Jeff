@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 from pydantic import Field, StrictInt, model_validator
 
+from jeff.application.compose_status import ComposeName
 from jeff.application.execution import ExecutionCall, ExecutionCancelCall, FreshExecutionCall
 from jeff.application.runtime import PROTOCOL_REVISION, ProjectCapability
 
@@ -25,13 +26,18 @@ PROJECT_OPERATIONS: tuple[ProjectCapability, ...] = (
 
 class ProjectCall(ProjectScope):
     request_id: UUID = Field(default_factory=uuid4)
-    operation: Literal["init", "config", "ask", "docker.status"]
+    operation: Literal[
+        "init", "config", "ask", "docker.status", "docker.logs", "process.ports", "process.list"
+    ]
     question: str | None = Field(default=None, max_length=65536)
+    compose_service: ComposeName | None = Field(default=None, exclude_if=lambda v: v is None)
 
     @model_validator(mode="after")
     def question_only_for_ask(self) -> Self:
         if (self.operation == "ask") != (self.question is not None):
             raise ValueError("Only ask carries a transient question.")
+        if (self.operation == "docker.logs") != (self.compose_service is not None):
+            raise ValueError("Only Docker logs requires a service name.")
         return self
 
 

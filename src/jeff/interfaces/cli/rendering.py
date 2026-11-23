@@ -5,7 +5,7 @@ from uuid import UUID
 
 import typer
 
-from jeff.application.compose_status import ComposeStatusSuccess
+from jeff.application.compose_status import ComposeLogsSuccess, ComposeStatusSuccess
 from jeff.application.diagnostics import DoctorResult
 from jeff.application.dispatch import DiagnosticSuccess, ProjectStatusSuccess
 from jeff.application.execution import (
@@ -15,6 +15,7 @@ from jeff.application.execution import (
     FreshExecutionReply,
 )
 from jeff.application.history import HistoryPage
+from jeff.application.process_ports import ProcessListSuccess, ProcessPortsSuccess
 from jeff.application.projects import Failure, Success
 from jeff.application.questions import BranchAnswer, ChangesAnswer, QuestionSuccess
 from jeff.application.runtime import ControlSuccess
@@ -28,6 +29,9 @@ def render(
     | ControlSuccess
     | DiagnosticSuccess
     | ComposeStatusSuccess
+    | ComposeLogsSuccess
+    | ProcessPortsSuccess
+    | ProcessListSuccess
     | DoctorResult
     | ExecutionSuccess
     | Failure,
@@ -99,11 +103,57 @@ def render(
             )
         if result.data.next_after is not None:
             typer.echo(f"Next after: {result.data.next_after}")
+    elif isinstance(result, ProcessListSuccess):
+        for pid in result.data.pids:
+            typer.echo(f"PID {pid}")
+        if not result.data.pids:
+            typer.echo("No confirmed project processes.")
+        if result.data.unconfirmed:
+            typer.echo(f"Unconfirmed process observations: {result.data.unconfirmed}")
+    elif isinstance(result, ProcessPortsSuccess):
+        for listener in result.data.listeners:
+            typer.echo(f"{listener.address}:{listener.port} PID {listener.pid}")
+        if not result.data.listeners:
+            typer.echo("No confirmed project loopback listeners.")
+        if result.data.unconfirmed:
+            typer.echo(f"Unconfirmed listeners: {result.data.unconfirmed}")
+    elif isinstance(result, ComposeLogsSuccess):
+        logs = result.data
+        if logs.withheld is not None:
+            typer.echo(f"Compose log tail withheld ({logs.withheld}).")
+        elif not (logs.stdout or logs.stderr):
+            typer.echo("No retained Compose log lines.")
+        else:
+            if logs.stdout:
+                typer.echo(logs.stdout, nl=not logs.stdout.endswith("\n"))
+            if logs.stderr:
+                typer.echo(logs.stderr, err=True, nl=not logs.stderr.endswith("\n"))
     elif isinstance(result, ComposeStatusSuccess):
-        states = ", ".join(result.data.states)
+        health = result.data.health
+        states = (
+            ", ".join(result.data.states)
+            if health is None
+            else ", ".join(
+                f"{state} (health: {status})"
+                for state, status in zip(result.data.states, health, strict=True)
+            )
+        )
         if not states:
             states = "no confirmed match" if result.data.ambiguous else "no matching containers"
         typer.echo(f"{result.data.compose_project}/{result.data.service}: {states}")
+        if result.data.published_ports is not None:
+            for index, ports in enumerate(result.data.published_ports, start=1):
+                if ports is None:
+                    typer.echo(f"Container {index} published ports: unconfirmed")
+                elif not ports:
+                    typer.echo(f"Container {index} published ports: none")
+                else:
+                    for port in ports:
+                        address = f"[{port.host_ip}]" if ":" in port.host_ip else port.host_ip
+                        typer.echo(
+                            f"Container {index} published: {address}:{port.host_port} -> "
+                            f"{port.container_port}/{port.protocol}"
+                        )
         if result.data.ambiguous:
             typer.echo("Some Compose candidates could not be attributed to this fixture.")
     elif result.ok:

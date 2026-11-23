@@ -6,12 +6,21 @@ from typing import Literal
 from uuid import UUID
 
 from jeff.application.compose_status import (
+    ComposeLogsReader,
+    ComposeLogsSuccess,
     ComposeStatusReader,
     ComposeStatusSuccess,
+    compose_logs_failure,
     compose_status_failure,
 )
 from jeff.application.history import ActivityRecord, activity_code
-from jeff.application.projects import Failure, ProjectService, Success
+from jeff.application.process_ports import (
+    ProcessListReader,
+    ProcessListSuccess,
+    ProcessPortsReader,
+    ProcessPortsSuccess,
+)
+from jeff.application.projects import ErrorData, Failure, ProjectService, Success
 from jeff.application.questions import QuestionService, QuestionSuccess, question_intent
 from jeff.application.runtime import RuntimeIdentityData
 from jeff.application.storage import (
@@ -45,8 +54,14 @@ class ProjectDispatcher:
         identity: RuntimeIdentityData,
         *,
         compose_status: ComposeStatusReader | None = None,
+        process_ports: ProcessPortsReader | None = None,
+        process_list: ProcessListReader | None = None,
+        compose_logs: ComposeLogsReader | None = None,
     ) -> None:
         self.compose_status = compose_status
+        self.compose_logs = compose_logs
+        self.process_ports = process_ports
+        self.process_list = process_list
         self.projects, self.questions, self.store, self.identity = (
             projects,
             questions,
@@ -109,7 +124,13 @@ class ProjectDispatcher:
         """
 
         def reply(
-            result: Success | QuestionSuccess | ComposeStatusSuccess | Failure,
+            result: Success
+            | QuestionSuccess
+            | ComposeStatusSuccess
+            | ComposeLogsSuccess
+            | ProcessPortsSuccess
+            | ProcessListSuccess
+            | Failure,
             accepted: bool | None = False,
             receipt: Receipt | None = None,
         ) -> DispatchReply:
@@ -123,17 +144,53 @@ class ProjectDispatcher:
 
         if call.operation == "config":
             return reply(self._config(call, absolute_deadline))
-        if call.operation == "docker.status":
-            if self.compose_status is None:
-                return reply(compose_status_failure("compose_status_not_configured"))
+        if call.operation in ("process.ports", "process.list"):
+            reader = self.process_ports if call.operation == "process.ports" else self.process_list
+            prefix = call.operation.replace(".", "_")
+            if reader is None:
+                return reply(
+                    Failure(error=ErrorData(
+                        code=f"{prefix}_unavailable",
+                        message="Native process inspection is unavailable.",
+                    ))
+                )
+            target = self._bind(call, absolute_deadline)
+            if isinstance(target, Failure):
+                return reply(target)
+            try:
+                registered = self.store.lookup(target, deadline=absolute_deadline)
+            except StorageFault as error:
+                return reply(storage_failure(error.code))
+            if registered is None:
+                return reply(
+                    Failure(error=ErrorData(
+                        code=f"{prefix}_project_not_registered",
+                        message="Register this project with the running daemon before inspection.",
+                    ))
+                )
+            return reply(reader(target, absolute_deadline))
+        if call.operation in ("docker.status", "docker.logs"):
+            logs = call.operation == "docker.logs"
+            unavailable = (
+                compose_logs_failure("compose_logs_not_configured") if logs
+                else compose_status_failure("compose_status_not_configured")
+            )
+            if (logs and self.compose_logs is None) or (not logs and self.compose_status is None):
+                return reply(unavailable)
             target = self._bind(call, absolute_deadline)
             if isinstance(target, Failure):
                 return reply(target)
             try:
                 if self.store.lookup(target, deadline=absolute_deadline) is None:
-                    return reply(compose_status_failure("compose_status_not_configured"))
+                    return reply(unavailable)
             except StorageFault as error:
                 return reply(storage_failure(error.code))
+            if logs:
+                if self.compose_logs is None or call.compose_service is None:
+                    return reply(unavailable)
+                return reply(self.compose_logs(target, call.compose_service, absolute_deadline))
+            if self.compose_status is None:
+                return reply(unavailable)
             return reply(self.compose_status(target, absolute_deadline))
         intent: Literal["init", "ask.branch", "ask.changes"] | None = (
             "init" if call.operation == "init" else question_intent(call.question or "")

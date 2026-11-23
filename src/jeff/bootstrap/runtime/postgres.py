@@ -10,7 +10,7 @@ import time
 from contextlib import suppress
 from importlib import import_module
 
-from jeff.application.compose_status import ComposeStatusReader
+from jeff.application.compose_status import ComposeLogsReader, ComposeStatusReader
 from jeff.application.execution.ports import FreshExecutionService
 from jeff.application.runtime import (
     DEFAULT_RUNTIME_LIMITS,
@@ -19,6 +19,7 @@ from jeff.application.runtime import (
     StartupResult,
 )
 from jeff.application.storage import GuardedRuntimeSettings, StorageFault
+from jeff.infrastructure.native_process_ports import read_process_list, read_process_ports
 from jeff.infrastructure.postgres_execution_actor import PostgresExecutionActor
 from jeff.infrastructure.postgres_project_actor import PostgresProjectActor
 from jeff.infrastructure.postgres_storage import PostgresStorage
@@ -26,7 +27,7 @@ from jeff.infrastructure.runtime_settings import load_or_create_settings
 from jeff.infrastructure.runtime_state import Ownership
 
 from .. import runtime as _runtime
-from .compose_status import compose_status_reader
+from .compose_status import compose_logs_reader, compose_status_reader
 from .postgres_readback import PostgresReadback
 
 
@@ -107,9 +108,10 @@ async def serve_postgres(
     """Use native authenticated IPC and Git, with no SQLite fallback."""
 
     compose_reader: ComposeStatusReader | None = None
+    logs_reader: ComposeLogsReader | None = None
 
     def actor_for_password() -> PostgresProjectActor:
-        nonlocal compose_reader
+        nonlocal compose_reader, logs_reader
         try:
             raw = sys.stdin.buffer.read(513)
             sys.stdin.close()
@@ -135,6 +137,7 @@ async def serve_postgres(
         settings, settings_source = load_or_create_settings(owner)
         if isinstance(settings, GuardedRuntimeSettings) and settings.compose_status is not None:
             compose_reader = compose_status_reader(settings.compose_status)
+            logs_reader = compose_logs_reader(settings.compose_status)
         if isinstance(settings, GuardedRuntimeSettings) and settings.backend is not None:
             return PostgresExecutionActor(
                 owner,
@@ -189,6 +192,9 @@ async def serve_postgres(
             actor,
             identity,
             compose_status=compose_reader,
+            compose_logs=logs_reader,
+            process_ports=read_process_ports,
+            process_list=read_process_list,
         ),
         fresh=fresh,
         inspection_only=inspection_only,

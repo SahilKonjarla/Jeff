@@ -11,13 +11,21 @@ from uuid import uuid4
 import pytest
 from typer.testing import CliRunner
 
-from jeff.application.compose_status import ComposeStatusTarget
+from jeff.application.compose_status import ComposeLogsData, ComposeStatusTarget, PublishedPort
 from jeff.application.dispatch import ProjectCall, ProjectDispatcher
 from jeff.application.execution import DockerBackendFault, DockerCLIIdentity
+from jeff.application.process_ports import (
+    NativeListener,
+    ProcessListData,
+    ProcessListSuccess,
+    ProcessPortsData,
+    ProcessPortsSuccess,
+)
 from jeff.application.questions import QuestionService
 from jeff.application.runtime import RuntimeIdentityData
 from jeff.application.storage import GuardedRuntimeSettings
 from jeff.bootstrap.runtime import compose_status as composition
+from jeff.domain.projects import Project
 from jeff.infrastructure.docker_cli.compose import ComposeStatus
 from jeff.infrastructure.runtime_dispatch import RuntimeDispatcher
 from jeff.infrastructure.runtime_ipc import ControlServer, RuntimeProjectClient
@@ -28,7 +36,13 @@ from jeff.interfaces.cli import create_app
 from .support_composition import composed
 
 
-@pytest.mark.parametrize("mode", ["found", "empty", "ambiguous", "unavailable", "foreign"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "found", "empty", "ambiguous", "unavailable", "foreign", "ports", "process-list",
+        "logs", "logs-disabled", "logs-other-service",
+    ],
+)
 def test_status_cli_via_authenticated_project_rpc(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
@@ -45,6 +59,7 @@ def test_status_cli_via_authenticated_project_rpc(
             binary=binary,
             config=tmp_path / "config",
             home=tmp_path / "home",
+            allow_logs=mode in ("logs", "logs-other-service"),
         )
         settings = parse_settings(
             json.dumps(
@@ -63,7 +78,7 @@ def test_status_cli_via_authenticated_project_rpc(
             identity = binary
 
             def __init__(self, *args: object, **kwargs: object) -> None:
-                assert mode != "foreign"
+                assert mode not in ("foreign", "logs-disabled", "logs-other-service")
 
             def compose_status(self, **kwargs: object) -> ComposeStatus:
                 assert kwargs["endpoint"] == endpoint and kwargs["root"] == project.root
@@ -71,9 +86,31 @@ def test_status_cli_via_authenticated_project_rpc(
                 calls.append("observe")
                 if mode == "unavailable":
                     raise DockerBackendFault("docker_unavailable")
-                return ComposeStatus(("running",) if mode == "found" else (), mode == "ambiguous")
+                if mode == "found":
+                    port = PublishedPort(
+                        host_ip="127.0.0.1", host_port=53129, container_port=8000, protocol="tcp"
+                    )
+                    return ComposeStatus(("running",), False, ("unhealthy",), ((port,),))
+                return ComposeStatus((), mode == "ambiguous")
+
+            def compose_logs(self, **kwargs: object) -> ComposeLogsData:
+                assert kwargs["endpoint"] == endpoint and kwargs["root"] == project.root
+                assert (kwargs["project"], kwargs["service"]) == ("sandbox-project", "api")
+                calls.append("logs")
+                return ComposeLogsData(compose_project="sandbox-project", service="api", stdout="ready\n")
 
         monkeypatch.setattr(composition, "ComposeInspectionCLI", FakeCLI)
+
+        def ports(target: Project, deadline: float) -> ProcessPortsSuccess:
+            assert mode == "ports" and target == project and deadline > time.monotonic()
+            return ProcessPortsSuccess(
+                data=ProcessPortsData(listeners=(NativeListener(pid=42, port=8000),))
+            )
+
+        def processes(target: Project, deadline: float) -> ProcessListSuccess:
+            assert mode == "process-list" and target == project and deadline > time.monotonic()
+            return ProcessListSuccess(data=ProcessListData(pids=(42,)))
+
         identity = RuntimeIdentityData(instance_id=coordinator.instance_id, pid=os.getpid())
         workers = RuntimeDispatcher(
             ProjectDispatcher(
@@ -82,6 +119,9 @@ def test_status_cli_via_authenticated_project_rpc(
                 store,
                 identity,
                 compose_status=composition.compose_status_reader(target),
+                compose_logs=composition.compose_logs_reader(target),
+                process_ports=ports,
+                process_list=processes,
             )
         )
         layout = store.owner.store.layout
@@ -95,6 +135,28 @@ def test_status_cli_via_authenticated_project_rpc(
 
         def invoke() -> None:
             app = create_app(lambda: client, forbidden)
+            if mode.startswith("logs"):
+                service = "other" if mode == "logs-other-service" else "api"
+                result = CliRunner().invoke(app, ["docker", "logs", service, "--json"])
+                payload = json.loads(result.stdout)
+                if mode == "logs":
+                    assert result.exit_code == 0 and payload["data"]["stdout"] == "ready\n"
+                else:
+                    assert result.exit_code == 1
+                    assert payload["error"]["code"] == "compose_logs_not_configured"
+                return
+            if mode == "process-list":
+                result = CliRunner().invoke(app, ["process", "list", "--json"])
+                assert result.exit_code == 0, result.output
+                assert json.loads(result.stdout)["data"]["pids"] == [42]
+                return
+            if mode == "ports":
+                result = CliRunner().invoke(app, ["process", "ports", "--json"])
+                assert result.exit_code == 0, result.output
+                assert json.loads(result.stdout)["data"]["listeners"] == [
+                    {"pid": 42, "port": 8000, "address": "127.0.0.1"}
+                ]
+                return
             result = CliRunner().invoke(app, ["docker", "status", "--json"])
             payload = json.loads(result.stdout)
             if mode in ("foreign", "unavailable"):
@@ -107,6 +169,13 @@ def test_status_cli_via_authenticated_project_rpc(
                     "compose_project": "sandbox-project",
                     "service": "api",
                     "states": ["running"] if mode == "found" else [],
+                    "health": ["unhealthy"] if mode == "found" else [],
+                    "published_ports": [[
+                        {
+                            "host_ip": "127.0.0.1", "host_port": 53129,
+                            "container_port": 8000, "protocol": "tcp",
+                        }
+                    ]] if mode == "found" else [],
                     "ambiguous": mode == "ambiguous",
                 }
             reply = client.execute(ProjectCall(operation="docker.status", directory=project.root))
@@ -130,7 +199,12 @@ def test_status_cli_via_authenticated_project_rpc(
         workers.start()
         try:
             asyncio.run(exercise())
-            assert calls == ([] if mode == "foreign" else ["observe", "observe"])
+            if mode == "logs":
+                assert calls == ["logs"]
+            elif mode in ("found", "empty", "ambiguous", "unavailable"):
+                assert calls == ["observe", "observe"]
+            else:
+                assert not calls
             assert not docker.calls
         finally:
             try:

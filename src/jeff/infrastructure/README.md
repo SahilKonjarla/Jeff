@@ -2,6 +2,12 @@
 
 Owns concrete project files, private runtime state, native/authenticated IPC, lifecycle, SQL, committed event delivery and diagnostics. Depends inward on application/domain plus stdlib/PyYAML; no bootstrap/client policy or sibling integration calls. M02 is delivered/accepted on Mac. M03's opt-in public Docker execution is wired through bootstrap/application ports, with selected source/installed/manual proofs and explicit Step3 acceptance; whole Phase3 is now explicitly accepted after the later gap proofs. Earlier Phase4 source-only checkpoints below retain their original limits; current guarded installed/native/operator acceptance is complete, without a new full-suite/CI or universal isolation claim. This is not universal isolation proof or a general native sandbox rewrite. Linux Jeff client/runtime compatibility is out of scope. [Tier map](../README.md).
 
+## Native process and loopback port observations
+
+`jeff process list --json` reports same-user macOS PIDs with corroborated working directories under the registered project, independent of listener presence. It does not expose working directories or arguments. A process can be absent from the OS observations entirely; the unconfirmed count covers only candidates with missing or changing evidence in those observations.
+
+`jeff process ports --json` reports same-user macOS IPv4 TCP listeners bound to `127.0.0.1` from a registered project. `native_process_ports.py` corroborates each listener with its process working directory and `ps` start time, and counts candidates it cannot confirm. Working directory is an attribution heuristic, and the start time has one-second precision; neither establishes launch ownership or safe signaling authority. Wildcard, IPv6, UDP and container-port attribution are outside this command’s scope.
+
 ## Current JFG2 integration — accepted scoped implementation
 
 The normal package data includes pinned `runtime_execution/jeff-job-guard-linux-arm64` and `jeff-job-guard-linux-amd64` resources. There is no compiler/download/install hook. `guard_artifacts.py` accepts only build-pinned artifact/filter identities and validates regular single-link executable bytes, ownership, ancestor permissions, size/hash and stable file identity before propose/approve/claim/create/start. The exact helper file is mounted read-only at `/jeff-runtime/jeff-job-guard`, without exposing the installation directory. Original JFG1 files/artifacts are unchanged.

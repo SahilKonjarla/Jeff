@@ -11,7 +11,9 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
+from jeff.application.compose_status import COMPOSE_LOG_LIMIT
 from jeff.application.execution import DockerBackendFault, DockerCLIIdentity, ExecutionStopSignal
 
 from .diagnostics import _failure_facts
@@ -264,12 +266,14 @@ class _DockerCLI:
         deadline: float,
         *,
         stop: ExecutionStopSignal | None = None,
+        log_sink: Callable[[Literal["stdout", "stderr"], bytes], None] | None = None,
     ) -> bytes:
         if deadline <= time.monotonic():
             raise DockerBackendFault("docker_timeout")
         process: subprocess.Popen[bytes] | None = None
         selector = selectors.DefaultSelector()
         output, count, stderr_count = bytearray(), 0, 0
+        limit = _LIMIT if log_sink is None else COMPOSE_LOG_LIMIT
         diagnostic_prefix = bytearray()  # At most2KiB in RAM, never persisted/reported.
         try:
             if stop is not None:
@@ -302,9 +306,11 @@ class _DockerCLI:
                         selector.unregister(key.fileobj)
                         continue
                     count += len(chunk)
-                    if count > _LIMIT:
+                    if count > limit:
                         raise DockerBackendFault("docker_output_limit")
-                    if key.data == "stdout":
+                    if log_sink is not None:
+                        log_sink("stdout" if key.data == "stdout" else "stderr", chunk)
+                    elif key.data == "stdout":
                         output.extend(chunk)
                     else:
                         stderr_count += len(chunk)

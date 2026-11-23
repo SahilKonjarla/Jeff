@@ -124,6 +124,13 @@ def test_metadata_serialization_fingerprints_and_failure_facts_stay_identical() 
 
 def test_only_guard_attachment_and_owned_capture_state_extend_interfaces() -> None:
     signatures = _signatures()
+    key = "_DockerCLI._capture"
+    before, separator, extension = signatures[key].partition(", log_sink: ")
+    assert separator and extension == (
+        "collections.abc.Callable[[typing.Literal['stdout', 'stderr'], bytes], None]"
+        " | None = None) -> bytes"
+    )
+    signatures[key] = before + ") -> bytes"
     assert _digest(signatures) == "0176a0f55bc745851150fc93f38251e5151836f180d817bf8de80d6d944eda62"
     additions = {
         "DockerLifecycleCLI.__init__",

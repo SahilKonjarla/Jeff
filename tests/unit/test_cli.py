@@ -17,6 +17,7 @@ from jeff.application.dispatch import (
     ReceiptReply,
     dispatch_failure,
 )
+from jeff.application.process_ports import NativeListener, ProcessPortsData, ProcessPortsSuccess
 from jeff.application.projects import Failure
 from jeff.application.runtime import ControlObservation, ControlSuccess, RuntimeIdentityData
 from jeff.domain.runtime import RuntimeState
@@ -49,6 +50,28 @@ class Client:
 
     def inspect_receipt(self, query: ReceiptQuery) -> ReceiptReply:
         raise AssertionError("No public receipt-browsing verb in this slice")
+
+
+def test_process_ports_renders_scoped_rpc_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class PortsClient(Client):
+        def execute(self, call: ProjectCall) -> DispatchReply:
+            assert call.operation == "process.ports" and call.directory == tmp_path.resolve()
+            return DispatchReply(
+                request_id=call.request_id,
+                identity=RuntimeIdentityData(instance_id=uuid4(), pid=1),
+                result=ProcessPortsSuccess(
+                    data=ProcessPortsData(listeners=(NativeListener(pid=10, port=8000),))
+                ),
+            )
+
+    monkeypatch.chdir(tmp_path)
+    reply = runner.invoke(create_app(PortsClient, forbidden), ["process", "ports", "--json"])
+    assert reply.exit_code == 0, reply.output
+    assert json.loads(reply.stdout)["data"]["listeners"] == [
+        {"pid": 10, "port": 8000, "address": "127.0.0.1"}
+    ]
 
 
 class Control:
