@@ -58,6 +58,7 @@ runpy.run_module('jeff.bootstrap.runtime',run_name='__main__')
                 "HOME": str(tmp_path),
                 "JEFF_DATA_DIR": str(layout.data_dir),
                 "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+                "JEFF_TEST_SQLITE_FIXTURE": "1",
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_CONFIG_NOSYSTEM": "1",

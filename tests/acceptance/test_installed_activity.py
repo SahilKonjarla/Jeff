@@ -86,6 +86,7 @@ def test_owned_v3_v5_refuse_without_rekey_then_preserve_legacy_metadata(
         "HOME": str(tmp_path),
         "JEFF_DATA_DIR": str(layout.data_dir),
         "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     request = uuid4()

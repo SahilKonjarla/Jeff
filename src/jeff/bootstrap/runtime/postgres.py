@@ -29,14 +29,17 @@ from .postgres_readback import PostgresReadback
 
 
 def selected_database(owner: Ownership) -> str | None:
-    """Only an owner-private marker in a non-SQLite installation opts in."""
+    """Default to PostgreSQL; only explicit legacy fixtures may omit the backend."""
     owner.check()
     directory = owner.store.layout.data_dir
     marker = directory / "postgresql.json"
     try:
         fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
-        return None
+        if os.environ.get("JEFF_TEST_SQLITE_FIXTURE") == "1":
+            return None
+        _reject_sqlite_state(owner)
+        return "jeff"
     except OSError:
         raise StorageFault("settings_invalid") from None
     try:
@@ -60,15 +63,20 @@ def selected_database(owner: Ownership) -> str | None:
             or (name != "jeff" and not re.fullmatch(r"jeff_cli_proof_[a-z0-9]{6,32}", name))
         ):
             raise StorageFault("settings_invalid")
-        for suffix in ("", "-journal", "-wal", "-shm"):
-            if os.path.lexists(str(owner.store.layout.database) + suffix):
-                raise StorageFault("storage_unsafe")
-        owner.check()
+        _reject_sqlite_state(owner)
         return name
     except (OSError, ValueError):
         raise StorageFault("settings_invalid") from None
     finally:
         os.close(fd)
+
+
+def _reject_sqlite_state(owner: Ownership) -> None:
+    # A missing marker is not permission to overwrite or ignore old state.
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        if os.path.lexists(str(owner.store.layout.database) + suffix):
+            raise StorageFault("storage_unsafe")
+    owner.check()
 
 
 def write_startup(

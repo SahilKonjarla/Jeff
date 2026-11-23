@@ -98,7 +98,7 @@ class RuntimeDiagnosticsAdapter:
         unsafe = paths is not None and any(entry.state == "unsafe" for entry in paths.entries)
         unknown = paths is not None and any(entry.state == "unknown" for entry in paths.entries)
         ignored_missing = {"socket"}
-        if layout is not None and stopped.postgres_marker_present(layout):
+        if layout is not None and stopped.postgres_expected(layout):
             ignored_missing.add("database")  # PostgreSQL deliberately has no local SQLite file.
         incomplete = paths is not None and any(
             entry.state == "missing" for entry in paths.entries if entry.role not in ignored_missing

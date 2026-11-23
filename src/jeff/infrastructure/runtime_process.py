@@ -8,6 +8,7 @@ import sys
 import time
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from jeff.application.projects import Failure
@@ -27,9 +28,16 @@ from jeff.infrastructure.runtime_ipc import ControlClient, _PeerDisconnected, de
 from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
 
 
+def _legacy_fixture(layout: RuntimeLayout) -> bool:
+    return (
+        os.environ.get("JEFF_TEST_SQLITE_FIXTURE") == "1"
+        and layout.data_dir != Path.home() / "Library/Application Support/Jeff"
+    )
+
+
 def child_environment(layout: RuntimeLayout) -> dict[str, str]:
     """Deliberate environment: no inherited credentials, Python paths or Git verbosity."""
-    return {
+    environment = {
         "PATH": os.defpath,
         "HOME": str(layout.data_dir),
         "TMPDIR": str(layout.runtime_dir),
@@ -40,6 +48,9 @@ def child_environment(layout: RuntimeLayout) -> dict[str, str]:
         "LC_ALL": "C",
         "NO_COLOR": "1",
     }
+    if _legacy_fixture(layout):
+        environment["JEFF_TEST_SQLITE_FIXTURE"] = "1"
+    return environment
 
 
 @contextmanager
@@ -178,6 +189,10 @@ class RuntimeController:
                     if observed.storage.error is not None:
                         raise ControlFault(observed.storage.error)
                     if observed.application_ready:
+                        if observed.storage.backend != "postgresql" and not _legacy_fixture(
+                            self.layout
+                        ):
+                            raise ControlFault("storage_schema_unsupported")
                         if "activity.subscribe" not in observed.available_operations:
                             raise ControlFault("runtime_capability_unavailable")
                         return ControlSuccess(data=observed)
@@ -248,6 +263,10 @@ class RuntimeController:
                     if observation.storage.error is not None:
                         raise ControlFault(observation.storage.error)
                     if observation.application_ready:
+                        if observation.storage.backend != "postgresql" and not _legacy_fixture(
+                            self.layout
+                        ):
+                            raise ControlFault("storage_schema_unsupported")
                         if "activity.subscribe" not in observation.available_operations:
                             raise ControlFault("runtime_capability_unavailable")
                         return ControlSuccess(data=observation)

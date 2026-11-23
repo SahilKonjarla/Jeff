@@ -73,6 +73,7 @@ def test_active_owner_death(
         "XDG_DATA_HOME": str(root / "data"),
         "JEFF_DATA_DIR": str(layout.data_dir),
         "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
         "PYTHONDONTWRITEBYTECODE": "1",

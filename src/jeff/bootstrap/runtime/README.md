@@ -2,12 +2,12 @@
 
 ## PostgreSQL startup
 
-A single-link mode-`0600` `postgresql.json` in Jeff’s private data directory
-selects PostgreSQL for that installation. The fresh local setup uses
-`{"database":"jeff"}` and the dedicated `jeff_app` role. A separate proof
-installation can use `{"database":"jeff_cli_proof_<suffix>"}` with a same-named
-role. The schema must already exist. A marker is refused alongside SQLite state
-or its sidecars; startup does not switch or migrate an existing SQLite installation.
+PostgreSQL is the runtime default: database `jeff`, role `jeff_app`. A single-link
+mode-`0600` `postgresql.json` can explicitly name that database or select an
+isolated `jeff_cli_proof_<suffix>` database with a same-named role. The schema
+must already exist. Normal startup refuses old SQLite state or sidecars; it
+never rewrites them or falls back to SQLite. SQLite remains only for offline
+imports and explicitly selected legacy test fixtures.
 
 Psycopg and its binary wheel are pinned in `pyproject.toml` and the development lockfile.
 Jeff connects to

@@ -32,6 +32,7 @@ def test_wire_five_and_six_refuse_both_directions_without_rekey_or_downgrade(
         "HOME": str(tmp_path),
         "JEFF_DATA_DIR": str(layout.data_dir),
         "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
 

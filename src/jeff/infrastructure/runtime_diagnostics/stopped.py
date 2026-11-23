@@ -1,6 +1,8 @@
 """Continuously leased non-creating settings/storage inspection; discard unconfirmed facts."""
 
+import os
 import stat
+from pathlib import Path
 
 from jeff.application.diagnostics import DoctorCheck
 from jeff.application.runtime import RuntimeLayout
@@ -9,8 +11,13 @@ from jeff.application.storage import LoadedRuntimeSettings
 from .. import runtime_diagnostics as _native
 
 
-def postgres_marker_present(layout: RuntimeLayout) -> bool:
-    """Metadata only; stopped diagnostics never read PostgreSQL credentials."""
+def postgres_expected(layout: RuntimeLayout) -> bool:
+    """Prefer PostgreSQL even without a marker; stopped checks never read credentials."""
+    if (
+        os.environ.get("JEFF_TEST_SQLITE_FIXTURE") != "1"
+        or layout.data_dir == Path.home() / "Library/Application Support/Jeff"
+    ):
+        return True
     try:
         info = (layout.data_dir / "postgresql.json").lstat()
     except OSError:
@@ -45,7 +52,7 @@ def _stopped(
                 checks[1] = _native.DoctorCheck(
                     name="settings", status="failed", code="settings_invalid", required=True
                 )
-            if postgres_marker_present(layout):
+            if postgres_expected(layout):
                 checks[2] = _native.DoctorCheck(
                     name="storage", status="unavailable", code="storage_not_ready", required=True
                 )

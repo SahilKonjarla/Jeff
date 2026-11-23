@@ -26,7 +26,8 @@ M03 was accepted at **wire14 / DB10 / guarded opt-in settings4 / default setting
 
 ## PostgreSQL-backed Jeff
 
-The PostgreSQL installation uses a local `jeff-postgres` container on
+PostgreSQL is Jeff’s default storage backend; normal startup does not fall back
+to SQLite. The local setup uses a `jeff-postgres` container on
 `127.0.0.1:55432`, with a dedicated `jeff-postgres-data` volume. `jeff start` and
 `jeff stop` control the native daemon only. To stop or start the database itself,
 use `docker stop jeff-postgres` or `docker start jeff-postgres`. Docker’s

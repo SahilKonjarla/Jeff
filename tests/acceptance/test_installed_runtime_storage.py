@@ -70,6 +70,7 @@ def test_retained_v1_and_current_v2_refuse_without_downgrade_or_replacement(tmp_
         "HOME": str(root / "home"),
         "JEFF_DATA_DIR": str(layout.data_dir),
         "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
 

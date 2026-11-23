@@ -124,6 +124,12 @@ def owned_runtime_launches(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     assert not forced, "Owned runtime fixture required forced child cleanup"
 
 
+@pytest.fixture(autouse=True)
+def legacy_sqlite_fixture_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing native compatibility fixtures deliberately exercise legacy SQLite."""
+    monkeypatch.setenv("JEFF_TEST_SQLITE_FIXTURE", "1")
+
+
 @pytest.fixture
 def cli_environment(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
@@ -139,6 +145,7 @@ def cli_environment(
         "XDG_DATA_HOME": str(root / "data"),
         "JEFF_DATA_DIR": str(root / "d"),
         "JEFF_RUNTIME_DIR": str(root / "r"),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     for name, value in env.items():
