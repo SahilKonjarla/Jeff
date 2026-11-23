@@ -86,6 +86,7 @@ class RuntimeDispatcher:
         starter: ExecutionStarter | None = None,
         fresh: FreshExecutionService | None = None,
         fresh_factory: Callable[[], FreshExecutionService | Failure] | None = None,
+        inspection_only: bool = False,
     ) -> None:
         self.dispatch = dispatch
         self.execution = execution
@@ -93,6 +94,7 @@ class RuntimeDispatcher:
         if fresh is not None and fresh_factory is not None:
             raise ValueError("Supply a fresh service or a startup factory, not both.")
         self.fresh = fresh
+        self.inspection_only = inspection_only
         self.fresh_issue: Failure | None = None
         self._fresh_factory = fresh_factory
         self.initialization: Future[None] = Future()
@@ -167,6 +169,8 @@ class RuntimeDispatcher:
             if isinstance(call, FreshExecutionCall) and self.fresh is None:
                 raise ControlFault("runtime_capability_unavailable")
             if _is_start(call):
+                if isinstance(call, FreshExecutionCall) and self.inspection_only:
+                    raise ControlFault("runtime_capability_unavailable")
                 if isinstance(call, ExecutionStartCall) and self.starter is None:
                     raise ControlFault("runtime_capability_unavailable")
                 if self._execution_reserved:

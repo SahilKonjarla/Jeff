@@ -1,6 +1,9 @@
 """Cold explicit execution composition and unchanged owned activation scope."""
 
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from jeff.application.execution import (
@@ -19,6 +22,9 @@ from jeff.infrastructure.runtime_storage import SQLiteStorage
 
 from .. import runtime as _runtime
 
+if TYPE_CHECKING:
+    from jeff.infrastructure.postgres_execution_actor import PostgresExecutionActor
+
 
 def _attach_log_tail(capture: DockerOutputCapture, tail: LiveLogTail) -> None:
     if not isinstance(capture, GuardedOutputCollector):
@@ -29,7 +35,7 @@ def _attach_log_tail(capture: DockerOutputCapture, tail: LiveLogTail) -> None:
 def create_internal_execution(
     *,
     owner: Ownership,
-    storage: SQLiteStorage,
+    storage: SQLiteStorage | PostgresExecutionActor,
     projects: ProjectService,
     instance_id: UUID,
     binary: Path,
@@ -104,7 +110,7 @@ def create_internal_execution(
 def create_configured_execution(
     *,
     owner: Ownership,
-    storage: SQLiteStorage,
+    storage: SQLiteStorage | PostgresExecutionActor,
     projects: ProjectService,
     instance_id: UUID,
     deadline: float,

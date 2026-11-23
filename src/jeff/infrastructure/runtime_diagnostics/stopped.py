@@ -1,10 +1,26 @@
 """Continuously leased non-creating settings/storage inspection; discard unconfirmed facts."""
 
+import stat
+
 from jeff.application.diagnostics import DoctorCheck
 from jeff.application.runtime import RuntimeLayout
 from jeff.application.storage import LoadedRuntimeSettings
 
 from .. import runtime_diagnostics as _native
+
+
+def postgres_marker_present(layout: RuntimeLayout) -> bool:
+    """Metadata only; stopped diagnostics never read PostgreSQL credentials."""
+    try:
+        info = (layout.data_dir / "postgresql.json").lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(info.st_mode)
+        and stat.S_IMODE(info.st_mode) == 0o600
+        and info.st_uid == layout.uid
+        and info.st_nlink == 1
+    )
 
 
 def _stopped(
@@ -29,6 +45,12 @@ def _stopped(
                 checks[1] = _native.DoctorCheck(
                     name="settings", status="failed", code="settings_invalid", required=True
                 )
+            if postgres_marker_present(layout):
+                checks[2] = _native.DoctorCheck(
+                    name="storage", status="unavailable", code="storage_not_ready", required=True
+                )
+                lease.check()
+                return checks, settings, None
             try:
                 version = _native.inspect_stopped_storage(lease, deadline)
                 checks[2] = _native.DoctorCheck(

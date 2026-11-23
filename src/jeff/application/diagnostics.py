@@ -88,6 +88,9 @@ class DoctorRuntimeData(_DoctorModel):
     control_ready: StrictBool
     application_ready: StrictBool
     available_operations: tuple[ProjectCapability, ...] = Field(max_length=13)
+    storage_backend: Literal["postgresql"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     storage_state: Literal["not_checked", "initializing", "ready", "failed", "closing"]
     storage_error: StorageIssueCode | None = None
     active_retention_days: ConfiguredRetentionDays | None = None
@@ -114,23 +117,26 @@ class DoctorRuntimeData(_DoctorModel):
             and "execution.v1" not in self.available_operations
         ):
             raise ValueError("Cancellation capability requires fresh execution.")
+        project_operations = {
+            "ask.branch",
+            "ask.changes",
+            "init",
+            "config",
+            "receipt.inspect",
+            "activity.trace",
+            "activity.replay",
+            "debug.last",
+            "history.list",
+            "activity.subscribe",
+        }
+        if self.storage_backend != "postgresql":
+            project_operations.add("execution.review")
         if self.application_ready and not (
             self.control_ready
             and self.storage_state == "ready"
-            and set(self.available_operations) - {"execution.v1", "execution.cancel.v1"}
-            == {
-                "ask.branch",
-                "ask.changes",
-                "init",
-                "config",
-                "receipt.inspect",
-                "activity.trace",
-                "activity.replay",
-                "debug.last",
-                "history.list",
-                "activity.subscribe",
-                "execution.review",
-            }
+            and set(self.available_operations)
+            - {"execution.v1", "execution.cancel.v1", "execution.inspect.v1"}
+            == project_operations
         ):
             raise ValueError("Full doctor readiness requires all supported operations.")
         return self
@@ -180,7 +186,8 @@ class DoctorReport(_DoctorModel):
         if self.summary == "healthy" and (
             self.runtime is None
             or not self.runtime.application_ready
-            or self.database_schema_version != DATABASE_SCHEMA
+            or self.database_schema_version
+            != (1 if self.runtime.storage_backend == "postgresql" else DATABASE_SCHEMA)
         ):
             raise ValueError("Healthy requires authenticated full cached readiness.")
         return self

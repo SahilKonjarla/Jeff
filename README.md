@@ -22,7 +22,21 @@ python -m pip install -r requirements-dev.lock -e '.[dev]'
 
 Dependencies and tools are declared in `pyproject.toml`. The development lock is a tested Mac/Python snapshot, not a cross-platform hash lock. `requirements.txt` alone does not install the CLI. Reuse the existing environment when dependencies have not changed; deactivation does not stop Jeff.
 
-M03 was accepted at **wire14 / DB10 / guarded opt-in settings4 / default settings2**. Accepted M04 uses **wire14 / DB12** for pytest results and job watches; the application and SQLite still run natively on macOS. Legacy settings1/2/3 remain parseable; settings3 alone cannot enable new configured guarded launches. Match client and daemon installations. Older binaries do not support DB12 or downgrade. Verification uses isolated fixtures, not a normal-installation migration or fresh-machine distribution test.
+M03 was accepted at **wire14 / DB10 / guarded opt-in settings4 / default settings2**. Accepted M04 used **wire14 / DB12** for pytest results and job watches. The later PostgreSQL-backend work keeps the application native and supports PostgreSQL schema 1; SQLite DB12 remains the legacy import format. Legacy settings1/2/3 remain parseable; settings3 alone cannot enable new configured guarded launches. Match client and daemon installations. Older binaries do not support DB12 or downgrade. Verification uses isolated fixtures, not a normal-installation migration or fresh-machine distribution test.
+
+## PostgreSQL-backed Jeff
+
+The PostgreSQL installation uses a local `jeff-postgres` container on
+`127.0.0.1:55432`, with a dedicated `jeff-postgres-data` volume. `jeff start` and
+`jeff stop` control the native daemon only. To stop or start the database itself,
+use `docker stop jeff-postgres` or `docker start jeff-postgres`. Docker’s
+`unless-stopped` policy does not start Docker Desktop itself.
+
+For a configured installation, supply `JEFF_POSTGRES_PASSWORD` privately for
+`jeff start` and unset it afterward. If PostgreSQL is unavailable Jeff refuses to
+start; it won’t create a replacement SQLite store. Use `jeff doctor --json` for
+live backend and schema readiness. Stopped diagnostics do not connect to the
+server or read its credentials. See the [startup and backup guide](src/jeff/bootstrap/runtime/README.md#postgresql-startup).
 
 ## Pytest jobs (M04)
 
