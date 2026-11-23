@@ -93,7 +93,7 @@ def test_serving_keeps_captured_lifetimes_and_sql_final_drain(
                 if mode == "storage_failed"
                 else StorageReadiness(
                     state="ready",
-                    schema_version=10,
+                    schema_version=12,
                     retention_days=30,
                     settings_source="existing_file",
                 )

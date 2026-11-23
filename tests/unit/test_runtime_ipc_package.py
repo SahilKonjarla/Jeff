@@ -29,7 +29,7 @@ from jeff.infrastructure.runtime_state import Ownership
 
 # Wire 14 enables guarded execution; only revision fields/frame bytes change here.
 # Revision-normalized snapshots still match wire13; class interfaces are unchanged.
-SCHEMA_DIGEST = "8ef1009a3e4a8c206376cde01f0c7a3b0e9ab0d47d8aa61f147bbba061699452"
+SCHEMA_DIGEST = "014977efdeadf91e671d3551cc166e567dde30cb437bfd82286928295364b756"
 WIRE_DIGEST = "4353815da931d51e7d4c02a3e3e00edf2e179906c57c7d1df30eeeaa22d9ec8d"
 SIGNATURE_DIGEST = "ee18ba33d22549c92b1f74b9179c695f6a9b53d4694f7814a58d3d27ae03f2fe"
 

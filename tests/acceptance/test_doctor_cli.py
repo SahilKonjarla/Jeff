@@ -222,5 +222,5 @@ def test_doctor_stopped_installation_is_read_only_outside_git(tmp_path: Path) ->
     assert all(check["status"] == "ok" and check["required"] for check in report["checks"])
     assert report["settings_schema_version"] == 1
     assert report["configured_retention_days"] == 17
-    assert report["database_schema_version"] == 10
+    assert report["database_schema_version"] == 12
     assert not layout.socket.exists() and not list(layout.data_dir.glob("state.sqlite3-*"))

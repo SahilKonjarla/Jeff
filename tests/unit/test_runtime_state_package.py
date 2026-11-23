@@ -16,7 +16,7 @@ from jeff.application import runtime as runtime_contracts
 from jeff.application.runtime import RuntimeLayout
 from jeff.infrastructure import runtime_state as native
 
-SCHEMA_DIGEST = "8886c94993a3f575de5df28f6893b1cc0171a94206e8d1f24ce0ea71eaff35ff"
+SCHEMA_DIGEST = "298f68b4231f2065d44b0c054e0be9ad34ace40089a9853713d2a24105c54ae7"
 PROOF_DIGEST = "d6b9ec72e9e7953dca3cbdaeefb525364c2f40c7fa9020bc932ff06be68e0405"
 ABI_DIGEST = "b224731b64c493197c3ae7e85f02687e3378bd7ab500011f7dd101a6c8131269"
 SIGNATURE_DIGEST = "abf64d06a1d72dc4b01b47dc180bb847d90ac3cea35b0ef3a4d2a13dc7d92ac7"

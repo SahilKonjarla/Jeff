@@ -18,9 +18,9 @@ from jeff.application.storage import Receipt, ReceiptScope
 from jeff.infrastructure import runtime_storage as native
 
 # Listing read methods and the finite actor operation/scope are deliberate additions.
-INTERFACE_DIGEST = "1c8637f99c2acbd2529ca814dffe21799f71b47f6e7ca4ad9af1377b88490ee9"
+INTERFACE_DIGEST = "b10c1c15ac522f73cdb4c4c2b2c4448a66dfe85581b5303dc20caf9f409e4687"
 CATALOG_DIGEST = "866b0e2f909b5e4920cd17ed29d3fbe963eb1f790bc03c35beaf7512a6b7f9b5"
-WORK_DIGEST = "97afc003e5d9bc5ba2cc35954f1a9e9558e70813accdc47afe5dc8b57897496f"
+WORK_DIGEST = "ea6d63112a22d7b73ac21b4b325a13cf1ff7a98de3a5692563e56ff9df356b8f"
 
 
 def _digest(value: object) -> str:
