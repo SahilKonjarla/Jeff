@@ -32,6 +32,7 @@ def test_wire_five_and_six_refuse_both_directions_without_rekey_or_downgrade(
         "HOME": str(tmp_path),
         "JEFF_DATA_DIR": str(layout.data_dir),
         "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
 
@@ -80,7 +81,7 @@ else:print(r.model_dump_json())
         assert legacy("stop")["ok"]  # matching old caller, not guessed owner replacement
     try:
         started = control.start()
-        assert isinstance(started, ControlSuccess) and started.data.storage.schema_version == 10
+        assert isinstance(started, ControlSuccess) and started.data.storage.schema_version == 12
         configured = client.execute(ProjectCall(operation="config", directory=git_repo))
         assert configured.result.ok
         assert configured.result.data.project_id == initial["result"]["data"]["project_id"]

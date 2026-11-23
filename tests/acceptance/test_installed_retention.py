@@ -90,7 +90,11 @@ subprocess.Popen=popen
 
     def cli(*arguments: str, expected: int = 0) -> dict[str, Any]:
         env = dict(os.environ)
-        env.update(JEFF_DATA_DIR=str(layout.data_dir), JEFF_RUNTIME_DIR=str(layout.runtime_dir))
+        env.update(
+            JEFF_DATA_DIR=str(layout.data_dir),
+            JEFF_RUNTIME_DIR=str(layout.runtime_dir),
+            JEFF_TEST_SQLITE_FIXTURE="1",
+        )
         result = subprocess.run(
             [sys.executable, "-I", "-B", "-m", "jeff", *arguments, "--json"],
             cwd=git_repo,

@@ -98,7 +98,7 @@ with owner:
         store = SQLiteStorage(owner, instance_id=uuid4())
         store.start()
         try:
-            assert store.wait_ready(5).schema_version == 10
+            assert store.wait_ready(5).schema_version == 12
             from jeff.domain.projects import Project
 
             assert store.lookup(Project(project, tmp_path / "p")) is not None

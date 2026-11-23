@@ -117,6 +117,7 @@ def test_owned_retained_v2_and_v3_refuse_without_replacement(tmp_path: Path) -> 
         "HOME": str(tmp_path),
         "JEFF_DATA_DIR": str(layout.data_dir),
         "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
 

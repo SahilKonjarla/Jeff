@@ -6,9 +6,22 @@ bytes are counted and discarded while the transport continues its finite drainin
 
 import codecs
 import json
+from collections.abc import Collection, Iterator
 from typing import Literal
 
-from jeff.application.execution import DockerBackendFault, DockerOutputSnapshot, OutputGuardReason
+from jeff.application.execution import (
+    DockerBackendFault,
+    DockerJobOutcome,
+    DockerOutputSnapshot,
+    OutputGuardReason,
+)
+from jeff.application.execution.log_tail import LiveLogTail
+from jeff.application.execution.pytest_report import (
+    PYTEST_REPORT_BYTES,
+    PytestReport,
+    PytestReportBuffer,
+    PytestReportStatus,
+)
 
 _LINE_BYTES = 8192  # Raw bytes, including LF; exactly8192 is allowed.
 _DEFERRED_BYTES = 32768
@@ -95,6 +108,13 @@ class GuardedOutputCollector:
         self._guard: OutputGuardReason = "none"
         self._truncated = False
         self._snapshot: DockerOutputSnapshot | None = None
+        self._live_filter: _LiveOutputFilter | None = None
+
+    def follow_into(self, tail: LiveLogTail) -> None:
+        """Enable independent tailing before the first attach byte arrives."""
+        if any(self._source) or any(self._eof) or self._live_filter is not None:
+            raise DockerBackendFault("docker_output_failed")
+        self._live_filter = _LiveOutputFilter(tail)
 
     @property
     def retention_limit(self) -> int:
@@ -153,24 +173,27 @@ class GuardedOutputCollector:
                 return False
         return True
 
-    def _release(self) -> None:
+    def _public_bytes(self) -> Iterator[tuple[int, bytes]]:
         # UTF-8 may span arrival runs belonging to different streams. Decode each
         # stream incrementally only after all participating frames passed.
         decoders = [codecs.getincrementaldecoder("utf-8")("strict") for _ in range(2)]
         for value, channel in zip(self._window, self._tags, strict=True):
             for char in decoders[channel].decode(bytes((value,)), final=False):
-                encoded = _escaped(char)
-                if self._size + len(encoded) > self._limit:
-                    self._truncated = True
-                    self._notice(channel, b"[OUTPUT TRUNCATED]\n")
-                    return
-                self._text[channel].extend(encoded)
-                self._size += len(encoded)
+                yield channel, _escaped(char)
         for decoder in decoders:
             if decoder.decode(b"", final=True):
                 raise DockerBackendFault("docker_output_failed")
         self._window.clear()
         self._tags.clear()
+
+    def _release(self) -> None:
+        for channel, encoded in self._public_bytes():
+            if self._size + len(encoded) > self._limit:
+                self._truncated = True
+                self._notice(channel, b"[OUTPUT TRUNCATED]\n")
+                return
+            self._text[channel].extend(encoded)
+            self._size += len(encoded)
 
     def accept(self, stream: Literal["stdout", "stderr"], data: bytes) -> None:
         channel = self._channel(stream)
@@ -181,6 +204,8 @@ class GuardedOutputCollector:
             or len(data) > _CHUNK_BYTES
         ):
             raise DockerBackendFault("docker_output_failed")
+        if self._live_filter is not None:
+            self._live_filter.accept(stream, data)
         self._source[channel] = min(_INT64_MAX, self._source[channel] + len(data))
         if not data or self._guard != "none" or self._truncated:
             return
@@ -215,6 +240,8 @@ class GuardedOutputCollector:
         channel = self._channel(stream)
         if self._snapshot is not None or self._eof[channel]:
             raise DockerBackendFault("docker_output_failed")
+        if self._live_filter is not None:
+            self._live_filter.finish(stream)
         self._eof[channel] = True
         if self._guard != "none" or self._truncated:
             return
@@ -251,7 +278,117 @@ class GuardedOutputCollector:
             guard_reason=self._guard,
         )
         self._snapshot = result
+        if self._live_filter is not None:
+            self._live_filter.close(abort=abort)
         self._text[0].clear()
         self._text[1].clear()
         self._drop_pending()
         return result
+
+
+class _LiveOutputFilter(GuardedOutputCollector):
+    """Run the privacy filter past the archive cap without retaining a second archive."""
+
+    def __init__(self, tail: LiveLogTail) -> None:
+        super().__init__(1)
+        self._tail = tail
+
+    def _release(self) -> None:
+        text, tags = bytearray(), bytearray()
+        for channel, encoded in self._public_bytes():
+            text.extend(encoded)
+            tags.extend(bytes((channel,)) * len(encoded))
+        self._tail.publish(bytes(text), bytes(tags))
+
+    def _notice(self, channel: int, message: bytes) -> None:
+        self._tail.publish(message, bytes((channel,)) * len(message))
+        self._drop_pending()
+
+    def close(self, *, abort: bool) -> None:
+        if abort and self._guard == "none":
+            self._notice(1, b"[OUTPUT INCOMPLETE]\n")
+        self._drop_pending()
+        self._tail.close()
+
+
+class PytestOutputCollector(GuardedOutputCollector):
+    """For an explicitly selected pytest job, reserve stdout for the report."""
+
+    def __init__(
+        self, retention_limit: int, *, run_token: str, approved_paths: Collection[str]
+    ) -> None:
+        super().__init__(retention_limit)
+        self._report_buffer = PytestReportBuffer()
+        self._run_token = run_token
+        self._approved_paths = frozenset(approved_paths)
+        self._report_taken = False
+
+    def accept(self, stream: Literal["stdout", "stderr"], data: bytes) -> None:
+        if stream != "stdout":
+            super().accept(stream, data)
+            return
+        if (
+            self._snapshot is not None
+            or self._eof[0]
+            or not isinstance(data, bytes)
+            or len(data) > _CHUNK_BYTES
+        ):
+            raise DockerBackendFault("docker_output_failed")
+        self._source[0] = min(_INT64_MAX, self._source[0] + len(data))
+        self._report_buffer.accept(data)
+
+    def seal(self, *, abort: bool = False) -> DockerOutputSnapshot:
+        if abort:
+            self._report_buffer.discard()
+            self._report_taken = True
+        return super().seal(abort=abort)
+
+    def take_report(
+        self, outcome: DockerJobOutcome
+    ) -> tuple[PytestReportStatus, PytestReport | None]:
+        """Release validated, filtered report data once after successful sealing."""
+        if self._report_taken:
+            return "invalid", None
+        if self._snapshot is None:
+            raise DockerBackendFault("docker_output_failed")
+        self._report_taken = True
+        if (
+            not self._snapshot.complete
+            or outcome.outcome_unknown
+            or outcome.timed_out
+            or not outcome.cleanup_verified
+            or outcome.exit_code is None
+        ):
+            self._report_buffer.discard()
+            return "invalid", None
+        status, report = self._report_buffer.finish(
+            complete=True,
+            run_token=self._run_token,
+            exit_status=outcome.exit_code,
+            approved_paths=self._approved_paths,
+        )
+        if report is None:
+            return status, None
+        # Filter decoded fields, not their JSON spellings: escapes must not hide
+        # a sensitive marker. Reject rather than rewrite node IDs or paths.
+        if self._snapshot.guard_reason != "none" or not _public_report(report):
+            return "withheld", None
+        return "available", report
+
+
+def _public_report(report: PytestReport) -> bool:
+    text = "\n".join(
+        text
+        for failure in report.failures
+        for text in (failure.node_id, failure.path, failure.excerpt)
+    )
+    raw = text.encode("utf-8")
+    if len(raw) > PYTEST_REPORT_BYTES:
+        return False
+    guard = GuardedOutputCollector(PYTEST_REPORT_BYTES)
+    for offset in range(0, len(raw), _CHUNK_BYTES):
+        guard.accept("stdout", raw[offset : offset + _CHUNK_BYTES])
+    guard.finish("stdout")
+    guard.finish("stderr")
+    snapshot = guard.seal()
+    return snapshot.guard_reason == "none" and not snapshot.truncated and snapshot.stdout == text

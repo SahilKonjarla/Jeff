@@ -213,7 +213,11 @@ async def _handle(
                         else ()
                     ),
                     *(
-                        ("execution.v1",)
+                        (
+                            "execution.inspect.v1"
+                            if self.dispatcher.inspection_only
+                            else "execution.v1",
+                        )
                         if self.dispatcher is not None and self.dispatcher.fresh is not None
                         else ()
                     ),

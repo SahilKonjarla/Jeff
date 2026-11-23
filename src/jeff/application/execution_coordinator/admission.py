@@ -16,7 +16,10 @@ from jeff.application.execution import (
     ExecutionStartRefused,
     ExecutionStopRecord,
     ExecutionStopSignal,
+    GuardedExecutionManifest,
 )
+from jeff.application.execution.log_tail import LiveLogTail
+from jeff.application.execution.pytest_report import pytest_run_token
 from jeff.domain.execution import AuthorityState
 
 from .binding import _active, _checked, _deadline, _load, _operation, _project
@@ -25,6 +28,18 @@ from .lifecycle import _execute_claim
 
 if TYPE_CHECKING:
     from .coordinator import ExecutionCoordinator
+
+
+def _capture(self: "ExecutionCoordinator", record: AuthorityRecord) -> DockerOutputCapture:
+    """Select report capture from the reviewed argv, not from workload output."""
+    manifest = record.manifest
+    limit = manifest.profile.output_bytes
+    token = pytest_run_token(manifest.argv)
+    if token is None:
+        return self.capture(limit)
+    if not isinstance(manifest, GuardedExecutionManifest) or self.pytest_capture is None:
+        raise ExecutionStartRefused("docker_authority_required")
+    return self.pytest_capture(limit, token, tuple(item.path for item in manifest.inputs.files))
 
 
 def start(
@@ -75,7 +90,7 @@ def start(
             declaration: DockerTargetDeclaration | None = None
             if record.state == AuthorityState.APPROVED:
                 declaration = _checked(self, project, record, claim_deadline, stop)
-                capture = self.capture(record.manifest.profile.output_bytes)
+                capture = _capture(self, record)
                 if (
                     type(capture.retention_limit) is not int
                     or capture.retention_limit != record.manifest.profile.output_bytes
@@ -111,6 +126,11 @@ def start(
                 or claim.record.claim_state != "claimed"
             ):
                 raise DockerBackendFault("docker_authority_required")
+            if not replayed and capture is not None and self.attach_log_tail is not None:
+                tail = LiveLogTail()
+                self.attach_log_tail(capture, tail)
+                with self._control_mutex:
+                    self._log_tail = (record.job_id, tail)
             if stop is not None and not replayed:
                 stop.mark_claimed()
             observation = ExecutionAdmission.model_validate(
@@ -186,7 +206,7 @@ def run(
         declaration = _checked(self, project, record, deadline)
         job_deadline = min(deadline, time.monotonic() + record.manifest.profile.timeout_seconds)
         cleanup_deadline = job_deadline + 10
-        capture = self.capture(record.manifest.profile.output_bytes)
+        capture = _capture(self, record)
         try:
             if (
                 type(capture.retention_limit) is not int

@@ -40,6 +40,7 @@ def _runtime(
                 control_ready=observed.control_ready,
                 application_ready=observed.application_ready,
                 available_operations=observed.available_operations,
+                storage_backend=storage.backend,
                 storage_state=storage.state,
                 storage_error=storage.error,
                 active_retention_days=(

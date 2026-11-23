@@ -37,7 +37,7 @@ from jeff.application.projects import ErrorData, Failure, ProjectService
 from jeff.domain.projects import Project
 
 SETTINGS_SCHEMA = 3
-DATABASE_SCHEMA = 10
+DATABASE_SCHEMA = 12
 RETIREMENT_BATCH_LIMIT = 100
 RETIREMENT_INTERVAL_SECONDS = 60
 DATABASE_APPLICATION_ID = int.from_bytes(b"JEFF", "big")
@@ -184,7 +184,10 @@ DEFAULT_SETTINGS = RuntimeSettings(schema_version=2, history=HistorySettings(ret
 
 class StorageReadiness(_StorageModel):
     state: Literal["not_checked", "initializing", "ready", "failed", "closing"] = "not_checked"
-    schema_version: StrictInt | None = Field(default=None, ge=DATABASE_SCHEMA, le=DATABASE_SCHEMA)
+    schema_version: StrictInt | None = Field(default=None, ge=1, le=DATABASE_SCHEMA)
+    backend: Literal["postgresql"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     retention_days: StrictInt | None = Field(default=None, gt=0)
     settings_source: Literal["default_file", "existing_file"] | None = None
     error: StorageIssueCode | None = None
@@ -202,6 +205,12 @@ class StorageReadiness(_StorageModel):
         )
         if (self.state == "ready" and not has_facts) or (self.state != "ready" and any_facts):
             raise ValueError("Only validated ready storage has complete schema/settings facts.")
+        if self.backend is not None and self.state != "ready":
+            raise ValueError("Only ready storage identifies its verified backend.")
+        if self.state == "ready" and self.schema_version != (
+            1 if self.backend == "postgresql" else DATABASE_SCHEMA
+        ):
+            raise ValueError("Storage schema version must match its backend.")
         if (self.state == "failed") != (self.error is not None):
             raise ValueError("Only failed storage requires a bounded error code.")
         return self

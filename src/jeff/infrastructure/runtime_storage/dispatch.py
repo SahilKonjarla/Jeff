@@ -20,6 +20,7 @@ from jeff.application.execution import (
     ReviewFault,
     ReviewOperation,
 )
+from jeff.application.execution.watch import WatchScope
 from jeff.application.history import HistoryRead, StreamRead
 from jeff.application.runtime import ControlFault
 from jeff.application.storage import StorageFault
@@ -94,6 +95,9 @@ def _execute(
     if work.operation == "execution_list":
         assert isinstance(work.payload, ExecutionListScope)
         return self._list_executions(connection, work.payload)
+    if work.operation == "execution_watch":
+        assert isinstance(work.payload, WatchScope)
+        return self._watch(connection, work.payload, root, fd)
     if work.operation == "proposal_lookup":
         assert isinstance(work.payload, ProposalRequestScope)
         return self._lookup_proposal(connection, work.payload)

@@ -15,9 +15,8 @@ from jeff.application import dispatch
 from jeff.application import runtime as runtime_contracts
 from jeff.application.runtime import RuntimeIdentityData
 
-# Wire 14 enables guarded execution; only revision fields change in these snapshots.
-# Normalizing revision 14 to 13 reproduces the prior schema/wire digests exactly.
-SCHEMA_DIGEST = "adba84fec1ab7bf72a1a852d18de4e9f3c7698627902ab57dece645c54aed6a9"
+# Project status embeds the PostgreSQL-aware ControlObservation schema.
+SCHEMA_DIGEST = "6113f45f48775afc7c6496d2441144e2939414b4026173b1b27a854d30949882"
 WIRE_DIGEST = "5125e7d99d993df0322d91827eba3f7ba60061f4d7f73d9b7976e202ccdd3f06"
 SIGNATURE_DIGEST = "566af34c1f88990b1b1d48fb08b07dc388c89b588ebfa51e6faee3420ad12328"
 
@@ -104,7 +103,7 @@ def _signatures() -> dict[str, str]:
     return result
 
 
-def test_original_model_schemas_remain_identical() -> None:
+def test_dispatch_model_schemas_match_current_runtime_contract() -> None:
     assert _digest(_schemas()) == SCHEMA_DIGEST
 
 

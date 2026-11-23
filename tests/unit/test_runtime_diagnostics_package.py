@@ -25,8 +25,8 @@ from jeff.application.storage import RuntimeSettings
 from jeff.infrastructure import runtime_diagnostics as native
 
 INTERFACE_DIGEST = "b8fa4eefd7925a55da16e45e9f1aed08c272999bcf0c42df3f0a01e190c143ff"
-VECTOR_DIGEST = "f12477c900698954641a21c1f6bf74c54d83af0e2b6006f53f2dde4d478eea9b"
-SCHEMA_DIGEST = "e3d6a985eef6392f39fdf7f5e90f6c2d0bd93703271b990250cc658d453fdc2a"
+VECTOR_DIGEST = "9fb385bf83359ebd0f85efed41b3741970380ef34f9841c5916a2879d7fd6c90"
+SCHEMA_DIGEST = "6046b0a827d5e629ecd41a75be85ecae71259518bf459e7e091b2e20d2bdd8eb"
 
 
 def _digest(value: object) -> str:
@@ -140,7 +140,7 @@ def _vectors() -> dict[str, str]:
                         for name in ("runtime", "settings", "storage")
                     ],
                     _settings(10**60 if mode == "large" else 30),
-                    10,
+                    native.DATABASE_SCHEMA,
                     None,
                 )
 
@@ -258,7 +258,7 @@ def test_stopped_reads_keep_continuous_lease_and_discard_failed_facts(
     def storage(selected: Lease, deadline: float) -> int:
         assert selected is lease and deadline == 15.0 and events == ["enter", "settings"]
         events.append("storage")
-        return 10
+        return native.DATABASE_SCHEMA
 
     monkeypatch.setattr(native, "RuntimeStateStore", Store)
     monkeypatch.setattr(native, "read_existing_settings", settings)
@@ -266,7 +266,7 @@ def test_stopped_reads_keep_continuous_lease_and_discard_failed_facts(
     checks, settings_value, version = native.RuntimeDiagnosticsAdapter._stopped(layout, 15.0)
     assert events == ["enter", "settings", "storage", "check", "exit"]
     if fault is None:
-        assert settings_value == _settings() and version == 10
+        assert settings_value == _settings() and version == native.DATABASE_SCHEMA
     else:
         assert settings_value is None and version is None
         assert all(
@@ -313,7 +313,7 @@ def test_live_observation_keeps_cached_facts_and_never_reads_settings_or_sql(
         if fault == "capability"
         else (*operations, "activity.subscribe"),
         storage=StorageReadiness(
-            state="ready", schema_version=10, retention_days=30, settings_source="existing_file"
+            state="ready", schema_version=12, retention_days=30, settings_source="existing_file"
         ),
     )
 
@@ -355,7 +355,8 @@ def test_live_observation_keeps_cached_facts_and_never_reads_settings_or_sql(
     assert events == ["enter", "cache", "check", "exit"]
     assert settings is None
     if fault is None:
-        assert runtime is not None and runtime.identity == observed.identity and version == 10
+        assert runtime is not None and runtime.identity == observed.identity
+        assert version == observed.storage.schema_version
         assert all(check.status == "ok" for check in checks)
     else:
         assert runtime is None and version is None

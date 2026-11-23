@@ -1,6 +1,7 @@
 """Inherited-role validation and actual adoption before key access; retain raw lock to exit."""
 
 from .. import runtime as _runtime
+from .postgres import selected_database, serve_postgres, write_startup
 
 
 def main() -> int:
@@ -32,17 +33,21 @@ def main() -> int:
         _runtime.os.umask(0o177)
         store = _runtime.RuntimeStateStore(_runtime._selected_layout())
         owner = store.adopt(arguments.lock_fd)
-        _runtime.asyncio.run(
-            _runtime._serve(
-                owner,
-                store.read_credential(),
-                _runtime.RuntimeIdentityData(
-                    instance_id=arguments.instance_id,
-                    pid=_runtime.os.getpid(),
-                ),
-                arguments.startup_fd,
-            )
+        identity = _runtime.RuntimeIdentityData(
+            instance_id=arguments.instance_id, pid=_runtime.os.getpid()
         )
+        token = store.read_credential()
+        try:
+            database = selected_database(owner)
+        except _runtime.StorageFault as error:
+            write_startup(arguments.startup_fd, identity, error)
+            return 1
+        if database is None:
+            _runtime.asyncio.run(_runtime._serve(owner, token, identity, arguments.startup_fd))
+        else:
+            _runtime.asyncio.run(
+                serve_postgres(owner, token, identity, arguments.startup_fd, database)
+            )
         # Intentionally hold the raw inherited lock FD until kernel process exit, not just
         # until the socket closes. No Python finalizer closes/unlocks the lock description.
         return 0

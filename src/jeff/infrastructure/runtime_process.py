@@ -6,7 +6,9 @@ import struct
 import subprocess
 import sys
 import time
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from jeff.application.projects import Failure
@@ -26,9 +28,16 @@ from jeff.infrastructure.runtime_ipc import ControlClient, _PeerDisconnected, de
 from jeff.infrastructure.runtime_state import Ownership, RuntimeStateStore
 
 
+def _legacy_fixture(layout: RuntimeLayout) -> bool:
+    return (
+        os.environ.get("JEFF_TEST_SQLITE_FIXTURE") == "1"
+        and layout.data_dir != Path.home() / "Library/Application Support/Jeff"
+    )
+
+
 def child_environment(layout: RuntimeLayout) -> dict[str, str]:
     """Deliberate environment: no inherited credentials, Python paths or Git verbosity."""
-    return {
+    environment = {
         "PATH": os.defpath,
         "HOME": str(layout.data_dir),
         "TMPDIR": str(layout.runtime_dir),
@@ -39,6 +48,31 @@ def child_environment(layout: RuntimeLayout) -> dict[str, str]:
         "LC_ALL": "C",
         "NO_COLOR": "1",
     }
+    if _legacy_fixture(layout):
+        environment["JEFF_TEST_SQLITE_FIXTURE"] = "1"
+    return environment
+
+
+@contextmanager
+def _startup_stdin() -> Iterator[int]:
+    """Send an operator-supplied password through a bounded inherited pipe, not argv/env."""
+    password = os.environ.get("JEFF_POSTGRES_PASSWORD")
+    if password is None:
+        yield subprocess.DEVNULL
+        return
+    encoded = password.encode("utf-8")
+    if not 1 <= len(encoded) <= 512 or b"\0" in encoded:
+        raise ControlFault("settings_invalid")
+    read_fd, write_fd = os.pipe()
+    try:
+        try:
+            if os.write(write_fd, encoded) != len(encoded):
+                raise ControlFault("runtime_start_failed")
+        finally:
+            os.close(write_fd)
+        yield read_fd
+    finally:
+        os.close(read_fd)
 
 
 class _ReadinessEnded(ControlFault):
@@ -155,6 +189,10 @@ class RuntimeController:
                     if observed.storage.error is not None:
                         raise ControlFault(observed.storage.error)
                     if observed.application_ready:
+                        if observed.storage.backend != "postgresql" and not _legacy_fixture(
+                            self.layout
+                        ):
+                            raise ControlFault("storage_schema_unsupported")
                         if "activity.subscribe" not in observed.available_operations:
                             raise ControlFault("runtime_capability_unavailable")
                         return ControlSuccess(data=observed)
@@ -176,29 +214,30 @@ class RuntimeController:
                 expected = uuid4()
                 result_read, result_write = os.pipe()
                 os.set_blocking(result_read, False)
-                spawned = subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-I",
-                        "-B",
-                        "-m",
-                        "jeff.bootstrap.runtime",
-                        "--lock-fd",
-                        str(owner.fd),
-                        "--instance-id",
-                        str(expected),
-                        "--startup-fd",
-                        str(result_write),
-                    ],
-                    pass_fds=(owner.fd, result_write),
-                    start_new_session=True,
-                    close_fds=True,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    cwd="/",
-                    env=child_environment(self.layout),
-                )
+                with _startup_stdin() as startup_stdin:
+                    spawned = subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-I",
+                            "-B",
+                            "-m",
+                            "jeff.bootstrap.runtime",
+                            "--lock-fd",
+                            str(owner.fd),
+                            "--instance-id",
+                            str(expected),
+                            "--startup-fd",
+                            str(result_write),
+                        ],
+                        pass_fds=(owner.fd, result_write),
+                        start_new_session=True,
+                        close_fds=True,
+                        stdin=startup_stdin,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        cwd="/",
+                        env=child_environment(self.layout),
+                    )
                 self._child = spawned
                 os.close(result_write)
                 result_write = -1
@@ -224,6 +263,10 @@ class RuntimeController:
                     if observation.storage.error is not None:
                         raise ControlFault(observation.storage.error)
                     if observation.application_ready:
+                        if observation.storage.backend != "postgresql" and not _legacy_fixture(
+                            self.layout
+                        ):
+                            raise ControlFault("storage_schema_unsupported")
                         if "activity.subscribe" not in observation.available_operations:
                             raise ControlFault("runtime_capability_unavailable")
                         return ControlSuccess(data=observation)

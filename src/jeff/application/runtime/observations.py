@@ -51,6 +51,7 @@ ProjectCapability = Literal[
     "activity.subscribe",
     "execution.review",
     "execution.v1",
+    "execution.inspect.v1",
     "execution.cancel.v1",
 ]
 

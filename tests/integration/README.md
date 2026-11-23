@@ -2,7 +2,7 @@
 
 ## Current integration scope
 
-Cross-port SQL/filesystem/worker/CLI/authenticated in-process RPC fixtures cover guarded execution, explicit development policy, original-owner control, fresh discovery, phase-proven unavailable refusal and uncertainty/no replay. [Execution composition](test_execution_composition/README.md) and the other grouped READMEs identify modeled versus native/process cases. Current wire14/DB10/settings4/default2; M03 acceptance includes separate installed/native/operator evidence, not a promotion of these source tests to physical proof.
+Cross-port SQL/filesystem/worker/CLI/authenticated in-process RPC fixtures cover guarded execution, explicit development policy, original-owner control, fresh discovery, phase-proven unavailable refusal and uncertainty/no replay. [Execution composition](test_execution_composition/README.md) and the other grouped READMEs identify modeled versus native/process cases. Current wire14/DB12/settings4/default2. M04 adds pytest CLI/composition and SQLite watch reopen/ACK checks. These source tests remain separate from installed/native/operator evidence.
 
 Use approved finite selections in owned outside-Git fixtures. Some lifecycle/Git/recovery cases launch processes or inject faults and require explicit scoped authority; do not infer permission from this directory name. [Suite execution policy](../README.md).
 

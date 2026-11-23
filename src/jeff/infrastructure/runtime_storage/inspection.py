@@ -2,6 +2,7 @@
 
 import sqlite3
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from jeff.application.execution import (
     AuthorityOperation,
@@ -17,6 +18,7 @@ from jeff.application.execution import (
     ReviewFault,
     parse_execution_cursor,
 )
+from jeff.application.execution.pytest_report import PYTEST_RUNNER_ARGV
 from jeff.application.storage import StorageFault
 from jeff.domain.execution import AuthorityState
 
@@ -36,6 +38,29 @@ def _inspect_execution(
     fd: int,
 ) -> ExecutionInspection:
     # One actor turn: completion cannot race an authority read on this SQL owner.
+    approval_id = scope.approval_id
+    if approval_id is None:
+        if self.instance_id is None or scope.owner_instance_id != self.instance_id:
+            raise ReviewFault("execution_target_mismatch")
+        project_scope = (str(scope.project_id), str(scope.canonical_root))
+        if scope.latest_pytest:
+            row = connection.execute(
+                "SELECT approval_id FROM execution_authorities WHERE project_id=? "
+                "AND canonical_root=? AND json_extract(manifest_json,'$.authority_kind')"
+                "='guarded_execution_v1' "
+                "AND json_extract(manifest_json,'$.original.argv[3]')=? "
+                "ORDER BY created_at_ms DESC, proposal_id DESC LIMIT 1",
+                (*project_scope, PYTEST_RUNNER_ARGV[-1]),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                "SELECT approval_id FROM execution_authorities WHERE job_id=? "
+                "AND project_id=? AND canonical_root=?",
+                (str(scope.job_id), *project_scope),
+            ).fetchone()
+        if row is None:
+            raise ReviewFault("execution_not_found")
+        approval_id = UUID(row[0])
     record = self._authority_work(
         connection,
         AuthorityOperation(
@@ -43,7 +68,7 @@ def _inspect_execution(
             project_id=scope.project_id,
             canonical_root=scope.canonical_root,
             owner_instance_id=scope.owner_instance_id,
-            approval_id=scope.approval_id,
+            approval_id=approval_id,
         ),
         root,
         fd,
@@ -150,6 +175,22 @@ def _list_executions(
             raise ReviewFault("execution_conflict")
         condition = " AND (created_at_ms<? OR (created_at_ms=? AND proposal_id<?))"
         values.extend((stamp, stamp, identifier))
+    if scope.claim_filter is not None:
+        condition += " AND claim_state=?"
+        values.append(scope.claim_filter)
+    if scope.kind_filter is not None:
+        # Match the reviewed guarded runner argv, not the freely named profile.
+        predicate = (
+            "COALESCE(json_extract(manifest_json,'$.authority_kind')='guarded_execution_v1' "
+            "AND json_extract(manifest_json,'$.original.argv[0]')=? "
+            "AND json_extract(manifest_json,'$.original.argv[1]')=? "
+            "AND json_extract(manifest_json,'$.original.argv[2]')=? "
+            "AND json_extract(manifest_json,'$.original.argv[3]')=? "
+            "AND length(json_extract(manifest_json,'$.original.argv[4]'))=32 "
+            "AND json_extract(manifest_json,'$.original.argv[4]') NOT GLOB '*[^a-f0-9]*',0)"
+        )
+        condition += " AND " + predicate + "=?"
+        values.extend((*PYTEST_RUNNER_ARGV, int(scope.kind_filter == "pytest")))
     rows = connection.execute(
         "SELECT " + _AUTHORITY_COLUMNS + " FROM execution_authorities "
         "WHERE project_id=? AND canonical_root=?"

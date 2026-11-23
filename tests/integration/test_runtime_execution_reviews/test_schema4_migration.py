@@ -102,7 +102,7 @@ def test_schema4_signed_format_and_migration_commit_retirement_order(
             storage = SQLiteStorage(owner)
             storage.start()
             try:
-                assert storage.wait_ready(5).schema_version == 10
+                assert storage.wait_ready(5).schema_version == 12
                 assert storage.lookup(project) == project
                 assert events == ["legacy-permit-before-ddl", "commit", "retire"]
                 assert not (layout.data_dir / "recovery.json").exists()
@@ -123,12 +123,16 @@ def test_clean_schema4_migrates_without_losing_project_or_rewriting_v1_settings(
         initial = SQLiteStorage(owner)
         initial.start()
         try:
-            assert initial.wait_ready(5).schema_version == 10
+            assert initial.wait_ready(5).schema_version == 12
             initial.index(project)
         finally:
             initial.close()
         # Construct only this disposable legacy fixture, not a real installation.
         with closing(sqlite3.connect(layout.database)) as fixture, fixture:
+            fixture.execute("DROP TABLE execution_job_watches")
+            fixture.execute("DELETE FROM schema_migrations WHERE version=12")
+            fixture.execute("DROP TABLE execution_pytest_reports")
+            fixture.execute("DELETE FROM schema_migrations WHERE version=11")
             fixture.execute("DROP TABLE execution_stop_payloads")
             fixture.execute("DELETE FROM schema_migrations WHERE version=10")
             fixture.execute("DROP TABLE execution_lifecycles")
@@ -150,7 +154,7 @@ def test_clean_schema4_migrates_without_losing_project_or_rewriting_v1_settings(
         migrated = SQLiteStorage(owner)
         migrated.start()
         try:
-            assert migrated.wait_ready(5).schema_version == 10
+            assert migrated.wait_ready(5).schema_version == 12
             assert migrated.lookup(project) == project
             assert layout.settings.read_bytes() == old_settings
         finally:

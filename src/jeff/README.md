@@ -2,7 +2,7 @@
 
 ## Current package contract
 
-M02/M03 are accepted: authenticated native macOS runtime, deterministic Git reads/history/diagnostics and explicitly configured guarded development Docker jobs. Current wire14/DB10/settings4 guarded opt-in/default2; legacy parsing is not old-approval promotion or binary downgrade support. No M04/provider/desktop delivery follows. See [source map](../README.md), [current execution contracts](application/execution/README.md) and [root verification boundaries](../../README.md#verification-scope).
+M02–M04 are accepted: authenticated native macOS runtime, deterministic Git reads/history/diagnostics, guarded development Docker jobs and the pytest workflow. Current wire14/DB12/settings4 guarded opt-in/default2; legacy parsing is not old-approval promotion or binary downgrade support. Providers and desktop remain later milestones. See [source map](../README.md), [current execution contracts](application/execution/README.md) and [root verification boundaries](../../README.md#verification-scope).
 
 Package subdirectories now have ownership/readme maps. Runtime side effects belong to supplied adapters, not clients/codec construction; help and explicit startup retain their lazy/opt-in boundaries.
 

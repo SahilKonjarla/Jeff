@@ -2,7 +2,7 @@
 
 ## Current unit scope
 
-Contracts, pure guard codecs/lifetimes, policy/CLI rendering, controlled transports/controllers, package size and refusal semantics are covered at source/fake tier. Current wire14/DB10/settings4/default2 snapshots are intentionally distinct from older fixtures below. These tests do not prove installed/native/Docker behavior or authorize physical faults. See [owned lifecycle subgroup](test_docker_owned_lifecycle/README.md) and [suite execution policy](../README.md).
+Contracts, pure guard codecs/lifetimes, policy/CLI rendering, controlled transports/controllers, package size and refusal semantics are covered at source/fake tier. Current wire14/DB12/settings4/default2 snapshots are intentionally distinct from older fixtures below. M04’s report and live-tail tests cover bounded input, rejection, and sanitized resume offsets. These tests do not prove installed/native/Docker behavior or authorize physical faults. See [owned lifecycle subgroup](test_docker_owned_lifecycle/README.md) and [suite execution policy](../README.md).
 
 ## Historical selected validation — superseded status/version labels
 

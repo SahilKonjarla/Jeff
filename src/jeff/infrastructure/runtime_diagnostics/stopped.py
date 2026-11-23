@@ -1,10 +1,33 @@
 """Continuously leased non-creating settings/storage inspection; discard unconfirmed facts."""
 
+import os
+import stat
+from pathlib import Path
+
 from jeff.application.diagnostics import DoctorCheck
 from jeff.application.runtime import RuntimeLayout
 from jeff.application.storage import LoadedRuntimeSettings
 
 from .. import runtime_diagnostics as _native
+
+
+def postgres_expected(layout: RuntimeLayout) -> bool:
+    """Prefer PostgreSQL even without a marker; stopped checks never read credentials."""
+    if (
+        os.environ.get("JEFF_TEST_SQLITE_FIXTURE") != "1"
+        or layout.data_dir == Path.home() / "Library/Application Support/Jeff"
+    ):
+        return True
+    try:
+        info = (layout.data_dir / "postgresql.json").lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(info.st_mode)
+        and stat.S_IMODE(info.st_mode) == 0o600
+        and info.st_uid == layout.uid
+        and info.st_nlink == 1
+    )
 
 
 def _stopped(
@@ -29,6 +52,12 @@ def _stopped(
                 checks[1] = _native.DoctorCheck(
                     name="settings", status="failed", code="settings_invalid", required=True
                 )
+            if postgres_expected(layout):
+                checks[2] = _native.DoctorCheck(
+                    name="storage", status="unavailable", code="storage_not_ready", required=True
+                )
+                lease.check()
+                return checks, settings, None
             try:
                 version = _native.inspect_stopped_storage(lease, deadline)
                 checks[2] = _native.DoctorCheck(

@@ -1,6 +1,9 @@
 """Cold explicit execution composition and unchanged owned activation scope."""
 
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from jeff.application.execution import (
@@ -9,18 +12,30 @@ from jeff.application.execution import (
     GuardedDockerBackendConfiguration,
     GuardExecutionPolicy,
 )
+from jeff.application.execution.log_tail import LiveLogTail
+from jeff.application.execution.ports import DockerOutputCapture
 from jeff.application.execution_coordinator import ExecutionCoordinator
 from jeff.application.projects import Failure, ProjectService
+from jeff.infrastructure.runtime_output import GuardedOutputCollector, PytestOutputCollector
 from jeff.infrastructure.runtime_state import Ownership
 from jeff.infrastructure.runtime_storage import SQLiteStorage
 
 from .. import runtime as _runtime
 
+if TYPE_CHECKING:
+    from jeff.infrastructure.postgres_execution_actor import PostgresExecutionActor
+
+
+def _attach_log_tail(capture: DockerOutputCapture, tail: LiveLogTail) -> None:
+    if not isinstance(capture, GuardedOutputCollector):
+        raise _runtime.DockerBackendFault("docker_output_failed")
+    capture.follow_into(tail)
+
 
 def create_internal_execution(
     *,
     owner: Ownership,
-    storage: SQLiteStorage,
+    storage: SQLiteStorage | PostgresExecutionActor,
     projects: ProjectService,
     instance_id: UUID,
     binary: Path,
@@ -84,13 +99,18 @@ def create_internal_execution(
         stop_store=storage,
         guards=guards,
         require_guard=require_guard,
+        attach_log_tail=_attach_log_tail,
+        watch_store=storage,
+        pytest_capture=lambda limit, token, paths: PytestOutputCollector(
+            limit, run_token=token, approved_paths=paths
+        ),
     )
 
 
 def create_configured_execution(
     *,
     owner: Ownership,
-    storage: SQLiteStorage,
+    storage: SQLiteStorage | PostgresExecutionActor,
     projects: ProjectService,
     instance_id: UUID,
     deadline: float,

@@ -70,7 +70,8 @@ def test_oversized_and_unauthenticated_shutdown_frames_never_dispatch(
 
 
 def test_capacity_is_bounded_and_excess_connections_are_closed(installation: RuntimeLayout) -> None:
-    assert isinstance(RuntimeController(installation).start(), ControlSuccess)
+    controller = RuntimeController(installation)
+    assert isinstance(controller.start(), ControlSuccess)
     callers: list[socket.socket] = []
     try:
         for _ in range(16):
@@ -87,6 +88,18 @@ def test_capacity_is_bounded_and_excess_connections_are_closed(installation: Run
     finally:
         for caller in callers:
             caller.close()
+
+    # Closing the clients is synchronous locally, but the server releases their
+    # slots asynchronously. Confirm recovery before fixture teardown sends stop.
+    deadline = time.monotonic() + 2
+    while True:
+        status = controller.status()
+        if isinstance(status, ControlSuccess):
+            assert status.data.state.value == "running", status
+            break
+        assert status.error.code == "runtime_handshake_unconfirmed", status
+        assert time.monotonic() < deadline, status
+        time.sleep(0.02)
 
 
 def test_native_peer_identity_is_verified_on_real_mac_unix_sockets(

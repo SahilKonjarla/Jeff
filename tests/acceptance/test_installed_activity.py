@@ -29,7 +29,7 @@ def test_installed_real_git_trace_scoped_replay_restart_and_no_raw_archive(
     evidence: EvidenceClient = client
     try:
         started = control.start()
-        assert isinstance(started, ControlSuccess) and started.data.storage.schema_version == 10
+        assert isinstance(started, ControlSuccess) and started.data.storage.schema_version == 12
         initialized = client.execute(ProjectCall(operation="init", directory=git_repo))
         assert initialized.result.ok
         call = ProjectCall(operation="ask", directory=git_repo, question="what branch am I on?")
@@ -86,6 +86,7 @@ def test_owned_v3_v5_refuse_without_rekey_then_preserve_legacy_metadata(
         "HOME": str(tmp_path),
         "JEFF_DATA_DIR": str(layout.data_dir),
         "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     request = uuid4()

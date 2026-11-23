@@ -111,6 +111,9 @@ def test_child_validates_then_adopts_before_key_and_never_closes_raw_lock(
     monkeypatch.setattr(runtime, "_selected_layout", selected)
     monkeypatch.setattr(runtime, "RuntimeStateStore", Store)
     monkeypatch.setattr(runtime, "_serve", serve)
+    from jeff.bootstrap.runtime import child
+
+    monkeypatch.setattr(child, "selected_database", lambda _: None)
     assert runtime.main() == (0 if failure is None else 1)
     if failure == "pipe_type":
         assert events == ["lock", "pipe"]

@@ -108,6 +108,7 @@ def test_legacy_catalog_reports_upgrade_without_migrating(stopped: RuntimeLayout
     # Synthetic schema3 catalog, NOT a retained-installed-version compatibility claim.
     with closing(sqlite3.connect(stopped.database)) as connection, connection:
         connection.executescript(
+            "DROP TABLE execution_job_watches; DROP TABLE execution_pytest_reports;"
             "DROP TABLE execution_stop_payloads; DROP TABLE execution_lifecycles;"
             "DROP TABLE execution_results;"
             "DROP TABLE execution_launch_events; DROP TABLE execution_launches;"

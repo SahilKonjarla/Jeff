@@ -23,6 +23,7 @@ from jeff.application.execution import (
     ProposalRequestScope,
     ReviewOperation,
 )
+from jeff.application.execution.watch import WatchScope
 from jeff.application.history import ActivityRecord, HistoryScope, ReplayScope
 from jeff.application.runtime import DEFAULT_RUNTIME_LIMITS
 from jeff.application.storage import (
@@ -63,6 +64,7 @@ def _submit(
         "proposal_lookup",
         "execution_inspect",
         "execution_list",
+        "execution_watch",
         "launch_record",
         "launch_status",
         "execution_complete",
@@ -85,6 +87,7 @@ def _submit(
     | ProposalRequestScope
     | ExecutionInspectionScope
     | ExecutionListScope
+    | WatchScope
     | DockerLaunchEvent
     | DockerLaunchScope
     | DockerCompletion

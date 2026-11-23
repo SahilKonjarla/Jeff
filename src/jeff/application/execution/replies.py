@@ -10,10 +10,13 @@ from jeff.domain.execution import AuthorityState
 
 from ._model import _Model
 from .admission import ExecutionAdmission
+from .log_tail import LiveLogPage
 from .output import DockerOutputFacts, DockerOutputSnapshot
+from .pytest_report import PytestResult
 from .requests import ExecutionLivePhase, FreshExecutionOperation
 from .stop_views import ExecutionStopView
 from .views import FreshExecutionCompletion, FreshExecutionPage, FreshExecutionView
+from .watch import WatchInbox
 
 
 class ExecutionCancelReply(_Model):
@@ -51,12 +54,29 @@ class FreshExecutionReply(_Model):
     stop: ExecutionStopView | None = None
     execution_phase: ExecutionLivePhase | Literal["finished", "unconfirmed"] | None = None
     output: DockerOutputSnapshot | None = None
+    log_page: LiveLogPage | None = Field(default=None, exclude_if=lambda value: value is None)
+    pytest_result: PytestResult | None = Field(default=None, exclude_if=lambda value: value is None)
+    watch: WatchInbox | None = Field(default=None, exclude_if=lambda value: value is None)
     error: Failure | None = None
 
     @model_validator(mode="after")
     def consistent(self) -> Self:
         if self.ok != (self.error is None):
             raise ValueError("Success and failure disagree.")
+        if (self.log_page is not None) != (self.ok and self.operation == "jobs.logs"):
+            raise ValueError("Only successful job log observations carry a page.")
+        if self.pytest_result is not None and (
+            self.operation not in {"tests.results", "tests.latest"}
+            or not self.ok
+            or self.completion is None
+            or self.completion.disposition != "completed"
+            or self.completion.payload_state != "retained"
+            or (
+                self.pytest_result.report is not None
+                and self.pytest_result.report.exit_status != self.completion.outcome.exit_code
+            )
+        ):
+            raise ValueError("A pytest result requires matching retained completion facts.")
         if not self.ok:
             if any(
                 value is not None
@@ -74,6 +94,15 @@ class FreshExecutionReply(_Model):
                 raise ValueError("Refusals cannot carry success facts.")
         elif self.identity is None:
             raise ValueError("Success requires authenticated instance correlation.")
+        elif self.operation in {"watch.job", "watch.pending", "watch.ack"}:
+            if (
+                self.watch is None
+                or self.view is not None
+                or self.admission is not None
+                or (self.watch.watched_job_id is not None) != (self.operation == "watch.job")
+                or (self.watch.acknowledged_id is not None) != (self.operation == "watch.ack")
+            ):
+                raise ValueError("Unexpected watch reply shape.")
         elif self.operation in {"approvals.list", "jobs.list"}:
             if self.page is None or any(
                 value is not None
@@ -107,6 +136,10 @@ class FreshExecutionReply(_Model):
                 raise ValueError("Start acknowledges only the matching committed claim.")
         elif self.view is None or self.admission is not None:
             raise ValueError("Non-start success requires original scoped facts.")
+        if self.watch is not None and (
+            not self.ok or self.operation not in {"watch.job", "watch.pending", "watch.ack"}
+        ):
+            raise ValueError("Watch facts require a valid watch operation.")
         if self.page is not None and self.operation not in {"approvals.list", "jobs.list"}:
             raise ValueError("Only listings carry pages.")
         if (
@@ -114,9 +147,15 @@ class FreshExecutionReply(_Model):
             or self.completion_state is not None
             or self.stop is not None
             or self.execution_phase is not None
-        ) and self.operation not in {"show", "logs"}:
+        ) and self.operation not in {"show", "logs", "tests.results", "tests.latest", "jobs.logs"}:
             raise ValueError("Completion is inspection only.")
-        if self.ok and self.operation in {"show", "logs"}:
+        if self.ok and self.operation in {
+            "show",
+            "logs",
+            "tests.results",
+            "tests.latest",
+            "jobs.logs",
+        }:
             if self.completion_state is None or (self.completion_state == "recorded") != (
                 self.completion is not None
             ):
@@ -177,7 +216,13 @@ def fresh_execution_failure(code: str) -> Failure:
         ),
         "execution_conflict": "Request identity or reviewed action conflicts with stored facts.",
         "execution_expired": "Approval expired or was invalidated; a fresh review is required.",
+        "execution_watch_capacity": "Too many unacknowledged watches in this project.",
+        "execution_watch_not_ready": "This job has no terminal notification to acknowledge yet.",
         "execution_not_found": "No fresh execution record exists in this validated scope.",
+        "execution_retry_unavailable": (
+            "Failed-test retry needs a retained failure report from a selection-capable runner "
+            "and a failure set within the argument limits."
+        ),
         "request_outcome_unknown": (
             "Request outcome is unconfirmed. Preserve original request/approval IDs; use "
             "execution show APPROVAL_ID --json and execution logs APPROVAL_ID --json in the "

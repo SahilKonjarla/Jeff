@@ -19,6 +19,7 @@ from jeff.application.execution import (
     ProposalRequestScope,
     ReviewOperation,
 )
+from jeff.application.execution.watch import WatchScope
 from jeff.application.history import ActivityRecord, HistoryScope, ReplayScope
 from jeff.application.storage import ReceiptClaim, ReceiptScope, ReceiptTransition
 from jeff.domain.projects import Project
@@ -45,6 +46,7 @@ class _Work:
         "proposal_lookup",
         "execution_inspect",
         "execution_list",
+        "execution_watch",
         "launch_record",
         "launch_status",
         "execution_complete",
@@ -68,6 +70,7 @@ class _Work:
         | ProposalRequestScope
         | ExecutionInspectionScope
         | ExecutionListScope
+        | WatchScope
         | DockerLaunchEvent
         | DockerLaunchScope
         | DockerCompletion

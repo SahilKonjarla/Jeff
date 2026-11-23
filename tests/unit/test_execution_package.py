@@ -17,9 +17,10 @@ from jeff.domain.execution import AuthorityState, fingerprint
 
 # Wire14 intentionally admits distinct guarded authority/projections and settings4 policy.
 # Wire13 schema pin (historical): 77950bae8bb87158bd506e945c24d4a79f661cd4a442cb1c0c0f9d854f5342b9.
-# Original serialized facts below MUST remain byte-for-byte unchanged.
-SCHEMA_DIGEST = "183ddabf359ea63866ff56c8ed6b5c4a906aaf2ced9c31cc591ec9b8987a1738"
-FACTS_DIGEST = "420777cfd00a528e39fc76893005ea6780d76c507513ca8c5c9e6cd7a783dbfa"
+# M04 adds report, log-tail, watch, and job lookup fields; guard schemas stay pinned.
+SCHEMA_DIGEST = "5928574a1ca5726dbca044f54202d24e3c52abc2fa5c18b846edb411fc3f076b"
+M03_FACTS_DIGEST = "420777cfd00a528e39fc76893005ea6780d76c507513ca8c5c9e6cd7a783dbfa"
+FACTS_DIGEST = "82f9ecb7271d4c15a0efe9ae6dc84a61686ea6f830c16d439247e0e90c1d032f"
 # Non-executable guard drafts are separate; preserve the entire old schema/fact snapshots.
 GUARD_SCHEMAS = {
     "GuardArtifact",
@@ -212,8 +213,21 @@ def test_model_schemas_preserve_original_contracts() -> None:
     )
 
 
-def test_serialization_and_persisted_fingerprints_preserve_original_facts() -> None:
-    assert _digest(_facts()) == FACTS_DIGEST
+def test_execution_facts_match_m04_and_project_back_to_m03() -> None:
+    facts = _facts()
+    assert _digest(facts) == FACTS_DIGEST
+    completion_json, stop_json = facts["completion"], facts["stop"]
+    assert isinstance(completion_json, str) and isinstance(stop_json, str)
+    completion, stop = json.loads(completion_json), json.loads(stop_json)
+    assert completion.pop("pytest_result") is None
+    assert stop["scope"].pop("job_id") is None
+    assert stop["scope"].pop("latest_pytest") is False
+    # Compare the legacy projection, not a claim that the SQLite reader still
+    # accepts old stop digests after the model has filled in the new defaults.
+    facts["completion"] = json.dumps(completion, separators=(",", ":"))
+    facts["stop"] = json.dumps(stop, separators=(",", ":"))
+    facts["stop_digest"] = fingerprint(stop)
+    assert _digest(facts) == M03_FACTS_DIGEST
 
 
 def test_facade_exports_alias_definitions_and_resolves_method_annotations() -> None:

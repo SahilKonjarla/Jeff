@@ -30,6 +30,7 @@ from jeff.application.execution import (
     ReviewFault,
     ReviewOperation,
 )
+from jeff.application.execution.watch import WatchInbox, WatchScope
 from jeff.application.history import (
     ActivityEvent,
     ActivityPage,
@@ -239,6 +240,14 @@ def list_executions(
 ) -> FreshExecutionPage:
     try:
         return cast(FreshExecutionPage, self._submit("execution_list", scope, deadline))
+    except StorageFault as error:
+        raise ReviewFault(error.code) from None
+
+
+@_method
+def watch(self: "SQLiteStorage", scope: WatchScope, *, deadline: float) -> WatchInbox:
+    try:
+        return cast(WatchInbox, self._submit("execution_watch", scope, deadline))
     except StorageFault as error:
         raise ReviewFault(error.code) from None
 

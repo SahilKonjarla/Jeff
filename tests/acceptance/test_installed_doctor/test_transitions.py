@@ -142,6 +142,7 @@ def test_doctor_reports_real_startup_in_progress_then_healthy(
         **env,
         "JEFF_DATA_DIR": str(layout.data_dir),
         "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
     }
     marker, release = root / "starting", root / "continue-start"
     original = subprocess.Popen

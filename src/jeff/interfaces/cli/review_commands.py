@@ -19,7 +19,7 @@ from jeff.application.projects import Failure
 from .invocation import invoke
 
 
-def register(app: typer.Typer, execution: Callable[[], ExecutionClient] | None) -> None:
+def register(app: typer.Typer, execution: Callable[[], ExecutionClient] | None) -> typer.Typer:
     """Keep each group's operation bound in its own callback scope."""
 
     def review_action(
@@ -67,7 +67,7 @@ def register(app: typer.Typer, execution: Callable[[], ExecutionClient] | None) 
             "propose", json_output, argv=tuple(argv), profile=profile, request_id=request_id
         )
 
-    def review_commands(name: str, stem: Literal["approval", "job"]) -> None:
+    def review_commands(name: str, stem: Literal["approval", "job"]) -> typer.Typer:
         group = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
         app.add_typer(group, name=name, help="Inspect review-only durable facts; no execution.")
 
@@ -107,5 +107,7 @@ def register(app: typer.Typer, execution: Callable[[], ExecutionClient] | None) 
                 """Deny this exact proposal without execution."""
                 review_action("deny", json_output, object_id=object_id, request_id=request_id)
 
+        return group
+
     review_commands("approvals", "approval")
-    review_commands("jobs", "job")
+    return review_commands("jobs", "job")

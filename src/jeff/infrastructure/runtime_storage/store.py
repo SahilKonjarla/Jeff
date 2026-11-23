@@ -41,6 +41,7 @@ from . import (
     stops,
     submission,
     transactions,
+    watches,
 )
 from . import history as _history_methods
 from .work import _Work
@@ -227,6 +228,7 @@ class SQLiteStorage:
 
     inspect_stop = requests.inspect_stop
 
+    watch = requests.watch
     inspect_execution = requests.inspect_execution
 
     list_executions = requests.list_executions
@@ -281,6 +283,7 @@ class SQLiteStorage:
 
     _authority_payload_digest = staticmethod(_authority._authority_payload_digest)
 
+    _watch = watches._watch
     _inspect_execution = inspection._inspect_execution
 
     _list_executions = inspection._list_executions

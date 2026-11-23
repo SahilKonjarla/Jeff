@@ -27,6 +27,7 @@ def test_doctor_absent_installation_is_read_only_outside_git(tmp_path: Path) -> 
         "XDG_DATA_HOME": str(homes[4]),
         "JEFF_DATA_DIR": str(data),
         "JEFF_RUNTIME_DIR": str(runtime),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -148,6 +149,7 @@ def test_doctor_stopped_installation_is_read_only_outside_git(tmp_path: Path) ->
         "XDG_DATA_HOME": str(homes[4]),
         "JEFF_DATA_DIR": str(layout.data_dir),
         "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -220,5 +222,5 @@ def test_doctor_stopped_installation_is_read_only_outside_git(tmp_path: Path) ->
     assert all(check["status"] == "ok" and check["required"] for check in report["checks"])
     assert report["settings_schema_version"] == 1
     assert report["configured_retention_days"] == 17
-    assert report["database_schema_version"] == 10
+    assert report["database_schema_version"] == 12
     assert not layout.socket.exists() and not list(layout.data_dir.glob("state.sqlite3-*"))

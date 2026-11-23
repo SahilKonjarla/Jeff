@@ -2,7 +2,7 @@
 
 ## Current coverage map and execution boundary
 
-M03 is accepted with distinct source/fake, installed, native, physical and operator evidence. Current wire14/DB10/settings4 guarded opt-in/default2; source checks do not independently prove Docker/kernel behavior. No current full-suite/CI pass is implied. [Root evidence scope](../README.md#verification-scope) records the prior four-job/current availability-interruption artifact split; old failed scopes remain failed.
+M03 and M04 are accepted with separate source, installed, native and operator evidence. Current wire14/DB12/settings4 guarded opt-in/default2. M04’s 83 focused source tests are distinct from the installed-wheel three-job Docker workflow and manual CLI check. SQLite-owner reopen tests do not prove forced native interruption. No full-suite or M04 CI pass is implied. See [verification scope](../README.md#verification-scope).
 
 Grouped test packages now have local READMEs for purpose, fixture ownership and real-versus-synthetic boundaries. Select approved finite cases in a private arena outside every Git ancestor; native/fault/provider setup needs its own authority. Do not run or reset consumed historical commands below. Root development commands are documentation, not test permission.
 

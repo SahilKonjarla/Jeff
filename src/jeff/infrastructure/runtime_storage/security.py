@@ -19,11 +19,13 @@ from .catalog import (
     _AUTHORITIES,
     _AUTHORITY_OPS,
     _EXPIRABLE_INDEX,
+    _JOB_WATCHES,
     _LAUNCH_EVENTS,
     _LAUNCHES,
     _LEDGER,
     _LIFECYCLES,
     _PROJECTS,
+    _PYTEST_REPORTS,
     _RECEIPT_INDEX,
     _RECEIPTS,
     _RESULT_PAYLOADS,
@@ -76,7 +78,7 @@ def _schema(connection: sqlite3.Connection) -> int:
     if connection.execute("PRAGMA application_id").fetchone() != (DATABASE_APPLICATION_ID,):
         raise StorageFault("storage_unrecognized")
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, DATABASE_SCHEMA):
+    if not 0 <= version <= DATABASE_SCHEMA:
         raise StorageFault("storage_schema_unsupported")
     if connection.execute("PRAGMA journal_mode").fetchone() != ("delete",):
         raise StorageFault("storage_recovery_required")
@@ -115,6 +117,10 @@ def _schema(connection: sqlite3.Connection) -> int:
         expected["execution_lifecycles"] = ("table", _LIFECYCLES)
     if version >= 10:
         expected["execution_stop_payloads"] = ("table", _STOP_PAYLOADS)
+    if version >= 11:
+        expected["execution_pytest_reports"] = ("table", _PYTEST_REPORTS)
+    if version >= 12:
+        expected["execution_job_watches"] = ("table", _JOB_WATCHES)
     found = connection.execute(
         "SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT ?",
         (len(expected) + 1,),
@@ -146,6 +152,8 @@ def _schema(connection: sqlite3.Connection) -> int:
             (8, "execution_results_v8"),
             (9, "execution_lifecycle_v9"),
             (10, "execution_stop_payloads_v10"),
+            (11, "execution_pytest_reports_v11"),
+            (12, "execution_job_watches_v12"),
         )
         if number <= version
     ]:

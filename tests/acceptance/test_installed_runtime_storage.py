@@ -29,7 +29,7 @@ def test_installed_storage_registry_survives_actual_daemon_restart(
     controller = RuntimeController(layout)
     try:
         first = controller.start()
-        assert isinstance(first, ControlSuccess) and first.data.storage.schema_version == 10
+        assert isinstance(first, ControlSuccess) and first.data.storage.schema_version == 12
         assert first.data.application_ready is True
         assert isinstance(controller.stop(), ControlSuccess)
         for operation in ("index", "lookup"):
@@ -70,6 +70,7 @@ def test_retained_v1_and_current_v2_refuse_without_downgrade_or_replacement(tmp_
         "HOME": str(root / "home"),
         "JEFF_DATA_DIR": str(layout.data_dir),
         "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
 

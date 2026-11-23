@@ -12,7 +12,8 @@ from ._model import _Model, absolute_path
 from .authority import AuthorityRecord
 from .guard_execution import ExecutionAction
 from .output import DockerJobOutcome, DockerOutputFacts
-from .requests import parse_execution_cursor
+from .pytest_report import pytest_run_token
+from .requests import JobClaimFilter, JobKindFilter, parse_execution_cursor
 
 
 class FreshExecutionView(_Model):
@@ -79,6 +80,20 @@ class FreshExecutionPage(_Model):
     @classmethod
     def root(cls, value: Path) -> Path:
         return absolute_path(value)
+
+    def matches(self, claim: JobClaimFilter | None, kind: JobKindFilter | None) -> bool:
+        return all(
+            (claim is None or item.claim_state == claim)
+            and (
+                kind is None
+                or (kind == "pytest")
+                == (
+                    item.authority_kind == "guarded_execution_v1"
+                    and pytest_run_token(item.manifest.argv) is not None
+                )
+            )
+            for item in self.items
+        )
 
     def within(self, *, after: str | None, limit: int) -> bool:
         """Check query bounds; project and authenticated identity binding remain mandatory."""

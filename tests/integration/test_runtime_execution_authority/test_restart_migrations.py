@@ -53,6 +53,10 @@ def test_results_restart_and_signed_schema7_migration_preserve_exclusions(
                     fixture.execute("DELETE FROM schema_migrations WHERE version=9")
                     fixture.execute("DROP TABLE execution_results")
                     fixture.execute("DELETE FROM schema_migrations WHERE version=8")
+                    fixture.execute("DROP TABLE execution_job_watches")
+                    fixture.execute("DELETE FROM schema_migrations WHERE version=12")
+                    fixture.execute("DROP TABLE execution_pytest_reports")
+                    fixture.execute("DELETE FROM schema_migrations WHERE version=11")
                     fixture.execute("PRAGMA user_version=7")
             signed: list[int] = []
             original_arm = store.owner.arm_storage_recovery
@@ -84,7 +88,7 @@ def test_results_restart_and_signed_schema7_migration_preserve_exclusions(
                 again = SQLiteStorage(store.owner, instance_id=uuid4())
                 again.start()
                 try:
-                    assert again.wait_ready(5).schema_version == 10
+                    assert again.wait_ready(5).schema_version == 12
                     assert (
                         again.lookup(project) == project
                         and store.owner.store.layout.settings.read_bytes() == settings
@@ -150,13 +154,17 @@ def test_clean_schema5_migration_preserves_registration_settings_and_legacy_revi
             fixture.execute("DROP TABLE execution_authority_operations")
             fixture.execute("DROP TABLE execution_authorities")
             fixture.execute("DELETE FROM schema_migrations WHERE version=6")
+            fixture.execute("DROP TABLE execution_job_watches")
+            fixture.execute("DELETE FROM schema_migrations WHERE version=12")
+            fixture.execute("DROP TABLE execution_pytest_reports")
+            fixture.execute("DELETE FROM schema_migrations WHERE version=11")
             fixture.execute("PRAGMA user_version=5")
         settings_before = layout.settings.read_bytes()
         new_generation = uuid4()
         migrated = SQLiteStorage(store.owner, instance_id=new_generation)
         migrated.start()
         try:
-            assert migrated.wait_ready(5).schema_version == 10
+            assert migrated.wait_ready(5).schema_version == 12
             assert migrated.lookup(project) == project
             assert layout.settings.read_bytes() == settings_before
             observed = migrated.review(
@@ -214,12 +222,16 @@ def test_journal_restart_and_clean_schema6_migration_never_restore_permission(
                     fixture.execute("DROP TABLE execution_launch_events")
                     fixture.execute("DROP TABLE execution_launches")
                     fixture.execute("DELETE FROM schema_migrations WHERE version=7")
+                    fixture.execute("DROP TABLE execution_job_watches")
+                    fixture.execute("DELETE FROM schema_migrations WHERE version=12")
+                    fixture.execute("DROP TABLE execution_pytest_reports")
+                    fixture.execute("DELETE FROM schema_migrations WHERE version=11")
                     fixture.execute("PRAGMA user_version=6")
             new_generation = uuid4()
             again = SQLiteStorage(store.owner, instance_id=new_generation)
             again.start()
             try:
-                assert again.wait_ready(5).schema_version == 10
+                assert again.wait_ready(5).schema_version == 12
                 assert (
                     again.lookup(project) == project
                     and store.owner.store.layout.settings.read_bytes() == settings

@@ -172,6 +172,20 @@ def render_execution(
         typer.echo(json.dumps(reply.model_dump(mode="json"), ensure_ascii=True))
     elif reply.error is not None:
         typer.echo(f"{reply.error.error.code}: {reply.error.error.message}", err=True)
+    elif reply.watch is not None:
+        inbox = reply.watch
+        if inbox.watched_job_id is not None:
+            typer.echo(
+                f"Watching job {inbox.watched_job_id}; notification: {inbox.notification_id}"
+            )
+        elif inbox.acknowledged_id is not None:
+            typer.echo(f"Acknowledged: {inbox.acknowledged_id}")
+        elif not inbox.notifications:
+            typer.echo("No pending terminal notifications.")
+        else:
+            for notice in inbox.notifications:
+                code = f"; exit: {notice.exit_code}" if notice.exit_code is not None else ""
+                typer.echo(f"{notice.notification_id}  job {notice.job_id}: {notice.outcome}{code}")
     elif reply.page is not None:
         typer.echo(f"Project: {reply.page.project_id}; root: {reply.page.canonical_root}")
         for item in reply.page.items:
@@ -190,6 +204,21 @@ def render_execution(
             f"replayed={reply.admission.replayed}"
         )
         typer.echo("Claim acknowledgement only; not guest-start or completion confirmation.")
+    elif operation in {"tests.results", "tests.latest"} and reply.view is not None:
+        typer.echo(f"Job: {reply.view.job_id}")
+        if reply.completion is not None:
+            typer.echo(f"Exit status: {reply.completion.outcome.exit_code}")
+        if reply.pytest_result is None:
+            reason = reply.completion.payload_state if reply.completion else reply.completion_state
+            typer.echo(f"Pytest report unavailable ({reason}).")
+        elif (report := reply.pytest_result.report) is None:
+            typer.echo(f"Pytest report unavailable ({reply.pytest_result.status}).")
+        else:
+            typer.echo(f"Passed: {report.passed}; failed: {report.failed}")
+            for failure in report.failures:
+                typer.echo(f"{failure.node_id} at {failure.path}:{failure.line}")
+                if failure.excerpt:
+                    typer.echo(failure.excerpt)
     elif reply.view is not None:
         view = reply.view
         typer.echo(

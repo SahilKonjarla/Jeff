@@ -127,6 +127,7 @@ def test_owned_v4_v5_hard_refusal_and_preserved_instrumented_history(
         "PYTHONDONTWRITEBYTECODE": "1",
         "JEFF_DATA_DIR": str(layout.data_dir),
         "JEFF_RUNTIME_DIR": str(layout.runtime_dir),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
     }
 
     def legacy(operation: str) -> dict[str, Any]:

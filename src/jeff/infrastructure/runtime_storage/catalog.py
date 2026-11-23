@@ -195,6 +195,26 @@ _RESULTS = (
 )
 
 
+_JOB_WATCHES = (
+    "CREATE TABLE execution_job_watches ("
+    "job_id TEXT PRIMARY KEY NOT NULL REFERENCES execution_authorities(job_id), "
+    "notification_id TEXT NOT NULL UNIQUE, acknowledged INTEGER NOT NULL DEFAULT 0 "
+    "CHECK(acknowledged IN (0,1)))"
+)
+
+
+_PYTEST_REPORTS = (
+    "CREATE TABLE execution_pytest_reports ("
+    "attempt_id TEXT PRIMARY KEY NOT NULL REFERENCES execution_results(attempt_id), "
+    "status TEXT NOT NULL "
+    "CHECK(status IN ('available','missing','oversized','invalid','withheld')), "
+    "report_json TEXT CHECK(length(CAST(report_json AS BLOB))<=65536), "
+    "report_digest TEXT CHECK(length(report_digest)=64), "
+    "CHECK((report_json IS NULL)=(report_digest IS NULL)), "
+    "CHECK((status='available')=(report_json IS NOT NULL)))"
+)
+
+
 _RESULT_PAYLOADS = (
     "CREATE INDEX execution_result_payloads ON execution_results(sequence) WHERE stdout IS NOT NULL"
 )

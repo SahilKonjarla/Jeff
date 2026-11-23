@@ -8,6 +8,7 @@ from jeff.application.execution import (
     AuthorityRecord,
     DockerBackendFault,
     ExecutionManifest,
+    GuardedExecutionManifest,
     PreparedInputFault,
     PreparedInputs,
     ProposalRequestScope,
@@ -41,6 +42,7 @@ def propose(
     *,
     deadline: float,
     request_id: UUID | None = None,
+    retry_of: GuardedExecutionManifest | None = None,
 ) -> AuthorityRecord:
     """Prepare literal inputs once; replay returns the original reviewed facts.
 
@@ -50,6 +52,8 @@ def propose(
     with _active(self, deadline):
         project = _project(self, directory, deadline)
         profile = _profile(self, project, profile_name)
+        if retry_of is not None and (profile != retry_of.profile or self.guards is None):
+            raise ReviewFault("execution_conflict")
         # Validate public argv before allocating/copying a snapshot; dummy inventory
         # is never persisted or granted authority.
         ExecutionManifest(profile=profile, argv=argv, inputs=PreparedInputs())
@@ -74,6 +78,13 @@ def propose(
                     prior.manifest.profile.name != profile_name
                     or prior.manifest.argv != argv
                     or tuple(item.path for item in prior.manifest.inputs.files) != paths
+                    or (
+                        retry_of is not None
+                        and (
+                            prior.manifest.profile != retry_of.profile
+                            or prior.manifest.inputs.files != retry_of.inputs.files
+                        )
+                    )
                 ):
                     raise ReviewFault("execution_conflict")
                 # Replay original facts; refresh existing expiry without target
@@ -91,6 +102,8 @@ def propose(
                 raise ReviewFault("execution_unavailable") from None
             raise
         prepared = self.preparer.prepare(project, paths, deadline=deadline)
+        if retry_of is not None and prepared.files != retry_of.inputs.files:
+            raise ReviewFault("execution_conflict")
         manifest = ExecutionManifest(profile=profile, argv=argv, inputs=prepared)
         binding = self.inputs.verify(manifest, deadline=deadline)
         self.inputs.check(binding, manifest, deadline=deadline)

@@ -12,20 +12,31 @@ import pytest
 
 from jeff.application.runtime import RuntimeLayout, RuntimePathInputs
 from jeff.bootstrap import runtime
+from jeff.infrastructure.postgres_execution_actor import PostgresExecutionActor
 from jeff.infrastructure.runtime_diagnostics import RuntimeDiagnosticsAdapter
 
-INTERFACE_DIGEST = "003a031373c3ec387159e7f92c4a70cb26cb87558ab9c6e611ba5114843dc71a"
+LEGACY_INTERFACE_DIGEST = "003a031373c3ec387159e7f92c4a70cb26cb87558ab9c6e611ba5114843dc71a"
+INTERFACE_DIGEST = "f8a00b983bb5d0328fa92b336c103d762f146a134df0b802cb77a95a966a2e8c"
 
 
 def _digest(value: object) -> str:
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _globals(value: Callable[..., object]) -> dict[str, object]:
+    # The PostgreSQL actor is a type-only import in the cold composition module.
+    assert inspect.isfunction(value)
+    return dict(value.__globals__) | {"PostgresExecutionActor": PostgresExecutionActor}
+
+
 def _interfaces() -> dict[str, object]:
     return {
         name: {
-            "signature": str(inspect.signature(value)),
-            "hints": {key: str(hint) for key, hint in get_type_hints(value).items()},
+            "signature": str(inspect.signature(value, globals=_globals(value), eval_str=True)),
+            "hints": {
+                key: str(hint)
+                for key, hint in get_type_hints(value, globalns=_globals(value)).items()
+            },
             "doc": inspect.getdoc(value),
             "async": inspect.iscoroutinefunction(value),
         }
@@ -34,24 +45,33 @@ def _interfaces() -> dict[str, object]:
     }
 
 
-def test_only_internal_guard_factory_parameters_extend_original_interfaces() -> None:
+def test_composition_interfaces_add_postgresql_without_changing_legacy_parameters() -> None:
     interfaces = _interfaces()
-    assert _digest(interfaces) == "c4d48bd0fc6d289d5ff2321884551be937b8622210a1bb64c1fa9147f62f9aef"
-    original = cast(dict[str, object], interfaces["create_internal_execution"])
-    signature = inspect.signature(runtime.create_internal_execution)
-    for name, default in (("guard_policy", None), ("require_guard", False)):
-        assert signature.parameters[name].default is default
-        cast(dict[str, str], original["hints"]).pop(name)
-    original["signature"] = str(
-        signature.replace(
-            parameters=[
-                p
-                for name, p in signature.parameters.items()
-                if name not in {"guard_policy", "require_guard"}
-            ]
-        )
-    )
     assert _digest(interfaces) == INTERFACE_DIGEST
+    for name in ("create_internal_execution", "create_configured_execution"):
+        factory = getattr(runtime, name)
+        current = cast(dict[str, object], interfaces[name])
+        signature = inspect.signature(factory, globals=_globals(factory), eval_str=True)
+        storage = signature.parameters["storage"]
+        assert storage.annotation == runtime.SQLiteStorage | PostgresExecutionActor
+        hints = cast(dict[str, str], current["hints"])
+        hints["storage"] = str(runtime.SQLiteStorage)
+        omitted = set()
+        if name == "create_internal_execution":
+            for parameter, default in (("guard_policy", None), ("require_guard", False)):
+                assert signature.parameters[parameter].default is default
+                hints.pop(parameter)
+                omitted.add(parameter)
+        current["signature"] = str(
+            signature.replace(
+                parameters=[
+                    p.replace(annotation=runtime.SQLiteStorage) if p.name == "storage" else p
+                    for p in signature.parameters.values()
+                    if p.name not in omitted
+                ]
+            )
+        )
+    assert _digest(interfaces) == LEGACY_INTERFACE_DIGEST
 
 
 def test_client_factories_keep_location_selection_lazy_and_root_patchable(

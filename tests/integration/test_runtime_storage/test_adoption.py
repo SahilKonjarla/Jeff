@@ -44,7 +44,7 @@ def test_conservative_adoption_preserves_existing_database_and_sidecars(
                 fixture.execute("CREATE TABLE foreign_data(value TEXT)")
                 if kind == "newer":
                     fixture.execute(f"PRAGMA application_id={DATABASE_APPLICATION_ID}")
-                    fixture.execute("PRAGMA user_version=11")
+                    fixture.execute(f"PRAGMA user_version={DATABASE_SCHEMA + 1}")
             layout.database.chmod(0o600)
         if kind in ("journal", "wal", "shm"):
             sidecar = layout.data_dir / ("state.sqlite3-" + kind)

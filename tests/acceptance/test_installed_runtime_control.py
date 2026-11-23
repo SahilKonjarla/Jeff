@@ -27,6 +27,7 @@ def test_installed_control_and_public_start_use_same_installation(
         "TMPDIR": str(root / "tmp"),
         "JEFF_DATA_DIR": str(root / "d"),
         "JEFF_RUNTIME_DIR": str(root / "r"),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
         "NO_COLOR": "1",
     }
@@ -125,6 +126,7 @@ def test_daemon_survives_launcher_exit_and_another_caller_confirms_shutdown(
         "HOME": str(root / "home"),
         "JEFF_DATA_DIR": str(root / "d"),
         "JEFF_RUNTIME_DIR": str(root / "r"),
+        "JEFF_TEST_SQLITE_FIXTURE": "1",
     }
     monkeypatch.setenv("JEFF_DATA_DIR", env["JEFF_DATA_DIR"])
     monkeypatch.setenv("JEFF_RUNTIME_DIR", env["JEFF_RUNTIME_DIR"])
@@ -182,6 +184,7 @@ def test_internal_child_refuses_invalid_descriptor_before_creating_installation(
             "PATH": os.defpath,
             "JEFF_DATA_DIR": str(tmp_path / "d"),
             "JEFF_RUNTIME_DIR": str(tmp_path / "r"),
+            "JEFF_TEST_SQLITE_FIXTURE": "1",
         },
         capture_output=True,
         timeout=10,

@@ -16,7 +16,7 @@ from jeff.application.projects import ErrorData, Failure
 
 # Wire 14 intentionally replaces 13; only revision fields/constants change.
 # Revision-normalized schemas/values still match their wire13 fingerprints.
-SCHEMA_DIGEST = "37d309f5677246d303d45eb823ceef85ecbb1821ab33e4e4855a9a5bcf29d251"
+SCHEMA_DIGEST = "2f43c7853f2ceda85fa10ca5e2e444aa5428bef1e0d5f9880cfd8e83f4bd056e"
 INTERFACE_DIGEST = "57685a7755c889d4195084e4caf4597ba1e2d161e5c606ab92da710a369f2592"
 VALUE_DIGEST = "ad9325e9ed7673cae654be1775a71534bc0e447ddb811e947df2e3bd0cae5f57"
 

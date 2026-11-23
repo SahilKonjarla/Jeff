@@ -1,6 +1,6 @@
 # Jeff
 
-Local, human-supervised developer assistant for **macOS**. M02 and M03 are accepted within their recorded evidence qualifications: explicit authenticated daemon lifecycle, project/Git questions, durable history, read-only diagnostics, and opt-in approved Docker jobs. Desktop, voice, reasoning providers, Pi/MCP/SSH integration, test watchers and service orchestration remain later milestones. M04 has not started.
+Local, human-supervised developer assistant for **macOS**. M02–M04 are accepted within their recorded evidence limits: authenticated daemon lifecycle, project/Git questions, durable history, diagnostics, approved Docker jobs, and a pytest workflow with failure details, failed-only retry, live logs and a durable notification inbox. Desktop, voice, reasoning providers, Pi/MCP/SSH integration and service orchestration remain later milestones.
 
 Docker is the backend for explicitly declared application jobs, not a replacement for the native Jeff daemon or permission to containerize development checks. Linux Jeff client/runtime compatibility is out of scope. [Source map](src/README.md), [CLI contract and uncertainty guidance](src/jeff/interfaces/README.md), [test map](tests/README.md).
 
@@ -22,7 +22,55 @@ python -m pip install -r requirements-dev.lock -e '.[dev]'
 
 Dependencies and tools are declared in `pyproject.toml`. The development lock is a tested Mac/Python snapshot, not a cross-platform hash lock. `requirements.txt` alone does not install the CLI. Reuse the existing environment when dependencies have not changed; deactivation does not stop Jeff.
 
-Current compatibility is **wire14 / DB10 / guarded opt-in settings4 / default settings2**. Legacy settings1/2/3 remain parseable; settings3 alone cannot enable new configured guarded launches. Match client and daemon installations. Older binaries cannot read guarded authority JSON; downgrade after guarded work is unsupported. Acceptance used isolated fixtures, not a normal-installation migration or fresh-machine distribution test.
+M03 was accepted at **wire14 / DB10 / guarded opt-in settings4 / default settings2**. Accepted M04 used **wire14 / DB12** for pytest results and job watches. The later PostgreSQL-backend work keeps the application native and supports PostgreSQL schema 1; SQLite DB12 remains the legacy import format. Legacy settings1/2/3 remain parseable; settings3 alone cannot enable new configured guarded launches. Match client and daemon installations. Older binaries do not support DB12 or downgrade. Verification uses isolated fixtures, not a normal-installation migration or fresh-machine distribution test.
+
+## PostgreSQL-backed Jeff
+
+PostgreSQL is Jeff’s default storage backend; normal startup does not fall back
+to SQLite. The local setup uses a `jeff-postgres` container on
+`127.0.0.1:55432`, with a dedicated `jeff-postgres-data` volume. `jeff start` and
+`jeff stop` control the native daemon only. To stop or start the database itself,
+use `docker stop jeff-postgres` or `docker start jeff-postgres`. Docker’s
+`unless-stopped` policy does not start Docker Desktop itself.
+
+For a configured installation, supply `JEFF_POSTGRES_PASSWORD` privately for
+`jeff start` and unset it afterward. If PostgreSQL is unavailable Jeff refuses to
+start; it won’t create a replacement SQLite store. Use `jeff doctor --json` for
+live backend and schema readiness. Stopped diagnostics do not connect to the
+server or read its credentials. See the [startup and backup guide](src/jeff/bootstrap/runtime/README.md#postgresql-startup).
+
+## Pytest jobs (M04)
+
+With an explicitly configured guarded `pytest` profile whose pinned image contains
+`/opt/jeff/pytest_job_runner.py`, run the following from the registered project.
+The image must already contain compatible pytest dependencies and set `TMPDIR=/scratch`
+for pytest’s file capture under the read-only filesystem policy.
+
+```bash
+jeff tests run --input service.py --input test_service.py
+jeff execution approve <approval-id> --digest <manifest-sha256>
+jeff execution start <approval-id> --digest <manifest-sha256>
+jeff tests results <job-id> --json
+```
+
+`tests run` only proposes. List every reviewed input explicitly; Jeff does not
+copy the whole checkout or prepare the image. The result uses the job ID, not
+the approval ID. A missing or rejected report is not a substitute for the job’s
+exit status. The report is separate from ordinary logs and expires with them.
+
+`jeff ask "what failed?"` reads the latest pytest job in the current project,
+including a job that has not finished yet. `jeff tests retry-failed <job-id>`
+proposes a new job for the exact failed test IDs from a retained version 2 report.
+Approve and start it separately. Retry requires the same pinned image, execution
+profile and input bytes; to test changed source, propose a fresh `jeff tests run`.
+Version 1 reports are still readable but cannot be used to propose retries.
+
+Use `jeff watch job <job-id>` to register a watch in the current project, then
+`jeff watch pending` to read terminal notifications. `jeff watch ack <notification-id>`
+acknowledges one notification. Reading does not acknowledge it: until acknowledged,
+the same notification ID can appear again, including after a daemon restart.
+A watched job whose outcome cannot be confirmed is reported as interrupted, not
+as a test pass or failure.
 
 ## Start and use a project
 
@@ -70,7 +118,9 @@ jeff execution jobs list --limit 16 --after PREVIOUS_NEXT_AFTER --json
 - Review the **full outer guarded manifest** and approve its exact digest. Old review-only/unguarded approvals never become guarded authority. Legacy `run`/`approvals`/`jobs` remain permanently review-only.
 - Inputs are literal project-relative files, not globs/directories. The owner/operator must review argv and file contents as public/non-secret: snapshots and metadata can persist before approval. Names, hashes, read-only mounts and redaction do not certify arbitrary contents or destructive intent. Production/unclassified targets refuse.
 - Start acknowledges a confirmed claim, not guest readiness/success. Cancel acknowledges intent, not termination. Retain request UUIDs and reconcile through scoped show/logs; missing replies never authorize retry.
-- Fresh lists are project-scoped newest-first pages (default16/max32), not snapshots. A reserved job UUID is not a launched job. Use approval IDs for show/logs/cancel. Discovery never transfers mutation authority.
+- Fresh lists are project-scoped newest-first pages (default16/max32), not snapshots. Filter `jeff execution jobs list` with `--kind pytest|command` or `--state claimed|finished|unknown` (claim state). `jeff jobs list` remains review-only. A reserved job UUID is not a launched job; discovery never transfers mutation authority.
+- For a fresh job, use `jeff jobs logs JOB_ID --follow` for up to 64 KiB of recent sanitized output followed by new output. Closing the viewer does not cancel the job. A reconnect shows the retained tail again; Jeff flags unavailable earlier output. Live history is in memory; after restart or replacement, only the bounded job archive is available. Pytest reports never appear in the log stream.
+- Use `jeff jobs cancel JOB_ID --digest REVIEWED_SHA256` to resolve the job in the current project and submit the existing stop intent. The `jeff execution show/logs/cancel` commands still take approval IDs.
 - Unavailable target verification before preparation/authority returns `execution_unavailable`, without download/fallback. The same raw fault after persistence/claim or uncertain helper cleanup remains unknown; do not infer nonexecution from an error code alone.
 - Only the original captured worker/controller can stop/remove its verified owned job. Guard terminal, namespace exit, output EOF, removal and native daemon exit are separate facts. Incomplete output stays labelled incomplete.
 - Unknown work stays quarantined/consumed across restart. No automatic retry, adoption, PID/CID/label-based control, DB reset or quarantine-clear API exists. Independent administrative removal does not rewrite Jeff's unknown outcome or refund authority. See [operator guidance](src/jeff/interfaces/README.md#m03-policy-and-uncertain-work-guidance).
@@ -78,6 +128,14 @@ jeff execution jobs list --limit 16 --after PREVIOUS_NEXT_AFTER --json
 `jeff stop` drains actual work. It may honestly return `runtime_stop_unconfirmed` even when the original daemon child subsequently exits: native exit alone is not confirmation of a job outcome/cleanup. Ctrl-C/disconnection/deactivating the venv is not cancellation.
 
 ## Verification scope
+
+M04 was accepted at `d7a9afc` after 83 focused source tests, a fresh noneditable
+wheel, three real Docker jobs (failed, failed-only retry, repaired pass), and a
+manual installed-CLI run covering logs, failure details and notification ACK.
+Cancellation and active graceful restart were covered in separate real CLI checks;
+unconfirmed restart was covered at the SQLite-owner test tier, not by a forced
+native crash. This is Apple ARM64/macOS Docker Desktop evidence, not full-suite,
+hosted CI, native macOS pytest compatibility, or live-database upgrade evidence.
 
 M03 includes matched installed native success, typed nonzero exit versus guard timeout, owned cancel/cleanup, natural approval expiry and restart/no replay; real missing engine/image refusal; active shutdown; and operator-performed owner/provider interruption with honest unknown/log inspection and verified stopped-orphan administrative removal. Original failed scopes remain failed, not retrospectively passed.
 
@@ -113,4 +171,4 @@ The existing generator creates independent ignored repositories with determinist
 .venv/bin/python scripts/create_demo_projects.py
 ```
 
-It never starts Jeff/services or resets work. Its deliberate1-pass/1-fail pytest and Compose fixtures do not imply M04/M05 runtime delivery. [Examples](examples/README.md), [generator contract](scripts/README.md).
+It never starts Jeff/services or resets work. Its deliberate 1-pass/1-fail pytest fixture can be used with M04’s declared Docker profile; the Compose fixture does not imply M05 runtime delivery. [Examples](examples/README.md), [generator contract](scripts/README.md).

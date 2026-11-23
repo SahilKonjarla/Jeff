@@ -13,7 +13,11 @@ from jeff.application.questions import QuestionSuccess
 from .invocation import invoke
 
 
-def register(app: typer.Typer, client: Callable[[], ProjectClient]) -> None:
+def register(
+    app: typer.Typer,
+    client: Callable[[], ProjectClient],
+    latest_pytest: Callable[[bool], None] | None = None,
+) -> None:
     """Register callbacks without constructing the project client."""
 
     def execute(
@@ -73,4 +77,10 @@ def register(app: typer.Typer, client: Callable[[], ProjectClient]) -> None:
         ),
     ) -> None:
         """Answer branch/change questions deterministically, without models or Git writes."""
+        if (
+            latest_pytest is not None
+            and " ".join(question.strip().lower().removesuffix("?").split()) == "what failed"
+        ):
+            latest_pytest(json_output)
+            return
         execute("ask", json_output, question)
