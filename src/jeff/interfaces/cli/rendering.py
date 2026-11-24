@@ -5,6 +5,7 @@ from uuid import UUID
 
 import typer
 
+from jeff.application.compose_service_commands import ServiceCommandSuccess, ServiceReview
 from jeff.application.compose_status import ComposeLogsSuccess, ComposeStatusSuccess
 from jeff.application.diagnostics import DoctorResult
 from jeff.application.dispatch import DiagnosticSuccess, ProjectStatusSuccess
@@ -32,6 +33,7 @@ def render(
     | ComposeLogsSuccess
     | ProcessPortsSuccess
     | ProcessListSuccess
+    | ServiceCommandSuccess
     | DoctorResult
     | ExecutionSuccess
     | Failure,
@@ -128,6 +130,19 @@ def render(
                 typer.echo(logs.stdout, nl=not logs.stdout.endswith("\n"))
             if logs.stderr:
                 typer.echo(logs.stderr, err=True, nl=not logs.stderr.endswith("\n"))
+    elif isinstance(result, ServiceCommandSuccess):
+        review = result.data
+        if isinstance(review, ServiceReview):
+            typer.echo(f"Approval: {review.approval_id} ({review.state})")
+            typer.echo(f"Job: {review.job_id}\nManifest SHA256: {review.digest}")
+            typer.echo(review.manifest.model_dump_json(indent=2))
+        else:
+            typer.echo(f"Service outcome: {review.outcome}")
+            if review.health_relay is not None:
+                relay = review.health_relay
+                typer.echo(f"Health relay: http://{relay.host}:{relay.port}{relay.path}")
+            if review.outcome == "unknown":
+                typer.echo(f"Outcome unknown; do not replay. Request: {review.request_id}", err=True)
     elif isinstance(result, ComposeStatusSuccess):
         health = result.data.health
         states = (
@@ -188,7 +203,11 @@ def render(
                 )
     else:
         typer.echo(f"{result.error.code}: {result.error.message}", err=True)
-    if not result.ok:
+    if not result.ok or (
+        isinstance(result, ServiceCommandSuccess)
+        and not isinstance(result.data, ServiceReview)
+        and result.data.outcome == "unknown"
+    ):
         raise typer.Exit(code=1)
 
 

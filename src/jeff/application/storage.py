@@ -14,6 +14,7 @@ from pydantic import (
     model_validator,
 )
 
+from jeff.application.compose_lifecycle import ServiceLifecycleSettings
 from jeff.application.compose_status import ComposeStatusTarget
 from jeff.application.execution import (
     DockerBackendConfiguration,
@@ -151,9 +152,20 @@ class GuardedRuntimeSettings(ConfiguredRuntimeSettings):
     schema_version: StrictInt = Field(ge=4, le=4)
     backend: GuardedDockerBackendConfiguration | None = None
     compose_status: ComposeStatusTarget | None = Field(default=None, exclude_if=lambda v: v is None)
+    service_lifecycle: ServiceLifecycleSettings | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
 
     @model_validator(mode="after")
     def guarded_profiles(self) -> Self:
+        if self.service_lifecycle is not None and self.compose_status is not None:
+            service_home, inspection_home = self.service_lifecycle.home, self.compose_status.home
+            if (
+                service_home == inspection_home
+                or service_home in inspection_home.parents
+                or inspection_home in service_home.parents
+            ):
+                raise ValueError("Service lifecycle requires a separate private Docker HOME.")
         if self.backend is not None:
             profiles = {(p.project_id, p.name): p for p in self.execution.profiles}
             for declaration in self.backend.declarations:

@@ -11,9 +11,11 @@ from contextlib import suppress
 from importlib import import_module
 
 from jeff.application.compose_status import ComposeLogsReader, ComposeStatusReader
+from jeff.application.execution import DockerBackendFault
 from jeff.application.execution.ports import FreshExecutionService
 from jeff.application.runtime import (
     DEFAULT_RUNTIME_LIMITS,
+    ControlFault,
     PROTOCOL_REVISION,
     RuntimeIdentityData,
     StartupResult,
@@ -29,6 +31,7 @@ from jeff.infrastructure.runtime_state import Ownership
 from .. import runtime as _runtime
 from .compose_status import compose_logs_reader, compose_status_reader
 from .postgres_readback import PostgresReadback
+from .service_lifecycle import ComposedServiceLifecycle, compose_service_lifecycle
 
 
 def selected_database(owner: Ownership) -> str | None:
@@ -109,9 +112,10 @@ async def serve_postgres(
 
     compose_reader: ComposeStatusReader | None = None
     logs_reader: ComposeLogsReader | None = None
+    services: ComposedServiceLifecycle | None = None
 
     def actor_for_password() -> PostgresProjectActor:
-        nonlocal compose_reader, logs_reader
+        nonlocal compose_reader, logs_reader, services
         try:
             raw = sys.stdin.buffer.read(513)
             sys.stdin.close()
@@ -138,14 +142,27 @@ async def serve_postgres(
         if isinstance(settings, GuardedRuntimeSettings) and settings.compose_status is not None:
             compose_reader = compose_status_reader(settings.compose_status)
             logs_reader = compose_logs_reader(settings.compose_status)
-        if isinstance(settings, GuardedRuntimeSettings) and settings.backend is not None:
-            return PostgresExecutionActor(
+        if isinstance(settings, GuardedRuntimeSettings) and (
+            settings.backend is not None or settings.service_lifecycle is not None
+        ):
+            execution_actor = PostgresExecutionActor(
                 owner,
                 adapter,
                 settings,
                 on_commit=lambda: events.signal(),
                 settings_source=settings_source,
             )
+            try:
+                services = compose_service_lifecycle(
+                    settings.service_lifecycle,
+                    execution_actor,
+                    identity.instance_id,
+                    deadline=time.monotonic() + DEFAULT_RUNTIME_LIMITS.start_seconds,
+                )
+            except DockerBackendFault:
+                execution_actor.close()
+                raise StorageFault("settings_invalid") from None
+            return execution_actor
         return PostgresProjectActor(
             adapter,
             on_commit=lambda: events.signal(),
@@ -175,7 +192,7 @@ async def serve_postgres(
     )
     fresh: FreshExecutionService = PostgresReadback(projects, actor, identity.instance_id)
     inspection_only = True
-    if isinstance(actor, PostgresExecutionActor):
+    if isinstance(actor, PostgresExecutionActor) and actor.execution_backend is not None:
         configured = _runtime.create_configured_execution(
             owner=owner,
             storage=actor,
@@ -195,14 +212,20 @@ async def serve_postgres(
             compose_logs=logs_reader,
             process_ports=read_process_ports,
             process_list=read_process_list,
+            service_commands=services.commands if services is not None else None,
         ),
         fresh=fresh,
         inspection_only=inspection_only,
+        service_worker=services.worker if services is not None else None,
     )
     maintenance_stop = asyncio.Event()
-    server = _runtime.ControlServer(
-        owner, token, identity, actor.snapshot, on_stop=maintenance_stop.set
-    )
+
+    def on_stop() -> None:
+        maintenance_stop.set()
+        if services is not None:
+            services.relays.seal()
+
+    server = _runtime.ControlServer(owner, token, identity, actor.snapshot, on_stop=on_stop)
     server.events = events
     maintenance: asyncio.Task[None] | None = None
     try:
@@ -214,13 +237,20 @@ async def serve_postgres(
         await server.serve()
     finally:
         server.request_stop()
-        if maintenance is not None:
-            await maintenance
-        dispatcher.request_close()
-        while not dispatcher.closed or not runner.closed:
-            server.check_stop_budget()
-            await asyncio.sleep(0.01)
-        dispatcher.close(timeout=0)
+        try:
+            if maintenance is not None:
+                await maintenance
+            dispatcher.request_close()
+            while not dispatcher.closed or not runner.closed:
+                server.check_stop_budget()
+                await asyncio.sleep(0.01)
+            dispatcher.close(timeout=0)
+        finally:
+            try:
+                if services is not None:
+                    await asyncio.to_thread(services.relays.close_all, deadline=server.stop_deadline)
+            except TimeoutError:
+                raise ControlFault("runtime_stop_unconfirmed") from None
         actor.close()
 
 

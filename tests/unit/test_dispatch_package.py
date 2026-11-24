@@ -109,9 +109,11 @@ def test_dispatch_model_schemas_match_current_runtime_contract() -> None:
         if name == "ProjectCall" or "ProjectCall" in schema.get("$defs", {}):
             call = schema if name == "ProjectCall" else schema["$defs"]["ProjectCall"]
             props = call["properties"]
-            for operation in ("process.ports", "process.list", "docker.logs"):
+            for operation in ("process.ports", "process.list", "docker.logs", "service.lifecycle"):
                 props["operation"]["enum"].remove(operation)
-            del props["compose_service"]
+            del props["compose_service"], props["service_command"], schema["$defs"]["ServiceCommand"]
+            if not schema["$defs"]:
+                del schema["$defs"]
         if name == "DispatchReply":
             status_props = schema["$defs"]["ComposeStatusData"]["properties"]
             del status_props["health"], status_props["published_ports"]
@@ -125,9 +127,15 @@ def test_dispatch_model_schemas_match_current_runtime_contract() -> None:
             schema["properties"]["result"]["anyOf"].remove(
                 {"$ref": "#/$defs/ComposeLogsSuccess"}
             )
+            schema["properties"]["result"]["anyOf"].remove(
+                {"$ref": "#/$defs/ServiceCommandSuccess"}
+            )
             for added in (
                 "NativeListener", "ProcessPortsData", "ProcessPortsSuccess",
                 "ProcessListData", "ProcessListSuccess", "ComposeLogsData", "ComposeLogsSuccess",
+                "ServiceCommandSuccess", "ServiceReview", "ServiceWorkResult", "ServiceStart",
+                "ServiceStop", "ServiceRestart", "ServiceTarget", "ServiceResources", "ResourceIdentity",
+                "HealthRelayEndpoint", "HealthRelayGrant", "AuthorityState",
             ):
                 del schema["$defs"][added]
     assert _digest(schemas) == SCHEMA_DIGEST
@@ -144,6 +152,7 @@ def test_public_service_signatures_remain_identical() -> None:
         ", process_ports: jeff.application.process_ports.ProcessPortsReader | None = None",
         ", process_list: jeff.application.process_ports.ProcessListReader | None = None",
         ", compose_logs: jeff.application.compose_status.ComposeLogsReader | None = None",
+        ", service_commands: jeff.application.compose_service_commands.ServiceCommands | None = None",
     ):
         assert addition in signatures[key]
         signatures[key] = signatures[key].replace(addition, "")

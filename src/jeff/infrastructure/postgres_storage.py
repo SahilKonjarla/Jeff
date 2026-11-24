@@ -12,6 +12,12 @@ from threading import Lock, get_ident
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from jeff.application.compose_lifecycle import (
+    ServiceAttempt,
+    ServiceAuthorityOperation,
+    ServiceAuthorityResult,
+    ServiceEvent,
+)
 from jeff.application.execution import (
     AuthorityOperation,
     AuthorityResult,
@@ -44,6 +50,7 @@ from jeff.domain.projects import Project
 
 from . import postgres_activity as activity
 from . import postgres_execution as execution
+from . import postgres_service_lifecycle as services
 from .postgres_results import RESULT_DDL, PostgresExecutionResults
 from .postgres_watches import WATCH_DDL, PostgresWatches
 
@@ -216,6 +223,18 @@ class PostgresStorage:
             self._launch_claims.add(record.claim_id)
             return AuthorityResult(record=record, launch_claim=record.claim_id)
         return AuthorityResult(record=record)
+
+    def provision_service_journal(self, *, deadline: float) -> None:
+        """Explicit additive migration; never invoked by startup or discovery."""
+        services.provision(self, deadline=deadline)
+
+    def service_authority(
+        self, operation: ServiceAuthorityOperation, *, deadline: float
+    ) -> ServiceAuthorityResult:
+        return services.authority(self, operation, deadline=deadline)
+
+    def record_service(self, attempt: ServiceAttempt, event: ServiceEvent, *, deadline: float) -> None:
+        services.record(self, attempt, event, deadline=deadline)
 
     def record(self, event: DockerLaunchEvent, *, deadline: float) -> None:
         record = event.intent.record

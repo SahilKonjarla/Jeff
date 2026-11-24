@@ -5,6 +5,11 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
+from jeff.application.compose_service_commands import (
+    ServiceCommands,
+    ServiceCommandSuccess,
+    service_failure,
+)
 from jeff.application.compose_status import (
     ComposeLogsReader,
     ComposeLogsSuccess,
@@ -57,9 +62,11 @@ class ProjectDispatcher:
         process_ports: ProcessPortsReader | None = None,
         process_list: ProcessListReader | None = None,
         compose_logs: ComposeLogsReader | None = None,
+        service_commands: ServiceCommands | None = None,
     ) -> None:
         self.compose_status = compose_status
         self.compose_logs = compose_logs
+        self.service_commands = service_commands
         self.process_ports = process_ports
         self.process_list = process_list
         self.projects, self.questions, self.store, self.identity = (
@@ -130,6 +137,7 @@ class ProjectDispatcher:
             | ComposeLogsSuccess
             | ProcessPortsSuccess
             | ProcessListSuccess
+            | ServiceCommandSuccess
             | Failure,
             accepted: bool | None = False,
             receipt: Receipt | None = None,
@@ -144,6 +152,19 @@ class ProjectDispatcher:
 
         if call.operation == "config":
             return reply(self._config(call, absolute_deadline))
+        if call.operation == "service.lifecycle":
+            command = call.service_command
+            if self.service_commands is None or command is None:
+                return reply(service_failure())
+            target = self._bind(call, absolute_deadline)
+            if isinstance(target, Failure):
+                return reply(target)
+            try:
+                if self.store.lookup(target, deadline=absolute_deadline) is None:
+                    return reply(service_failure())
+            except StorageFault as error:
+                return reply(storage_failure(error.code))
+            return reply(self.service_commands.execute(target, call.request_id, command, absolute_deadline))
         if call.operation in ("process.ports", "process.list"):
             reader = self.process_ports if call.operation == "process.ports" else self.process_list
             prefix = call.operation.replace(".", "_")

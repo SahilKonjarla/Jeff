@@ -6,11 +6,17 @@ import os
 import time
 from pathlib import Path
 from typing import Never
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from typer.testing import CliRunner
 
+from jeff.application.compose_service_commands import (
+    ServiceCommand,
+    ServiceCommands,
+    ServiceCommandSuccess,
+)
+from jeff.application.compose_service_worker import ServiceWorkResult
 from jeff.application.compose_status import ComposeLogsData, ComposeStatusTarget, PublishedPort
 from jeff.application.dispatch import ProjectCall, ProjectDispatcher
 from jeff.application.execution import DockerBackendFault, DockerCLIIdentity
@@ -40,7 +46,7 @@ from .support_composition import composed
     "mode",
     [
         "found", "empty", "ambiguous", "unavailable", "foreign", "ports", "process-list",
-        "logs", "logs-disabled", "logs-other-service",
+        "logs", "logs-disabled", "logs-other-service", "service-apply",
     ],
 )
 def test_status_cli_via_authenticated_project_rpc(
@@ -111,6 +117,20 @@ def test_status_cli_via_authenticated_project_rpc(
             assert mode == "process-list" and target == project and deadline > time.monotonic()
             return ProcessListSuccess(data=ProcessListData(pids=(42,)))
 
+        service_commands = object.__new__(ServiceCommands) if mode == "service-apply" else None
+        approval = uuid4()
+
+        def apply(
+            target: Project, request_id: UUID, command: ServiceCommand, deadline: float
+        ) -> ServiceCommandSuccess:
+            assert target == project and deadline > time.monotonic()
+            assert command == ServiceCommand(operation="apply", approval_id=approval, digest="b" * 64)
+            return ServiceCommandSuccess(data=ServiceWorkResult(
+                request_id=request_id, outcome="running", terminal_recorded=True,
+            ))
+
+        if service_commands is not None:
+            monkeypatch.setattr(service_commands, "execute", apply)
         identity = RuntimeIdentityData(instance_id=coordinator.instance_id, pid=os.getpid())
         workers = RuntimeDispatcher(
             ProjectDispatcher(
@@ -122,6 +142,7 @@ def test_status_cli_via_authenticated_project_rpc(
                 compose_logs=composition.compose_logs_reader(target),
                 process_ports=ports,
                 process_list=processes,
+                service_commands=service_commands,
             )
         )
         layout = store.owner.store.layout
@@ -135,6 +156,13 @@ def test_status_cli_via_authenticated_project_rpc(
 
         def invoke() -> None:
             app = create_app(lambda: client, forbidden)
+            if mode == "service-apply":
+                result = CliRunner().invoke(app, [
+                    "docker", "service", "apply", str(approval), "--digest", "b" * 64, "--json",
+                ])
+                assert result.exit_code == 0, result.output
+                assert json.loads(result.stdout)["data"]["outcome"] == "running"
+                return
             if mode.startswith("logs"):
                 service = "other" if mode == "logs-other-service" else "api"
                 result = CliRunner().invoke(app, ["docker", "logs", service, "--json"])

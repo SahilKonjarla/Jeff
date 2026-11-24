@@ -1,9 +1,15 @@
 """Proof-only M03 authority and launch journal; never a Docker controller."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 from uuid import UUID, uuid4
 
+from jeff.application.compose_lifecycle import (
+    ServiceAction,
+    ServiceAuthorityOperation,
+    ServiceAuthorityRecord,
+    ServiceStart,
+)
 from jeff.application.execution import (
     AuthorityOperation,
     AuthorityRecord,
@@ -38,13 +44,37 @@ TTL_MS = 600_000
 def find_authority(
     connection: "Connection", key: UUID, *, by_claim: bool = False
 ) -> AuthorityRecord:
+    record = _find_authority(connection, key, by_claim=by_claim)
+    if not isinstance(record, AuthorityRecord):
+        raise ReviewFault("execution_not_found")
+    return record
+
+
+def find_service_authority(
+    connection: "Connection", key: UUID, *, by_claim: bool = False
+) -> ServiceAuthorityRecord:
+    record = _find_authority(connection, key, by_claim=by_claim)
+    if not isinstance(record, ServiceAuthorityRecord):
+        raise ReviewFault("execution_not_found")
+    return record
+
+
+def _decode_authority(payload: object) -> AuthorityRecord | ServiceAuthorityRecord:
+    if isinstance(payload, dict) and payload.get("kind") == "compose_service_v1":
+        return ServiceAuthorityRecord.model_validate(payload)
+    return AuthorityRecord.model_validate(payload)
+
+
+def _find_authority(
+    connection: "Connection", key: UUID, *, by_claim: bool
+) -> AuthorityRecord | ServiceAuthorityRecord:
     column = "claim_id" if by_claim else "approval_id"
     row = connection.execute(
         f"SELECT payload FROM jeff_proof.authorities WHERE {column}=%s", (key,)
     ).fetchone()
     if row is None:
         raise ReviewFault("execution_not_found")
-    record = AuthorityRecord.model_validate(row[0])
+    record = _decode_authority(row[0])
     if (record.claim_id if by_claim else record.approval_id) != key:
         raise StorageFault("storage_unrecognized")
     return record
@@ -60,21 +90,35 @@ def _registered(connection: "Connection", project: UUID, root: Path) -> bool:
     )
 
 
-def save_authority(connection: "Connection", record: AuthorityRecord) -> None:
+def save_authority(
+    connection: "Connection", record: AuthorityRecord | ServiceAuthorityRecord
+) -> None:
     connection.execute(
         "UPDATE jeff_proof.authorities SET claim_id=%s,payload=%s::jsonb WHERE approval_id=%s",
         (record.claim_id, record.model_dump_json(), record.approval_id),
     )
 
 
+@overload
 def decide(
-    connection: "Connection",
-    operation: AuthorityOperation,
-    owner: UUID,
-    now: int,
-    *,
-    live_proposals: set[UUID],
-) -> tuple[AuthorityRecord, bool]:
+    connection: "Connection", operation: AuthorityOperation, owner: UUID, now: int,
+    *, live_proposals: set[UUID],
+) -> tuple[AuthorityRecord, bool]: ...
+
+
+@overload
+def decide(
+    connection: "Connection", operation: ServiceAuthorityOperation, owner: UUID, now: int,
+    *, live_proposals: set[UUID],
+) -> tuple[ServiceAuthorityRecord, bool]: ...
+
+
+def decide(
+    connection: "Connection", operation: AuthorityOperation | ServiceAuthorityOperation,
+    owner: UUID, now: int, *, live_proposals: set[UUID],
+) -> tuple[AuthorityRecord | ServiceAuthorityRecord, bool]:
+    service_operation = isinstance(operation, ServiceAuthorityOperation)
+    find = find_service_authority if service_operation else find_authority
     if operation.owner_instance_id != owner or not _registered(
         connection, operation.project_id, operation.canonical_root
     ):
@@ -88,36 +132,16 @@ def decide(
         if prior is not None:
             if prior[0] != digest or not isinstance(prior[1], UUID):
                 raise ReviewFault("execution_conflict")
-            return find_authority(connection, prior[1]), False  # Replay is facts only.
+            return find(connection, prior[1]), False  # Replay is facts only.
     if operation.operation == "propose":
-        manifest = operation.manifest
-        if (
-            not isinstance(manifest, GuardedExecutionManifest)
-            or manifest.profile.project_id != operation.project_id
-            or manifest.profile.canonical_root != operation.canonical_root
-            or manifest.fingerprint != operation.current_manifest_digest
-        ):
-            raise ReviewFault("execution_target_mismatch")
-        record = AuthorityRecord(
-            proposal_id=uuid4(),
-            approval_id=uuid4(),
-            job_id=uuid4(),
-            project_id=operation.project_id,
-            canonical_root=operation.canonical_root,
-            owner_instance_id=owner,
-            manifest=manifest,
-            manifest_digest=manifest.fingerprint,
-            state=AuthorityState.PENDING,
-            created_at_ms=now,
-            expires_at_ms=now + TTL_MS,
-        )
+        record = _propose(operation, owner, now)
         connection.execute(
             "INSERT INTO jeff_proof.authorities VALUES (%s,NULL,%s::jsonb)",
             (record.approval_id, record.model_dump_json()),
         )
     else:
         assert operation.approval_id is not None
-        record = find_authority(connection, operation.approval_id)
+        record = find(connection, operation.approval_id)
         if (record.project_id, record.canonical_root) != (
             operation.project_id,
             operation.canonical_root,
@@ -149,6 +173,10 @@ def decide(
                 is not None
             ):
                 raise ReviewFault("execution_outcome_unknown")
+            if isinstance(record, ServiceAuthorityRecord) and not isinstance(record.manifest, ServiceStart):
+                from .postgres_service_lifecycle import validate_new_stop
+
+                validate_new_stop(connection, record.manifest)
             update: dict[str, object] = dict(
                 state=AuthorityState.CONSUMED,
                 claim_id=uuid4(),
@@ -161,13 +189,45 @@ def decide(
                 if operation.operation == "approve"
                 else AuthorityState.DENIED
             )
-        record = AuthorityRecord.model_validate(record.model_dump() | update)
+        record = type(record).model_validate(record.model_dump() | update)
         save_authority(connection, record)
     connection.execute(
         "INSERT INTO jeff_proof.authority_ops VALUES (%s,%s,%s)",
         (operation.request_id, digest, record.approval_id),
     )
     return record, True
+
+
+def _propose(
+    operation: AuthorityOperation | ServiceAuthorityOperation, owner: UUID, now: int
+) -> AuthorityRecord | ServiceAuthorityRecord:
+    action: ServiceAction | GuardedExecutionManifest | None
+    if isinstance(operation, ServiceAuthorityOperation):
+        action = operation.manifest
+        if action is None:
+            raise ReviewFault("execution_target_mismatch")
+        project, root, digest = action.target.project_id, action.target.root, action.digest
+        model: type[AuthorityRecord] | type[ServiceAuthorityRecord] = ServiceAuthorityRecord
+    else:
+        guarded = operation.manifest
+        if not isinstance(guarded, GuardedExecutionManifest):
+            raise ReviewFault("execution_target_mismatch")
+        action = guarded
+        project, root, digest = (
+            guarded.profile.project_id, guarded.profile.canonical_root, guarded.fingerprint
+        )
+        model = AuthorityRecord
+    if (project, root, digest) != (
+        operation.project_id, operation.canonical_root, operation.current_manifest_digest,
+    ):
+        raise ReviewFault("execution_target_mismatch")
+    return model.model_validate(
+        dict(
+            proposal_id=uuid4(), approval_id=uuid4(), job_id=uuid4(), project_id=project,
+            canonical_root=root, owner_instance_id=owner, manifest=action, manifest_digest=digest,
+            state=AuthorityState.PENDING, created_at_ms=now, expires_at_ms=now + TTL_MS,
+        )
+    )
 
 
 def launch_status(connection: "Connection", scope: DockerLaunchScope) -> DockerLaunchSnapshot:
@@ -297,11 +357,11 @@ def fence(connection: "Connection", prior_owner: UUID) -> int:
         (str(prior_owner),),
     ).fetchall()
     for (payload,) in rows:
-        record = AuthorityRecord.model_validate(payload)
+        record = _decode_authority(payload)
         change = (
             dict(claim_state="unknown")
             if record.claim_state == "claimed"
             else dict(state=AuthorityState.INVALIDATED)
         )
-        save_authority(connection, AuthorityRecord.model_validate(record.model_dump() | change))
+        save_authority(connection, type(record).model_validate(record.model_dump() | change))
     return len(rows)

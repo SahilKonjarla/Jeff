@@ -7,6 +7,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass
 
+from jeff.application.compose_service_worker import ServiceWork, ServiceWorker, ServiceWorkResult
 from jeff.application.dispatch import (
     DispatchReply,
     EvidenceQuery,
@@ -48,6 +49,7 @@ Call = (
     | ExecutionCall
     | ExecutionStartCall
     | FreshExecutionCall
+    | ServiceWork
 )
 Reply = (
     DispatchReply
@@ -57,14 +59,18 @@ Reply = (
     | ExecutionReply
     | ExecutionStartReply
     | FreshExecutionReply
+    | ServiceWorkResult
 )
 
 
 def _is_start(call: Call) -> bool:
     return (
-        isinstance(call, ExecutionStartCall)
+        isinstance(call, (ExecutionStartCall, ServiceWork))
         or isinstance(call, FreshExecutionCall)
         and call.operation == "start"
+        or isinstance(call, ProjectCall)
+        and call.service_command is not None
+        and call.service_command.operation == "apply"
     )
 
 
@@ -87,6 +93,7 @@ class RuntimeDispatcher:
         fresh: FreshExecutionService | None = None,
         fresh_factory: Callable[[], FreshExecutionService | Failure] | None = None,
         inspection_only: bool = False,
+        service_worker: ServiceWorker | None = None,
     ) -> None:
         self.dispatch = dispatch
         self.execution = execution
@@ -95,6 +102,7 @@ class RuntimeDispatcher:
             raise ValueError("Supply a fresh service or a startup factory, not both.")
         self.fresh = fresh
         self.inspection_only = inspection_only
+        self._service_worker = service_worker
         self.fresh_issue: Failure | None = None
         self._fresh_factory = fresh_factory
         self.initialization: Future[None] = Future()
@@ -167,6 +175,8 @@ class RuntimeDispatcher:
             ):
                 raise ControlFault("runtime_busy")
             if isinstance(call, FreshExecutionCall) and self.fresh is None:
+                raise ControlFault("runtime_capability_unavailable")
+            if isinstance(call, ServiceWork) and self._service_worker is None:
                 raise ControlFault("runtime_capability_unavailable")
             if _is_start(call):
                 if isinstance(call, FreshExecutionCall) and self.inspection_only:
@@ -244,6 +254,10 @@ class RuntimeDispatcher:
             if closing
             else "request_timeout"
         )
+        if isinstance(call, ServiceWork):
+            return ServiceWorkResult(
+                request_id=call.request_id, outcome="unknown" if unknown else "refused"
+            )
         if isinstance(call, FreshExecutionCall):
             return FreshExecutionReply(
                 ok=False,
@@ -379,6 +393,12 @@ class RuntimeDispatcher:
                     # only its observation future may finish at durable admission.
                     self._start_execution(work)
                     continue
+                elif isinstance(work.call, ServiceWork):
+                    result = (
+                        self._service_worker.execute(work.call, work.deadline)
+                        if self._service_worker is not None
+                        else self._refused(work.call)
+                    )
                 elif isinstance(work.call, FreshExecutionCall):
                     result = (
                         self.fresh.execute(work.call, work.deadline)

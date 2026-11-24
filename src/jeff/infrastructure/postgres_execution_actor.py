@@ -3,7 +3,15 @@
 from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Literal, TypeVar
+from uuid import UUID
 
+from jeff.application.compose_lifecycle import (
+    ServiceAttempt,
+    ServiceAuthorityOperation,
+    ServiceAuthorityResult,
+    ServiceEvent,
+    ExistingServiceAction,
+)
 from jeff.application.execution import (
     AuthorityOperation,
     AuthorityRecord,
@@ -28,7 +36,9 @@ from jeff.application.execution import (
 from jeff.application.storage import GuardedRuntimeSettings, StorageFault
 from jeff.infrastructure.runtime_state import Ownership
 
-from . import postgres_inspection
+from jeff.domain.projects import Project
+
+from . import postgres_inspection, postgres_service_lifecycle
 from .postgres_execution import find_authority
 from .postgres_project_actor import PostgresProjectActor
 from .postgres_storage import PostgresStorage
@@ -95,6 +105,32 @@ class PostgresExecutionActor(PostgresProjectActor):
                 return postgres_inspection.list_executions(connection, scope)
 
         return self._review(read, deadline)
+
+    def service_authority(
+        self, operation: ServiceAuthorityOperation, *, deadline: float
+    ) -> ServiceAuthorityResult:
+        return self._review(
+            lambda end: self._adapter.service_authority(operation, deadline=end),
+            deadline,
+            write=operation.operation != "show",
+        )
+
+    def service_stop_manifest(
+        self, project: Project, job_id: UUID, *, deadline: float, restart: bool = False
+    ) -> ExistingServiceAction:
+        return self._review(
+            lambda end: postgres_service_lifecycle.stop_manifest(
+                self._adapter, project, job_id, deadline=end, restart=restart
+            ),
+            deadline,
+        )
+
+    def record_service(self, attempt: ServiceAttempt, event: ServiceEvent, *, deadline: float) -> None:
+        self._review(
+            lambda end: self._adapter.record_service(attempt, event, deadline=end),
+            deadline,
+            write=True,
+        )
 
     def record(self, event: DockerLaunchEvent, *, deadline: float) -> None:
         try:

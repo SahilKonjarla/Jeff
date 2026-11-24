@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
+from jeff.application.compose_service_commands import ServiceCommandSuccess
 from jeff.application.compose_status import ComposeLogsSuccess, ComposeStatusSuccess
 from jeff.application.history import ActivityPage, ActivityTrace, HistoryPage
 from jeff.application.process_ports import ProcessListSuccess, ProcessPortsSuccess
@@ -74,7 +75,7 @@ class DispatchReply(_DispatchModel):
     accepted: StrictBool | None = False
     result: (
         Success | QuestionSuccess | ComposeStatusSuccess | ComposeLogsSuccess
-        | ProcessPortsSuccess | ProcessListSuccess | Failure
+        | ProcessPortsSuccess | ProcessListSuccess | ServiceCommandSuccess | Failure
     )
     receipt: Receipt | None = None
 

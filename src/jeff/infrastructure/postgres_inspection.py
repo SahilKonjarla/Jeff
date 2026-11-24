@@ -34,6 +34,8 @@ def lookup_proposal(connection: Connection, scope: ProposalRequestScope) -> Auth
     ).fetchone()
     if row is None:
         return None
+    if isinstance(row[0], dict) and row[0].get("kind") == "compose_service_v1":
+        raise ReviewFault("execution_conflict")
     record = AuthorityRecord.model_validate(row[0])
     expected = AuthorityOperation(
         operation="propose",
@@ -56,7 +58,7 @@ def lookup_proposal(connection: Connection, scope: ProposalRequestScope) -> Auth
 def list_executions(connection: Connection, scope: ExecutionListScope) -> FreshExecutionPage:
     where = (
         " FROM jeff_proof.authorities WHERE payload->>'project_id'=%s "
-        "AND payload->>'canonical_root'=%s"
+        "AND payload->>'canonical_root'=%s AND payload->>'kind' IS NULL"
     )
     stamp = "(payload->>'created_at_ms')::bigint"
     key = "(payload->>'proposal_id')"
@@ -125,7 +127,7 @@ def inspect(
 ) -> ExecutionInspection:
     base = (
         "SELECT payload FROM jeff_proof.authorities WHERE payload->>'project_id'=%s "
-        "AND payload->>'canonical_root'=%s "
+        "AND payload->>'canonical_root'=%s AND payload->>'kind' IS NULL "
     )
     params: tuple[object, ...] = (str(scope.project_id), str(scope.canonical_root))
     if scope.approval_id is not None:

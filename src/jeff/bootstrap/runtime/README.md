@@ -27,6 +27,16 @@ and one real pytest job through live logs, report persistence and notification
 ACK. Automatic retention runs on the existing PostgreSQL writer; it defers on
 suspect wall/monotonic clocks and does not retry an uncertain write.
 
+### M05 service lifecycle composition
+
+The optional settings4 `service_lifecycle` declaration selects one synthetic `sandbox-project/api` start manifest, pinned Docker executable, private Docker configuration and a separate mode-`0700` Docker HOME parent, and the reviewed non-secret fixture source. Bootstrap checks the binary identity and fixture configuration digest before composing the worker. This does not enable guarded command jobs, contact Docker at startup, or install the PostgreSQL service journal. Service proposals require the explicit two-table journal migration.
+
+From the registered fixture, use `jeff docker service propose-start api --json`, review the returned manifest and digest, then use `jeff docker service approve <approval-id> --digest <digest>` and `jeff docker service apply <approval-id> --digest <digest>`. Use `propose-stop <start-job-id>` to review a separate stop tied to the original identities. Stop leaves the exact container and network in place. `propose-restart <start-job-id>` reviews an in-place restart of a still-running container; successful apply records the same running resources before creating a new daemon-local relay. It cannot resume an explicitly stopped service. An unknown apply result is not permission to retry.
+
+Each daemon startup allocates a fresh, empty Docker HOME under that parent. Old caches are left untouched; startup refuses allocation once the parent contains 32 entries. Keep the parent dedicated to this service.
+
+Health relays are daemon-local. Shutdown closes their listeners and waits for active probes; it does not stop service containers. No relay address is restored from storage.
+
 ### Startup and backup
 
 Run PostgreSQL independently of Jeff. From a zsh terminal, read the password

@@ -6,12 +6,14 @@ from typing import Literal
 
 import typer
 
+from jeff.application.compose_service_commands import ServiceCommandSuccess
 from jeff.application.compose_status import ComposeLogsSuccess, ComposeStatusSuccess
 from jeff.application.dispatch import ProjectCall, ProjectClient
 from jeff.application.process_ports import ProcessListSuccess, ProcessPortsSuccess
 from jeff.application.projects import Failure, Success
 from jeff.application.questions import QuestionSuccess
 
+from . import service_commands
 from .invocation import invoke
 
 
@@ -35,7 +37,7 @@ def register(
             directory: Path,
         ) -> (
             Success | QuestionSuccess | ComposeStatusSuccess | ComposeLogsSuccess
-            | ProcessPortsSuccess | ProcessListSuccess | Failure
+            | ProcessPortsSuccess | ProcessListSuccess | ServiceCommandSuccess | Failure
         ):
             call = ProjectCall(
                 operation=operation, directory=directory, question=question,
@@ -59,7 +61,8 @@ def register(
         invoke(dispatch, json_output)
 
     docker_app = typer.Typer(no_args_is_help=True, rich_markup_mode=None)
-    app.add_typer(docker_app, name="docker", help="Inspect the project's declared Docker target.")
+    app.add_typer(docker_app, name="docker", help="Work with the project's declared Docker target.")
+    service_commands.register(docker_app, client)
 
     @docker_app.command("status")
     def docker_status(
